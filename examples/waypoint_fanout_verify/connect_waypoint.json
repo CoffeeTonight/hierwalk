@@ -1,0 +1,25 @@
+{
+  "top": "top",
+  "include_ff": false,
+  "connect_trace": false,
+  "checks": [
+    {
+      "id": "wp_dual_fanout",
+      "a": ["top.drv"],
+      "b": ["top.u_c", "top.u_c.din"],
+      "map": {"kind": "waypoint-fanout", "direction": "both", "path_kind": ["ff", "comb"]}
+    },
+    {
+      "id": "wp_drv_to_child",
+      "a": ["top.drv"],
+      "b": ["top.u_c", "top.u_c.din"],
+      "map": {"kind": "waypoint-fanout", "path_kind": "ff"}
+    },
+    {
+      "id": "wp_inst_origin",
+      "a": ["top.u_c"],
+      "b": ["top.u_c"],
+      "map": {"kind": "waypoint-fanout", "path_kind": "comb"}
+    }
+  ]
+}

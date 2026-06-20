@@ -1,0 +1,27 @@
+{
+  "filelist": "design.f",
+  "top": "top",
+  "run_conn_check": {
+    "enable": 1,
+    "mode": "path-walk",
+    "no_cache": true,
+    "checks": [
+      {
+        "id": "bit0",
+        "a": "top.u_mux.bus_out[0]",
+        "b": "top.wire_a"
+      },
+      {
+        "id": "bit1",
+        "a": "top.u_mux.bus_out[1]",
+        "b": "top.wire_b"
+      },
+      {
+        "id": "bit2",
+        "a": "top.u_mux.bus_out[2]",
+        "b": "top.wire_c"
+      }
+    ],
+    "output": "out_port_suffix.tsv"
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "filelist": "filelist.f",
+  "top": "stress_top",
+  "defines": {
+    "STRESS_USE_IN": "1",
+    "STRESS_ALT": "0"
+  },
+
+  "run_on_full_index": {
+    "enable": 0,
+    "mode": "hierarchy",
+    "no_cache": true,
+    "jobs": 4,
+    "output": "VERIFY_gate_instances.tsv"
+  },
+
+  "run_conn_check": {
+    "enable": 1,
+    "mode": "path-walk",
+    "checks": [
+      {
+        "id": "gate_conn",
+        "a": "stress_top.probe_in",
+        "b": "stress_top.u_spine.u_spine.u_spine.u_spine.u_spine.u_spine.u_spine.u_spine.probe_out"
+      }
+    ],
+    "output": "VERIFY_gate_conn.tsv"
+  },
+
+  "run_io_trace": {
+    "enable": 1,
+    "mode": "path-walk",
+    "instance": "stress_top.u_spine",
+    "direction": "driver",
+    "path_kind": "ff",
+    "output": "VERIFY_gate_trace.tsv"
+  },
+
+  "run_cone_trace": {
+    "enable": 0,
+    "mode": "path-walk",
+    "fanout_cone": "stress_top.probe_in",
+    "output": "VERIFY_gate_cone.tsv"
+  }
+}

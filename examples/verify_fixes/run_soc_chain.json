@@ -1,0 +1,17 @@
+{
+  "filelist": "design.f",
+  "top": "SOC_TOP",
+  "run_conn_check": {
+    "enable": 1,
+    "mode": "path-walk",
+    "no_cache": true,
+    "checks": [
+      {
+        "id": "soc_leaf",
+        "a": "SOC_TOP.u_abd_inst.u_def_inst.u_ghi_inst",
+        "b": "SOC_TOP.u_abd_inst.u_def_inst.u_ghi_inst"
+      }
+    ],
+    "output": "out_soc_chain.tsv"
+  }
+}

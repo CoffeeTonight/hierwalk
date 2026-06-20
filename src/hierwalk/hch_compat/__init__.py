@@ -1,0 +1,1 @@
+"""Vendored hc_hierarchy filelist expansion (VCS -f/-F semantics)."""

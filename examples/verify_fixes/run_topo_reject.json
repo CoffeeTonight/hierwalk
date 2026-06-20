@@ -1,0 +1,17 @@
+{
+  "filelist": "design.f",
+  "top": "top",
+  "run_conn_check": {
+    "enable": 1,
+    "mode": "path-walk",
+    "no_cache": true,
+    "checks": [
+      {
+        "id": "topo_fake",
+        "a": "topo.u",
+        "b": "topo.u"
+      }
+    ],
+    "output": "out_topo_reject.tsv"
+  }
+}

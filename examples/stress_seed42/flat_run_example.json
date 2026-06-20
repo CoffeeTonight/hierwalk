@@ -1,0 +1,71 @@
+{
+  "filelist": "filelist.f",
+  "top": "stress_top",
+  "defines": {
+    "STRESS_USE_IN": "1",
+    "STRESS_ALT": "0"
+  },
+
+  // Runnable: run_conn_check only (path-walk). / 실행: path-walk 연결 검사만.
+  //   hier-walk flat_run_example.json
+  //
+  // Path-walk jobs / DB env → path_walk_example.json (this directory)
+  // path-walk jobs·DB env → path_walk_example.json (이 디렉터리)
+
+  // --- run_on_full_index: full filelist index + elaboration dump ---
+  // "run_on_full_index": {
+  //   "enable": 1,
+  //   "mode": "hierarchy",
+  //   "ignore_path": [],
+  //   "ignore_module": [],
+  //   "ignore_filelist": [],
+  //   "jobs": 0,
+  //   "no_cache": true,
+  //   "output": "example_instances.tsv"
+  // },
+  // mode alternatives: "search" (needs search/search_path), "find-top"
+
+  // --- run_io_trace: instance driver/sinker trace ---
+  // "run_io_trace": {
+  //   "enable": 1,
+  //   "mode": "path-walk",
+  //   "instance": "stress_top.u_spine",
+  //   "direction": "both",
+  //   "path_kind": "ff",
+  //   "output": "example_trace.tsv"
+  // },
+  // direction: driver | sinker | both
+  // path_kind: ff | comb
+
+  // --- run_cone_trace: fanin/fanout COI cone (pick one endpoint) ---
+  // "run_cone_trace": {
+  //   "enable": 1,
+  //   "mode": "path-walk",
+  //   "fanout_cone": "stress_top.probe_in",
+  //   "output": "example_cone.tsv"
+  // },
+  // or fanin: "fanin_cone": "stress_top.u_spine.u_spine.internal_net"
+  // optional: "cone_graph": "example_cone.dot"
+
+  "run_conn_check": {
+    "enable": 1,
+    "mode": "path-walk",
+    "include_ff": true,
+    "connect_trace": false,
+    "checks": [
+      {
+        "id": "port_port",
+        "a": "stress_top.probe_in",
+        "b": "stress_top.u_spine.u_spine.u_spine.u_spine.u_spine.u_spine.u_spine.u_spine.probe_out"
+      },
+      {
+        "id": "missing_hierarchy",
+        "a": "stress_top.u_missing.probe_in",
+        "b": "stress_top.u_spine.u_spine.u_spine.u_spine.u_spine.u_spine.u_spine.u_spine.probe_out"
+      }
+    ],
+    "output": "example_conn.tsv"
+  }
+  // run_conn_check mode: "path-walk" (default) | "full-index"
+  // connect_trace: true  -> hop path evidence on terminal + TSV hops column
+}

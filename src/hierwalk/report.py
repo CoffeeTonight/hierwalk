@@ -1,0 +1,231 @@
+"""End-of-run summary report for hier-walk."""
+
+from __future__ import annotations
+
+import sys
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import List, Optional, Sequence, TextIO, Tuple
+
+from hierwalk.coverage_audit import CoverageAuditResult
+from hierwalk.filelist import FilelistResult
+from hierwalk.index import DesignIndex
+from hierwalk.hierarchy_log import format_hierarchy_rows_report
+from hierwalk.models import FlatRow, SearchHit
+from hierwalk.path_chain import format_path_chain_report
+from hierwalk.progress import format_duration, format_hierwalk_log
+
+
+def format_bytes(num: int) -> str:
+    if num < 1024:
+        return f"{num} B"
+    if num < 1024 * 1024:
+        return f"{num / 1024:.1f} KB"
+    if num < 1024 * 1024 * 1024:
+        return f"{num / (1024 * 1024):.1f} MB"
+    return f"{num / (1024 * 1024 * 1024):.2f} GB"
+
+
+def cache_file_size(path: Optional[Path]) -> Optional[int]:
+    if path is None or not path.is_file():
+        return None
+    try:
+        return path.stat().st_size
+    except OSError:
+        return None
+
+
+def index_body_bytes(index: DesignIndex) -> int:
+    return sum(len(rec.body) for rec in index.modules.values())
+
+
+@dataclass
+class RunReport:
+    filelist_path: str
+    elapsed_sec: float
+    fl: FilelistResult
+    index: DesignIndex
+    cache_path: Optional[Path] = None
+    cache_enabled: bool = True
+    index_cache_hit: bool = False
+    index_rebuilt: bool = False
+    index_incremental: bool = False
+    elab_tops: Sequence[str] = ()
+    elab_cache_hits: int = 0
+    instance_rows: int = 0
+    search_hits: Optional[int] = None
+    search_pattern: Optional[str] = None
+    search_hit_details: Sequence[SearchHit] = ()
+    top_candidates: Optional[int] = None
+    mode: str = "hierarchy"
+    output_path: str = "-"
+    filelist_warnings: int = 0
+    coverage: Optional[CoverageAuditResult] = None
+    hierarchy_rows: Sequence[FlatRow] = ()
+
+    def lines(self) -> List[str]:
+        out: List[str] = []
+        out.append("--- hier-walk report ---")
+        out.append(f"Elapsed:       {format_duration(self.elapsed_sec)}")
+        out.append(f"Mode:          {self.mode}")
+        out.append(f"Filelist:      {self.filelist_path}")
+        if self.fl.index_cwd_used:
+            out.append(f"Index cwd:     {self.fl.index_cwd_used}")
+        if self.output_path != "-":
+            out.append(f"Output:        {self.output_path}")
+
+        out.append("")
+        out.append("Inventory")
+        out.append(f"  RTL sources:   {len(self.fl.source_files)}")
+        out.append(f"  Modules:       {len(self.index.modules)}")
+        out.append(f"  Filelists:     {len(self.fl.filelist_info)}")
+        out.append(f"  Include dirs:  {len(self.fl.include_dirs)}")
+        out.append(f"  Defines:       {len(self.fl.defines)}")
+        if self.fl.library_files or self.fl.library_dirs:
+            out.append(
+                f"  Libraries:     {len(self.fl.library_files)} -v, "
+                f"{len(self.fl.library_dirs)} -y"
+            )
+
+        body_b = index_body_bytes(self.index)
+        out.append(f"  Index body:    {format_bytes(body_b)} (in memory)")
+
+        out.append("")
+        out.append("Filelist linking")
+        edges = self._sorted_filelist_edges()
+        if not edges:
+            out.append("  (none)")
+        else:
+            for parent, child, kind in edges:
+                parent_name = Path(parent).name
+                child_name = Path(child).name
+                out.append(f"  {parent_name} {kind} {child_name}")
+
+        out.append("")
+        out.append("Index cache")
+        if not self.cache_enabled:
+            out.append("  Status:        disabled (--no-cache)")
+        else:
+            if self.index_cache_hit:
+                status = "hit (loaded)"
+            elif self.index_incremental:
+                status = "incremental"
+            elif self.index_rebuilt:
+                status = "miss (rebuilt)"
+            else:
+                status = "miss"
+            out.append(f"  Status:        {status}")
+            if self.cache_path is not None:
+                out.append(f"  Path:          {self.cache_path}")
+            size = cache_file_size(self.cache_path)
+            if size is not None:
+                out.append(f"  Size:          {format_bytes(size)}")
+            elab_cached = self.elab_cache_hits
+            elab_total = len(self.elab_tops)
+            if elab_total:
+                out.append(f"  Elab cached:   {elab_cached}/{elab_total} tops")
+
+        out.append("")
+        out.append("Execution")
+        out.append(f"  Index workers: {self.index.index_jobs}")
+        if self.top_candidates is not None:
+            out.append(f"  Top candidates:{self.top_candidates}")
+        if self.elab_tops:
+            tops = ", ".join(self.elab_tops)
+            out.append(f"  Elab tops:     {tops}")
+        if self.instance_rows:
+            out.append(f"  Instances:     {self.instance_rows}")
+        if self.hierarchy_rows:
+            out.append("")
+            cap = 200 if len(self.hierarchy_rows) > 200 else None
+            out.extend(
+                format_hierarchy_rows_report(
+                    self.hierarchy_rows,
+                    limit=cap,
+                    title="Hierarchy (rtl + filelist per node)",
+                )
+            )
+        if self.search_hits is not None:
+            pat = self.search_pattern or ""
+            out.append(f"  Search:        {self.search_hits} hits ({pat!r})")
+
+        mapped_hits = [h for h in self.search_hit_details if h.path_chain]
+        if mapped_hits:
+            out.append("")
+            out.append("Search path mapping")
+            for hit in mapped_hits:
+                out.append(f"  {hit.full_path}")
+                out.extend(format_path_chain_report(hit.path_chain))
+
+        if self.filelist_warnings:
+            out.append("")
+            out.append(f"Warnings:      {self.filelist_warnings} filelist issue(s)")
+
+        if self.coverage is not None:
+            out.append("")
+            out.extend(self.coverage.summary_lines())
+
+        out.append("---")
+        return out
+
+    def _sorted_filelist_edges(self) -> List[Tuple[str, str, str]]:
+        edges = list(self.fl.filelist_edges)
+        edges.sort(key=lambda e: (Path(e[0]).name, e[2], Path(e[1]).name))
+        return edges
+
+
+def default_log_path(filelist_path: str, output_path: str = "-") -> Path:
+    """Default report log beside TSV output or top filelist."""
+    if output_path != "-":
+        out = Path(output_path).resolve()
+        return out.parent / f"{out.name}.hier-walk.log"
+    fl = Path(filelist_path).resolve()
+    return fl.parent / f"{fl.stem}.hier-walk.log"
+
+
+def write_run_report_log(
+    report: RunReport,
+    log_path: Path,
+    *,
+    append: bool = True,
+) -> None:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    lines = report.lines()
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    mode = "a" if append else "w"
+    with log_path.open(mode, encoding="utf-8") as fh:
+        if append:
+            fh.write(f"\n# hier-walk run {stamp}\n")
+        else:
+            fh.write(f"# hier-walk run {stamp}\n")
+        fh.write("\n".join(lines))
+        fh.write("\n")
+
+
+def emit_run_report(
+    report: RunReport,
+    *,
+    stream: Optional[TextIO] = None,
+    log_path: Optional[Path] = None,
+    append_log: bool = True,
+    announce_log: bool = True,
+) -> Optional[Path]:
+    """Print report to stderr and optionally append to a log file."""
+    target = stream or sys.stderr
+    for line in report.lines():
+        print(line, file=target, flush=True)
+    if log_path is None:
+        return None
+    write_run_report_log(report, log_path, append=append_log)
+    if announce_log:
+        print(format_hierwalk_log(f"report logged: {log_path}"), file=target, flush=True)
+    return log_path
+
+
+def print_run_report(
+    report: RunReport,
+    *,
+    stream: Optional[TextIO] = None,
+) -> None:
+    emit_run_report(report, stream=stream, log_path=None, announce_log=False)

@@ -1,0 +1,19 @@
+{
+  "filelist": "filelist.f",
+  "top": "top",
+
+  "run_conn_check": {
+    "enable": 1,
+    "mode": "path-walk",
+    "checks": [
+      {"id": "simple", "a": "top.clk", "b": "top.a"},
+      {"id": "fanout", "a": "top.src", "b": ["top.d0", "top.d1"]},
+      {"id": "array", "a": ["top.a", "top.b"], "b": "top.bus_b[1:0]"},
+      {"id": "concat_str", "a": "{top.a, 1'b0, 2'h0, 3'h7, top.b}", "b": "top.bus_b[1:0]"},
+      {"id": "loop_range", "a": "top.tie{I}", "b": "top.ref", "loop": {"I": "0:3"}},
+      {"id": "loop_list", "a": "top.tie{I}", "b": "top.ref", "loop": {"I": [0, 1, 2, 3]}},
+      {"id": "loop_csv", "a": "top.{I}{J}", "b": "top.ref", "loop": {"I": "x,y", "J": "A,B"}}
+    ],
+    "output": "out_pw_connect.tsv"
+  }
+}

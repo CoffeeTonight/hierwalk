@@ -1,0 +1,17 @@
+{
+  "filelist": "filelist.f",
+  "top": "top",
+  "run_conn_check": {
+    "enable": 1,
+    "mode": "full-index",
+    "checks": [
+      {
+        "id": "wp_drv_to_child",
+        "a": ["top.drv"],
+        "b": ["top.u_c", "top.u_c.din"],
+        "map": {"kind": "waypoint-fanout", "path_kind": "ff"}
+      }
+    ],
+    "output": "out_waypoint_fanout.tsv"
+  }
+}

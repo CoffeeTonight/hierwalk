@@ -1,0 +1,17 @@
+{
+  "filelist": "array_base.f",
+  "top": "top",
+  "run_conn_check": {
+    "enable": 1,
+    "mode": "path-walk",
+    "no_cache": true,
+    "checks": [
+      {
+        "id": "core_base",
+        "a": "top.u_core[0].data[0]",
+        "b": "top.u_core[0].data[0]"
+      }
+    ],
+    "output": "out_array_base.tsv"
+  }
+}

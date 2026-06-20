@@ -1,0 +1,51 @@
+{
+  // path-walk connect + tuning (runnable from THIS directory)
+  // path-walk 연결 검사 + 옵션 예제 (이 디렉터리에서 실행)
+  //   hier-walk path_walk_example.json
+  //
+  // Path-walk = hierarchy on endpoint paths only (not full filelist index).
+  // path-walk = endpoint 경로에 필요한 hierarchy만 구축 (filelist 전체 인덱스 아님).
+  //
+  // | field | EN | KO |
+  // | jobs  | Parallel walk at instance branches. 0|1=off, 4=up to 4 (-j). | 인스턴스 분기에서 병렬 walk. 0|1=끔, 4=최대 4 (-j). |
+  // | env   | Optional env overrides (keys below). | 선택 env (아래 키). shell export와 동일. |
+  //
+  // | env key | value | EN | KO |
+  // | HIERWALK_PW_DB_BUILD | off | Default; RTL on paths only. | 기본. 경로에 닿는 RTL만. 대형 설계 권장. |
+  // | HIERWALK_PW_DB_BUILD | after_verify | After check: tier-1 warm rest of filelist. | 검증 후 filelist 나머지 tier-1 스캔. |
+  // | HIERWALK_PW_DB_PREFETCH_MAX | e.g. 500 | Cap after_verify files (0=no cap). | after_verify 파일 수 상한 (0=무제한). |
+  //
+  // run_conn_check.mode must be "path-walk".
+  // connect_trace: true → walk/connect 상세 로그 (병렬 fork·worker j=N 로그 포함).
+
+  "filelist": "filelist.f",
+  "top": "stress_top",
+  "defines": {
+    "STRESS_USE_IN": "1",
+    "STRESS_ALT": "0"
+  },
+
+  "jobs": 0,
+
+  "env": {
+    "HIERWALK_PW_DB_BUILD": "off"
+  },
+
+  "run_conn_check": {
+    "enable": 1,
+    "mode": "path-walk",
+    "connect_trace": false,
+    "checks": [
+      {
+        "id": "spine",
+        "a": "stress_top.probe_in",
+        "b": "stress_top.u_spine.u_spine.u_spine.u_spine.u_spine.u_spine.u_spine.u_spine.probe_out"
+      }
+    ],
+    "output": "path_walk_example_conn.tsv"
+  }
+
+  // Advanced / 고급:
+  //   "jobs": 4, "connect_trace": true   — parallel walk + trace / 병렬 walk + trace
+  //   "env": { "HIERWALK_PW_DB_BUILD": "after_verify", "HIERWALK_PW_DB_PREFETCH_MAX": "500" }
+}

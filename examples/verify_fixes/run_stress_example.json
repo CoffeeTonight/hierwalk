@@ -1,0 +1,22 @@
+{
+  "filelist": "../stress_seed42/filelist.f",
+  "top": "stress_top",
+  "defines": {
+    "STRESS_USE_IN": "1",
+    "STRESS_ALT": "0"
+  },
+  "run_conn_check": {
+    "enable": 1,
+    "mode": "path-walk",
+    "no_cache": true,
+    "include_ff": true,
+    "checks": [
+      {
+        "id": "deep_spine",
+        "a": "stress_top.probe_in",
+        "b": "stress_top.u_spine.u_spine.u_spine.u_spine.u_spine.u_spine.u_spine.u_spine.probe_out"
+      }
+    ],
+    "output": "out_stress.tsv"
+  }
+}

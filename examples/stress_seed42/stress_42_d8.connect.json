@@ -1,0 +1,32 @@
+{
+  "top": "stress_top",
+  "defines": {
+    "STRESS_USE_IN": "1",
+    "STRESS_ALT": "0"
+  },
+  "include_ff": true,
+  "connect_trace": false,
+  "strict_generate": false,
+  "checks": [
+    {
+      "a": "stress_top.probe_in",
+      "b": "stress_top.u_spine.u_spine.u_spine.u_spine.u_spine.u_spine.u_spine.u_spine.probe_out",
+      "id": "port_port"
+    },
+    {
+      "a": "stress_top.probe_in",
+      "b": "stress_top.u_spine.u_spine.u_spine.u_spine.u_spine.u_spine.u_spine.u_spine",
+      "id": "port_inst"
+    },
+    {
+      "a": "stress_top.probe_in",
+      "b": "stress_top.u_spine.u_spine.u_spine.u_spine.u_spine.u_spine.u_spine.u_spine.probe_out",
+      "id": "cross_hierarchy"
+    },
+    {
+      "a": "stress_top.u_missing.probe_in",
+      "b": "stress_top.u_spine.u_spine.u_spine.u_spine.u_spine.u_spine.u_spine.u_spine.probe_out",
+      "id": "missing_hierarchy"
+    }
+  ]
+}

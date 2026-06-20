@@ -1,0 +1,17 @@
+{
+  "filelist": "param_design.f",
+  "top": "top",
+  "run_conn_check": {
+    "enable": 1,
+    "mode": "path-walk",
+    "no_cache": true,
+    "checks": [
+      {
+        "id": "arr0_data",
+        "a": "top.u_arr[0].data[7]",
+        "b": "top.u_arr[0].data[7]"
+      }
+    ],
+    "output": "out_param_array.tsv"
+  }
+}

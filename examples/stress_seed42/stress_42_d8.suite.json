@@ -1,0 +1,47 @@
+{
+  "filelist": "filelist.f",
+  "top": "stress_top",
+  "defines": {
+    "STRESS_USE_IN": "1",
+    "STRESS_ALT": "0"
+  },
+  "run_on_full_index": {
+    "enable": 0,
+    "mode": "hierarchy",
+    "no_cache": true,
+    "jobs": 0,
+    "output": "suite_instances.tsv"
+  },
+  "run_conn_check": {
+    "enable": 1,
+    "mode": "path-walk",
+    "include_ff": true,
+    "checks": [
+      {
+        "id": "port_port",
+        "a": "stress_top.probe_in",
+        "b": "stress_top.u_spine.u_spine.u_spine.u_spine.u_spine.u_spine.u_spine.u_spine.probe_out"
+      },
+      {
+        "id": "missing_hierarchy",
+        "a": "stress_top.u_missing.probe_in",
+        "b": "stress_top.u_spine.u_spine.u_spine.u_spine.u_spine.u_spine.u_spine.u_spine.probe_out"
+      }
+    ],
+    "output": "suite_conn.tsv"
+  },
+  "run_io_trace": {
+    "enable": 1,
+    "mode": "path-walk",
+    "instance": "stress_top.u_spine",
+    "direction": "both",
+    "path_kind": "ff",
+    "output": "suite_trace.tsv"
+  },
+  "run_cone_trace": {
+    "enable": 1,
+    "mode": "path-walk",
+    "fanout_cone": "stress_top.probe_in",
+    "output": "suite_cone.tsv"
+  }
+}
