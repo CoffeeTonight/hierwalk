@@ -1,7 +1,7 @@
 # hierwalk
 
-**EN** RTL hierarchy path-walk and structural connectivity verification (no pyslang).  
-**KO** RTL hierarchy path-walk · 구조적 connectivity 검증 도구 (pyslang 없음).
+**EN** RTL hierarchy path-walk and structural connectivity verification (only regex).  
+**KO** RTL hierarchy path-walk · 구조적 connectivity 검증 도구 (only regex).
 
 ```bash
 pip install -e .
