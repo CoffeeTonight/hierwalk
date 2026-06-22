@@ -303,6 +303,48 @@ def test_first_child_edge_skips_scoped_tier0_when_parent_seeded(tmp_path: Path, 
     assert tier0_calls == []
 
 
+def test_selective_inst_find_uses_raw_not_full_preprocess(tmp_path: Path, monkeypatch):
+    fl_path = _write_large_flat_top(tmp_path, n_inst=200)
+    fl = parse_filelist(str(fl_path), index_cwd=str(tmp_path))
+    preprocess_calls: list[str] = []
+
+    from hierwalk.preprocess import preprocess_file_for_index
+
+    orig = preprocess_file_for_index
+
+    def traced_preprocess(path, *args, **kwargs):
+        preprocess_calls.append(str(path))
+        return orig(path, *args, **kwargs)
+
+    monkeypatch.setattr(
+        "hierwalk.preprocess.preprocess_file_for_index",
+        traced_preprocess,
+    )
+    from hierwalk.path_walk_db import PathWalkModuleDb
+
+    monkeypatch.setattr(PathWalkModuleDb, "_warm_tier1_background", lambda self, _f: None)
+    monkeypatch.setattr(PathWalkModuleDb, "tier1_scan_file", lambda self, _p: {})
+
+    index, mod_db = create_path_walk_index(
+        fl,
+        "SOC_TOP",
+        defines={},
+        no_cache=True,
+        jobs=1,
+        diagnostic_inst_trace=True,
+    )
+    preprocess_calls.clear()
+    edge = mod_db.resolve_child_edge(
+        "SOC_TOP",
+        {},
+        "u_ip_50",
+        current_file=str((tmp_path / "top.v").resolve()),
+        policy=RESOLVE_CONFIDENT,
+    )
+    assert edge is not None
+    assert preprocess_calls == []
+
+
 def test_inst_find_emits_preprocess_and_scan_trace(tmp_path: Path):
     fl_path = _write_large_flat_top(tmp_path, n_inst=50)
     fl = parse_filelist(str(fl_path), index_cwd=str(tmp_path))
@@ -319,12 +361,14 @@ def test_inst_find_emits_preprocess_and_scan_trace(tmp_path: Path):
         no_cache=True,
         jobs=1,
         trace_stream=buf,
+        diagnostic_inst_trace=True,
     )
     text = buf.getvalue()
     assert "pw-db inst-resolve enter SOC_TOP.u_ip_10" in text
     assert "pw-db inst-find enter SOC_TOP.u_ip_10" in text
     assert "pw-db inst-find done SOC_TOP.u_ip_10" in text
     assert "pw-db preprocess" in text
+    assert "source=raw" in text
 
 
 def test_inst_leaf_index_avoids_repeat_selective_scan(tmp_path: Path, monkeypatch):

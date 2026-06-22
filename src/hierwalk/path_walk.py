@@ -2382,8 +2382,9 @@ def _path_walk_trace_emit(
     trace_stream: Optional[TextIO] = None,
     trace_log_fh: Optional[TextIO] = None,
     on_progress: Optional[Callable[[str], None]] = None,
+    force: bool = False,
 ) -> None:
-    if not message or not path_walk_trace_show_message(message):
+    if not message or (not force and not path_walk_trace_show_message(message)):
         return
     streams: List[TextIO] = []
     if trace_stream is not None:
@@ -2635,6 +2636,7 @@ def create_path_walk_index(
     trace_log_fh: Optional[TextIO] = None,
     path_digests: Mapping[str, str] | None = None,
     jobs: int = 0,
+    diagnostic_inst_trace: bool = False,
 ) -> Tuple[DesignIndex, PathWalkModuleDb]:
     from hierwalk.manifest import hash_paths_parallel, set_digest_scope
     path_patterns, module_patterns, filelist_patterns = resolve_ignore_path_patterns(
@@ -2672,10 +2674,27 @@ def create_path_walk_index(
     )
     sources = [str(Path(p).resolve()) for p in fl.source_files]
     if path_digests is None:
+        t_hash = time.perf_counter()
         if on_progress:
             on_progress(f"path-walk: hashing {len(sources)} sources")
+        if diagnostic_inst_trace:
+            _path_walk_trace_emit(
+                f"pw-db startup hashing {len(sources)} source(s)",
+                trace_stream=trace_stream,
+                trace_log_fh=trace_log_fh,
+                on_progress=on_progress,
+                force=True,
+            )
         path_digests = hash_paths_parallel(sources, jobs=jobs)
         set_digest_scope(path_digests)
+        if diagnostic_inst_trace:
+            _path_walk_trace_emit(
+                f"pw-db startup hashing done ms={(time.perf_counter() - t_hash) * 1000.0:.1f}",
+                trace_stream=trace_stream,
+                trace_log_fh=trace_log_fh,
+                on_progress=on_progress,
+                force=True,
+            )
     cache_key = path_walk_db_cache_key(
         sources,
         defines=defines,
@@ -2711,6 +2730,7 @@ def create_path_walk_index(
         },
         path_digests=path_digests,
         jobs=jobs,
+        diagnostic_inst_trace=diagnostic_inst_trace,
     )
     from hierwalk.progress import ProgressHeartbeat
 
@@ -2750,6 +2770,7 @@ def run_path_walk_connect(
     trace_log_path: Optional[Path] = None,
     reuse_suite_session: bool = False,
     jobs: int = 0,
+    diagnostic_inst_trace: bool = False,
 ) -> Tuple[ConnectivityBatchResult, DesignIndex, PathWalkState]:
     """
     Path-walk batch connectivity: on-demand RTL + shared :class:`ConnectivitySession`.
@@ -2760,6 +2781,7 @@ def run_path_walk_connect(
     defines = dict(fl.defines)
     defines.update(extra_defines or {})
     defines.update(request.defines)
+    diag_trace = diagnostic_inst_trace or request.trace or request.connect_log
 
     trace_log_fh: Optional[TextIO] = None
     opened_log = False
@@ -2784,6 +2806,7 @@ def run_path_walk_connect(
                 trace_stream=trace_stream,
                 trace_log_fh=trace_log_fh,
                 jobs=jobs,
+                diagnostic_inst_trace=diag_trace,
             )
             index = session.index
             top_name = session.top_name
@@ -2809,6 +2832,7 @@ def run_path_walk_connect(
                 trace_stream=trace_stream,
                 trace_log_fh=trace_log_fh,
                 jobs=jobs,
+                diagnostic_inst_trace=diag_trace,
             )
             tops = resolve_top_modules(index, top=top, filelist_tops=fl.top_modules)
             top_name = tops[0]

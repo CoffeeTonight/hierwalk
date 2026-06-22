@@ -215,6 +215,9 @@ def execute_run(cfg: RunConfig, ap) -> int:
         if not top_for_walk:
             print("path-walk requires --top or JSON top", file=sys.stderr)
             return 2
+        pw_trace = (
+            not cfg.quiet or cfg.connect_trace or cfg.connect_log
+        )
         pw_ignore = dict(
             ignore_paths=list(cfg.ignore_path),
             ignore_path_files=list(cfg.ignore_path_file),
@@ -223,8 +226,9 @@ def execute_run(cfg: RunConfig, ap) -> int:
             cache_dir=cache_dir,
             no_cache=not use_cache,
             on_progress=on_progress,
-            trace_stream=sys.stderr if not cfg.quiet else None,
+            trace_stream=sys.stderr if pw_trace else None,
             trace_log_path=log_path,
+            diagnostic_inst_trace=cfg.connect_trace or cfg.connect_log,
         )
         compile_defines = dict(fl.defines)
         compile_defines.update(extra_defines)

@@ -294,6 +294,7 @@ class PathWalkModuleDb:
         no_cache: bool = False,
         on_trace: Optional[Callable[[str], None]] = None,
         on_progress: Optional[Callable[[str], None]] = None,
+        diagnostic_inst_trace: bool = False,
         file_via_filelist: Optional[Mapping[str, str]] = None,
         filelist_children: Optional[Mapping[str, Sequence[str]]] = None,
         path_digests: Optional[Mapping[str, str]] = None,
@@ -312,6 +313,9 @@ class PathWalkModuleDb:
         self._defines_digest = _defines_digest(self._defines)
         self._on_trace = on_trace
         self._on_progress = on_progress
+        self._diagnostic_inst_trace = diagnostic_inst_trace
+        self._raw_text_for_inst_cache: Dict[str, str] = {}
+        self._include_digest_cache: Dict[str, str] = {}
         self._file_via_filelist: Dict[str, str] = dict(file_via_filelist or {})
         self._filelist_children: Dict[str, List[str]] = {
             str(Path(k).resolve()): [str(Path(c).resolve()) for c in v]
@@ -377,7 +381,18 @@ class PathWalkModuleDb:
         return self._cache_root
 
     def _trace(self, message: str) -> None:
-        if self._on_trace is not None and message:
+        if not message:
+            return
+        if self._diagnostic_inst_trace and (
+            message.startswith("pw-db preprocess")
+            or message.startswith("pw-db inst-")
+        ):
+            import sys
+
+            from hierwalk.hierarchy_log import emit_path_walk_log
+
+            emit_path_walk_log(message, stream=sys.stderr)
+        if self._on_trace is not None:
             self._on_trace(message)
 
     @staticmethod
@@ -508,6 +523,20 @@ class PathWalkModuleDb:
         )
 
     def _include_closure_digest(self, path: str) -> str:
+        key = str(Path(path).resolve())
+        cached = self._include_digest_cache.get(key)
+        if cached is not None:
+            return cached
+        try:
+            sample = Path(key).read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            digest = "readfail"
+            self._include_digest_cache[key] = digest
+            return digest
+        if "`include" not in sample and "`INCLUDE" not in sample:
+            digest = "noinc"
+            self._include_digest_cache[key] = digest
+            return digest
         from hierwalk.preprocess import _collect_include_closure
 
         closure, _ = _collect_include_closure(
@@ -523,7 +552,44 @@ class PathWalkModuleDb:
             if digest is not None:
                 hasher.update(digest.encode())
             hasher.update(b"\0")
-        return hasher.hexdigest()[:16]
+        digest = hasher.hexdigest()[:16]
+        self._include_digest_cache[key] = digest
+        return digest
+
+    def _raw_text_for_inst_find(self, fpath: str) -> str:
+        """
+        Comment-stripped RTL for selective instance lookup.
+
+        Skips include/macro/ifdef preprocess on the hot path; ``inst_scan`` strips
+        directive lines and ifdef-gated validity is resolved later at connect/elab.
+        """
+        key = str(Path(fpath).resolve())
+        fname = Path(key).name
+        cached = self._raw_text_for_inst_cache.get(key)
+        if cached is not None:
+            self._trace(
+                f"pw-db preprocess done {fname} source=raw-mem chars={len(cached)}"
+            )
+            return cached
+        t0 = time.perf_counter()
+        self._trace(f"pw-db preprocess enter {fname} source=raw")
+        try:
+            raw = Path(key).read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            self._trace(
+                f"pw-db preprocess done {fname} source=raw miss reason=read-fail "
+                f"ms={self._elapsed_ms(t0):.1f}"
+            )
+            raise
+        from hierwalk.preprocess import strip_comments_for_instance_scan
+
+        text = strip_comments_for_instance_scan(raw)
+        self._raw_text_for_inst_cache[key] = text
+        self._trace(
+            f"pw-db preprocess done {fname} source=raw "
+            f"ms={self._elapsed_ms(t0):.1f} chars={len(text)}"
+        )
+        return text
 
     def _load_regex_sidecar(self, path: str) -> Optional[_FileRegexCacheEntry]:
         sidecar = self._regex_sidecar(path)
@@ -1824,7 +1890,7 @@ class PathWalkModuleDb:
         )
         try:
             t_pre = time.perf_counter()
-            text = self._preprocessed_text_for_file(fpath)
+            text = self._raw_text_for_inst_find(fpath)
             pre_ms = self._elapsed_ms(t_pre)
         except OSError:
             self._trace(
@@ -1868,7 +1934,7 @@ class PathWalkModuleDb:
     ) -> None:
         key = str(Path(fpath).resolve())
         rec = self._index.get_module(parent_module)
-        header, _body = _module_header_body(self._preprocessed_text_for_file(fpath), parent_module)
+        header, _body = _module_header_body(self._raw_text_for_inst_find(fpath), parent_module)
         raw_params = dict(rec.raw_params) if rec and rec.raw_params else parse_param_pairs(header)
         pmap = resolve_param_map(raw_params, parent=parent_ctx)
         instances: List[InstanceEdge] = list(rec.instances) if rec else []
