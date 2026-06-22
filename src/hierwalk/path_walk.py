@@ -2112,6 +2112,7 @@ def acquire_path_walk_session(
     trace_stream: Optional[TextIO] = None,
     trace_log_fh: Optional[TextIO] = None,
     jobs: int = 0,
+    diagnostic_inst_trace: bool = False,
 ) -> PathWalkSuiteSession:
     global _suite_session
     from hierwalk.manifest import hash_paths_parallel, set_digest_scope
@@ -2140,6 +2141,7 @@ def acquire_path_walk_session(
             state._trace_log = trace_log_fh
         _wire_db_trace_to_state(_suite_session.mod_db, state)
         _suite_session.mod_db._on_progress = on_progress
+        _suite_session.mod_db._diagnostic_inst_trace = diagnostic_inst_trace
         return _suite_session
 
     if _suite_session is not None:
@@ -2161,6 +2163,7 @@ def acquire_path_walk_session(
         trace_log_fh=trace_log_fh,
         path_digests=path_digests,
         jobs=jobs,
+        diagnostic_inst_trace=diagnostic_inst_trace,
     )
     tops = resolve_top_modules(index, top=top, filelist_tops=fl.top_modules)
     top_name = tops[0]
