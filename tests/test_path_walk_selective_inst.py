@@ -8,6 +8,7 @@ from pathlib import Path
 from hierwalk.connect_request import ConnectivityCheck, ConnectivityRequest
 from hierwalk.filelist import parse_filelist
 from hierwalk.path_walk import create_path_walk_index, run_path_walk_connect
+from hierwalk.path_walk_db import RESOLVE_CONFIDENT
 
 
 def _write_large_flat_top(tmp_path: Path, n_inst: int) -> Path:
@@ -138,6 +139,60 @@ def test_preprocessed_text_disk_cache(tmp_path: Path, monkeypatch):
     )
     mod_db2._preprocessed_text_for_file(rtl)
     assert preprocess_calls == []
+
+
+def test_first_child_edge_skips_scoped_tier0_when_parent_seeded(tmp_path: Path, monkeypatch):
+    """Seeded top module must not tier0-scan the child filelist pool before selective."""
+    n_stub = 80
+    top_rtl = tmp_path / "top.v"
+    top_rtl.write_text(
+        "module SOC_TOP(input logic clk);\n"
+        "  IP_BLK u_ip (.clk(clk));\n"
+        "endmodule\n",
+        encoding="utf-8",
+    )
+    stub_dir = tmp_path / "stubs"
+    stub_dir.mkdir()
+    stub_paths = []
+    for i in range(n_stub):
+        stub = stub_dir / f"stub_{i}.v"
+        stub.write_text(f"module STUB_{i} (); endmodule\n", encoding="utf-8")
+        stub_paths.append(stub)
+    child_fl = tmp_path / "stubs.f"
+    child_fl.write_text("\n".join(str(p.resolve()) for p in stub_paths) + "\n", encoding="utf-8")
+    root_fl = tmp_path / "design.f"
+    root_fl.write_text(
+        f"{top_rtl.resolve()}\n-f {child_fl.resolve()}\n",
+        encoding="utf-8",
+    )
+    fl = parse_filelist(str(root_fl), index_cwd=str(tmp_path))
+
+    tier0_calls: list[str] = []
+    from hierwalk.path_walk_db import PathWalkModuleDb
+
+    orig_tier0 = PathWalkModuleDb._tier0_scan_file
+
+    def traced_tier0(self, path):
+        tier0_calls.append(str(path))
+        return orig_tier0(self, path)
+
+    monkeypatch.setattr(PathWalkModuleDb, "_tier0_scan_file", traced_tier0)
+    monkeypatch.setattr(PathWalkModuleDb, "_warm_tier1_background", lambda self, _f: None)
+    monkeypatch.setattr(PathWalkModuleDb, "tier1_scan_file", lambda self, _p: {})
+
+    index, mod_db = create_path_walk_index(fl, "SOC_TOP", defines={}, no_cache=True, jobs=1)
+    tier0_calls.clear()
+
+    edge = mod_db.resolve_child_edge(
+        "SOC_TOP",
+        {},
+        "u_ip",
+        current_file=str(top_rtl.resolve()),
+        policy=RESOLVE_CONFIDENT,
+    )
+    assert edge is not None
+    assert edge.child_module == "IP_BLK"
+    assert tier0_calls == []
 
 
 def test_inst_leaf_index_avoids_repeat_selective_scan(tmp_path: Path, monkeypatch):
