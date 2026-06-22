@@ -1755,6 +1755,48 @@ class PathWalkModuleDb:
             scope_pool=scope_pool,
         )
 
+    def _parent_body_file(self, parent_module: str, current_file: str) -> str:
+        """RTL file containing *parent_module*'s declaration (not merely an instance site)."""
+        preferred = self._prefer_file.get(parent_module)
+        if preferred:
+            key = str(Path(preferred).resolve())
+            try:
+                text = self._raw_text_for_inst_find(key)
+                header, body = _module_header_body(text, parent_module)
+                if header or body:
+                    return key
+            except OSError:
+                pass
+        seen: Set[str] = set()
+        candidates: List[str] = []
+        if current_file:
+            candidates.append(current_file)
+        candidates.extend(self._module_to_files.get(parent_module, ()))
+        for candidate in candidates:
+            key = str(Path(candidate).resolve())
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                text = self._raw_text_for_inst_find(key)
+                header, body = _module_header_body(text, parent_module)
+                if header or body:
+                    return key
+            except OSError:
+                continue
+        hit = self.find_module_decl_file(parent_module)
+        return hit or (str(Path(current_file).resolve()) if current_file else "")
+
+    def _parent_instance_edges_fast(
+        self,
+        module_name: str,
+    ) -> List[InstanceEdge]:
+        """Tier-1 prescanned edges only (no generate-fold rescan)."""
+        rec = self._index.get_module(module_name)
+        if rec is None or rec.stop_reason or rec.is_blackbox:
+            return list(rec.instances) if rec else []
+        return list(rec.instances)
+
     def _parent_instance_edges(
         self,
         module_name: str,
@@ -2153,7 +2195,7 @@ class PathWalkModuleDb:
         if child_rec is None or not child_rec.file_path:
             self._index.modules[child] = ModuleRecord(
                 module_name=child,
-                file_path=key,
+                file_path="",
                 body="",
                 raw_params={},
                 instances=[],
@@ -2264,7 +2306,10 @@ class PathWalkModuleDb:
         if _is_placeholder_module(rec):
             return False
         if expect_inst is None:
-            return True
+            if rec is None or not rec.file_path:
+                return False
+            body_file = self._parent_body_file(module_name, rec.file_path)
+            return resolved_path_str(rec.file_path) == resolved_path_str(body_file)
         parent_mod, inst_leaf = expect_inst
         if parent_mod != module_name or rec is None:
             return False
@@ -2469,7 +2514,8 @@ class PathWalkModuleDb:
         reset_path: str = "",
     ) -> Optional[InstanceEdge]:
         """Tier-1 confirmed child edge, trying alternate decl files on miss."""
-        avoid = current_file
+        scope_anchor = current_file
+        avoid = self._parent_body_file(parent_module, current_file)
         t_resolve = time.perf_counter()
         avoid_name = Path(avoid).name if avoid else "-"
         self._trace(
@@ -2484,39 +2530,46 @@ class PathWalkModuleDb:
             )
             return indexed
 
-        t_tier1 = time.perf_counter()
         rec = self._index.get_module(parent_module)
-        tier1_edge: Optional[InstanceEdge] = None
-        tier1_edges = 0
+        pmap = (
+            resolve_param_map(rec.raw_params, parent=parent_ctx)
+            if rec is not None and not _is_placeholder_module(rec)
+            else {}
+        )
+
+        t_tier1_fast = time.perf_counter()
+        tier1_fast_edges = 0
+        tier1_fast_edge: Optional[InstanceEdge] = None
         if rec is not None and not _is_placeholder_module(rec):
-            tier1_edge_list = self._parent_instance_edges(parent_module, parent_ctx)
-            tier1_edges = len(tier1_edge_list)
-            pmap = resolve_param_map(rec.raw_params, parent=parent_ctx)
-            tier1_edge = self._edge_matches(
-                tier1_edge_list,
+            tier1_fast_list = self._parent_instance_edges_fast(parent_module)
+            tier1_fast_edges = len(tier1_fast_list)
+            tier1_fast_edge = self._edge_matches(
+                tier1_fast_list,
                 inst_leaf,
                 pmap,
                 parent_module=parent_module,
                 parent_ctx=parent_ctx,
             )
-        tier1_ms = self._elapsed_ms(t_tier1)
-        if tier1_edge is not None:
+        tier1_fast_ms = self._elapsed_ms(t_tier1_fast)
+        if tier1_fast_edge is not None:
             if rec is not None and rec.file_path:
                 self._prefer_file[parent_module] = resolved_path_str(rec.file_path)
+            self._register_inst_edges(parent_module, parent_ctx, [tier1_fast_edge])
             self._trace(
                 f"pw-db inst-resolve done {parent_module}.{inst_leaf} "
-                f"path=tier1-index edges={tier1_edges} tier1_ms={tier1_ms:.1f} "
+                f"path=tier1-fast edges={tier1_fast_edges} tier1_fast_ms={tier1_fast_ms:.1f} "
                 f"ms={self._elapsed_ms(t_resolve):.1f}"
             )
-            return tier1_edge
-        self._trace(
-            f"pw-db inst-resolve tier1-probe miss {parent_module}.{inst_leaf} "
-            f"edges={tier1_edges} tier1_ms={tier1_ms:.1f} "
-            f"since_enter_ms={self._elapsed_ms(t_resolve):.1f}"
-        )
+            return tier1_fast_edge
+        if tier1_fast_edges:
+            self._trace(
+                f"pw-db inst-resolve tier1-fast miss {parent_module}.{inst_leaf} "
+                f"edges={tier1_fast_edges} tier1_fast_ms={tier1_fast_ms:.1f} "
+                f"since_enter_ms={self._elapsed_ms(t_resolve):.1f}"
+            )
 
-        scope_anchor = avoid
         if avoid:
+            t_sel = time.perf_counter()
             selective = self._selective_child_edge_lookup(
                 parent_module,
                 parent_ctx,
@@ -2524,6 +2577,7 @@ class PathWalkModuleDb:
                 avoid,
                 pre_resolve_ms=self._elapsed_ms(t_resolve),
             )
+            sel_ms = self._elapsed_ms(t_sel)
             if selective is not None:
                 self._apply_selective_edge_hit(
                     avoid,
@@ -2539,24 +2593,101 @@ class PathWalkModuleDb:
                 self._warm_tier1_background(avoid)
                 self._trace(
                     f"pw-db inst-resolve done {parent_module}.{inst_leaf} "
-                    f"path=selective ms={self._elapsed_ms(t_resolve):.1f}"
+                    f"path=selective sel_ms={sel_ms:.1f} "
+                    f"ms={self._elapsed_ms(t_resolve):.1f}"
                 )
                 return selective
+            self._trace(
+                f"pw-db inst-resolve selective miss {parent_module}.{inst_leaf} "
+                f"file={avoid_name} sel_ms={sel_ms:.1f} "
+                f"since_enter_ms={self._elapsed_ms(t_resolve):.1f}"
+            )
 
+        tier1_edge: Optional[InstanceEdge] = None
+        tier1_edges = 0
+        tier1_ms = 0.0
+        redundant_fold = bool(
+            rec is not None
+            and not _is_placeholder_module(rec)
+            and not rec.needs_generate_fold
+            and tier1_fast_edges > 0
+        )
+        if rec is not None and not _is_placeholder_module(rec) and not redundant_fold:
+            body_needs_fold = rec.needs_generate_fold
+            if not body_needs_fold and avoid:
+                try:
+                    from hierwalk.generate_fold import needs_generate_fold as _body_has_generate
+
+                    text = self._raw_text_for_inst_find(avoid)
+                    _hdr, body = _module_header_body(text, parent_module)
+                    body_needs_fold = _body_has_generate(body)
+                except OSError:
+                    body_needs_fold = False
+            if body_needs_fold and avoid:
+                key = str(Path(avoid).resolve())
+                if key not in self._validated_memory:
+                    scanned = self.tier1_scan_file(key)
+                    if parent_module in scanned:
+                        self._apply_file_modules(key, scanned)
+                        rec = self._index.get_module(parent_module)
+                        pmap = resolve_param_map(rec.raw_params, parent=parent_ctx)
+            t_tier1_fold = time.perf_counter()
+            tier1_edge_list = self._parent_instance_edges(parent_module, parent_ctx)
+            tier1_edges = len(tier1_edge_list)
+            tier1_edge = self._edge_matches(
+                tier1_edge_list,
+                inst_leaf,
+                pmap,
+                parent_module=parent_module,
+                parent_ctx=parent_ctx,
+            )
+            tier1_ms = self._elapsed_ms(t_tier1_fold)
+            if tier1_edge is not None:
+                if rec is not None and rec.file_path:
+                    self._prefer_file[parent_module] = resolved_path_str(rec.file_path)
+                self._register_inst_edges(parent_module, parent_ctx, [tier1_edge])
+                self._trace(
+                    f"pw-db inst-resolve done {parent_module}.{inst_leaf} "
+                    f"path=tier1-fold edges={tier1_edges} tier1_fold_ms={tier1_ms:.1f} "
+                    f"ms={self._elapsed_ms(t_resolve):.1f}"
+                )
+                return tier1_edge
+            self._trace(
+                f"pw-db inst-resolve tier1-fold miss {parent_module}.{inst_leaf} "
+                f"edges={tier1_edges} tier1_fold_ms={tier1_ms:.1f} "
+                f"since_enter_ms={self._elapsed_ms(t_resolve):.1f}"
+            )
+        elif redundant_fold:
+            self._trace(
+                f"pw-db inst-resolve tier1-fold skip {parent_module}.{inst_leaf} "
+                f"reason=redundant-fast edges={tier1_fast_edges} "
+                f"since_enter_ms={self._elapsed_ms(t_resolve):.1f}"
+            )
+
+        t_scope = time.perf_counter()
         scoped_pool = (
             self._scoped_pool_for_policy(scope_anchor, policy=policy)
             if scope_anchor
             else None
         )
+        scope_ms = self._elapsed_ms(t_scope)
         self._trace(
             f"pw-db inst-resolve tier0-candidates {parent_module}.{inst_leaf} "
-            f"file={avoid_name}"
+            f"file={avoid_name} scope_ms={scope_ms:.1f} "
+            f"since_enter_ms={self._elapsed_ms(t_resolve):.1f}"
         )
+        t_tier0 = time.perf_counter()
         candidates = self._order_candidate_files(
             parent_module,
             avoid_file=avoid,
             scope_anchor=scope_anchor,
             policy=policy,
+        )
+        tier0_ms = self._elapsed_ms(t_tier0)
+        self._trace(
+            f"pw-db inst-resolve tier0-done {parent_module}.{inst_leaf} "
+            f"candidates={len(candidates)} tier0_ms={tier0_ms:.1f} "
+            f"since_enter_ms={self._elapsed_ms(t_resolve):.1f}"
         )
         scope_note = ""
         if scope_anchor and scoped_pool is not None:

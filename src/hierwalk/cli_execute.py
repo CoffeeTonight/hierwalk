@@ -70,6 +70,22 @@ from hierwalk.verification_timing import (
 )
 
 
+def _write_connect_output(cfg: RunConfig, body: str) -> None:
+    """Write connect TSV immediately so long post-connect logs cannot delay results."""
+    if cfg.output == "-":
+        sys.stdout.write(body)
+        return
+    out = Path(cfg.output)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(body, encoding="utf-8")
+    if not cfg.quiet:
+        print(
+            f"run: connect results written: {out.resolve()}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+
 def execute_run(cfg: RunConfig, ap) -> int:
     connect_request: Optional[ConnectivityRequest] = None
     if cfg.check_connect_batch or cfg.connect_inline:
@@ -399,6 +415,7 @@ def execute_run(cfg: RunConfig, ap) -> int:
                 modules_cached=batch.modules_cached,
                 rows_by_path=endpoint_rows,
             )
+            _write_connect_output(cfg, body)
             if not cfg.quiet:
                 emit_hierarchy_rows_log(
                     pw_state.rows(),
@@ -434,11 +451,6 @@ def execute_run(cfg: RunConfig, ap) -> int:
                     f"{pw_state.stats.modules_loaded} module(s), "
                     f"{time.perf_counter() - t0:.1f}s"
                 )
-            if cfg.output == "-":
-                sys.stdout.write(body)
-            else:
-                with open(cfg.output, "w", encoding="utf-8") as f:
-                    f.write(body)
             from hierwalk.path_walk import build_path_walk_db_full
 
             if not cfg.flat_suite_step:

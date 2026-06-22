@@ -97,16 +97,30 @@ def endpoint_provenance_fields(
     return base
 
 
+def format_rtl_token(path: str, *, compact: bool = False) -> str:
+    """``rtl= /path`` token (space after ``=`` so vim ``gf`` can open the path)."""
+    if not path:
+        return "rtl=(none)"
+    shown = Path(path).name if compact else path
+    return f"rtl= {shown}"
+
+
 def format_row_provenance(row: FlatRow, *, compact: bool = False) -> str:
     """RTL file + filelist chain for one elaborated instance row."""
     parts = [f"module={row.module}"]
     if row.file:
-        parts.append(f"rtl={row.file}" if not compact else f"rtl={Path(row.file).name}")
+        parts.append(format_rtl_token(row.file, compact=compact))
     if row.via_filelist:
         via = row.via_filelist if not compact else Path(row.via_filelist).name
         parts.append(f"via_filelist={via}")
     if row.filelist_chain:
         parts.append(f"filelist_chain={row.filelist_chain}")
+    if row.refine_status:
+        parts.append(f"refine={row.refine_status}")
+    if row.activation:
+        parts.append(f"activation={row.activation}")
+    if row.walk_note:
+        parts.append(f"note={row.walk_note}")
     if row.stop_reason:
         parts.append(f"stop={row.stop_reason}")
     return "  ".join(parts)
@@ -547,6 +561,16 @@ def path_walk_trace_show_message(message: str) -> bool:
     if msg.startswith("connect-coi "):
         return True
     if msg.startswith("connect-comb "):
+        return True
+    if msg.startswith("walk miss-"):
+        return True
+    if msg.startswith("walk provisional-pass "):
+        return True
+    if msg.startswith("walk endpoint-specs "):
+        return True
+    if msg.startswith("walk lca-done "):
+        return True
+    if msg.startswith("walk flush-misses "):
         return True
     if msg.startswith("walk raw-inst-probe "):
         return True

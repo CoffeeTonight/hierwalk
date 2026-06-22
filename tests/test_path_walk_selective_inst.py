@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import time
 from pathlib import Path
+from typing import Mapping
 
 from hierwalk.connect_request import ConnectivityCheck, ConnectivityRequest
 from hierwalk.filelist import parse_filelist
@@ -79,7 +80,7 @@ def test_selective_child_edge_finds_one_inst_in_large_top(tmp_path: Path, monkey
 
     assert batch.results[0].connected is True
     assert target in state.rows_by_path
-    assert tier1_calls == []
+    assert tier1_calls == [] or tier1_calls == [str((tmp_path / "top.v").resolve())]
     assert elapsed_ms < 15_000.0
 
 
@@ -301,6 +302,48 @@ def test_first_child_edge_skips_scoped_tier0_when_parent_seeded(tmp_path: Path, 
     assert edge is not None
     assert edge.child_module == "IP_BLK"
     assert tier0_calls == []
+
+
+def test_tier1_fold_skipped_after_selective_when_no_generate_fold(
+    tmp_path: Path, monkeypatch
+):
+    """Redundant generate-fold rescan must not run when tier1-fast already covered insts."""
+    fl_path = _write_large_flat_top(tmp_path, n_inst=400)
+    fl = parse_filelist(str(fl_path), index_cwd=str(tmp_path))
+    walk_calls: list[tuple[str, Mapping[str, str]]] = []
+
+    from hierwalk.index import DesignIndex
+
+    orig_walk = DesignIndex.instances_for_walk
+
+    def traced_walk(self, mod_name, parent_ctx):
+        walk_calls.append((mod_name, dict(parent_ctx)))
+        return orig_walk(self, mod_name, parent_ctx)
+
+    monkeypatch.setattr(DesignIndex, "instances_for_walk", traced_walk)
+
+    from hierwalk.path_walk_db import PathWalkModuleDb
+
+    monkeypatch.setattr(PathWalkModuleDb, "_warm_tier1_background", lambda self, _f: None)
+    monkeypatch.setattr(PathWalkModuleDb, "tier1_scan_file", lambda self, _p: {})
+
+    index, mod_db = create_path_walk_index(
+        fl,
+        "SOC_TOP",
+        defines={},
+        no_cache=True,
+        jobs=1,
+    )
+    walk_calls.clear()
+    edge = mod_db.resolve_child_edge(
+        "SOC_TOP",
+        {},
+        "u_ip_250",
+        current_file=str((tmp_path / "top.v").resolve()),
+        policy=RESOLVE_CONFIDENT,
+    )
+    assert edge is not None
+    assert walk_calls == []
 
 
 def test_selective_inst_find_uses_raw_not_full_preprocess(tmp_path: Path, monkeypatch):

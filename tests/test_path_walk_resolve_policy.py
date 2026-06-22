@@ -192,6 +192,63 @@ def test_recovery_pass1_retries_mapped_candidates_when_pending_zero(tmp_path: Pa
     assert edge.child_module == "CORE"
 
 
+def _write_top_a_ub_c_recovery_design(tmp_path: Path) -> tuple[Path, str]:
+    """``top.a.u_b.c``: confident miss on ``u_b``, recovery hits real ``B.v``."""
+    (tmp_path / "top.v").write_text("module top; A a (); endmodule\n", encoding="utf-8")
+    (tmp_path / "a.v").write_text("module A; B u_b (); endmodule\n", encoding="utf-8")
+    (tmp_path / "b_stub.v").write_text("module B; endmodule\n", encoding="utf-8")
+    (tmp_path / "b_real.v").write_text("module B; C c (); endmodule\n", encoding="utf-8")
+    (tmp_path / "c.v").write_text("module C; endmodule\n", encoding="utf-8")
+    lists = tmp_path / "lists"
+    lists.mkdir()
+    (lists / "child.f").write_text(
+        str((tmp_path / "b_stub.v").resolve()) + "\n",
+        encoding="utf-8",
+    )
+    (lists / "parent.f").write_text(
+        "\n".join(
+            [
+                str((tmp_path / "top.v").resolve()),
+                str((tmp_path / "a.v").resolve()),
+                f"-f {(lists / 'child.f').resolve()}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    root = tmp_path / "root.f"
+    root.write_text(
+        "\n".join(
+            [
+                f"-f {(lists / 'parent.f').resolve()}",
+                str((tmp_path / "b_real.v").resolve()),
+                str((tmp_path / "c.v").resolve()),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return root, "top.a.u_b.c"
+
+
+def test_connect_resolves_top_a_ub_c_after_recovery(tmp_path: Path):
+    fl_path, target = _write_top_a_ub_c_recovery_design(tmp_path)
+    fl = parse_filelist(str(fl_path), index_cwd=str(tmp_path))
+    req = ConnectivityRequest(
+        checks=(ConnectivityCheck(target, target, check_id="1"),),
+        top="top",
+    )
+    batch, _index, state = run_path_walk_connect(
+        req,
+        fl,
+        top="top",
+        no_cache=True,
+    )
+    assert target in state.rows_by_path
+    assert not batch.results[0].errors
+    assert batch.results[0].connected is True
+
+
 def test_confident_defers_then_recovery_walks_full_chain(tmp_path: Path):
     fl_path, leaf = _write_stub_child_recovery_design(tmp_path)
     fl = parse_filelist(str(fl_path), index_cwd=str(tmp_path))

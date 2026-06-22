@@ -84,6 +84,9 @@ class FlatRow:
     via_filelist: str = ""
     filelist_chain: str = ""
     param_ctx: Dict[str, str] = field(default_factory=dict)
+    refine_status: str = ""
+    activation: str = ""
+    walk_note: str = ""
 
 
 @dataclass
