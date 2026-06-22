@@ -109,6 +109,45 @@ def test_connectivity_port_to_internal_wire(tmp_path: Path):
     assert r.connected
 
 
+def test_signal_tail_dotted_miss_large_module_fast(tmp_path: Path):
+    """Instance-like dotted tail must not run full assign/port-map collection on miss."""
+    n = 50_000
+    body = "module BIG(input logic clk);\n"
+    body += "".join(f"  assign w{i} = clk;\n" for i in range(n))
+    body += "  child u_core (.clk(clk));\nendmodule\n"
+    body += "module child(input logic clk); LEAF u_leaf (); endmodule\nmodule LEAF; endmodule\n"
+    rtl = tmp_path / "big.v"
+    rtl.write_text(body, encoding="utf-8")
+    index = DesignIndex.build({str(rtl): body})
+    _, rows = elaborate(index, "BIG")
+    row = {r.full_path: r for r in rows}["BIG"]
+    from hierwalk.path_walk import PathWalkState
+    from hierwalk.path_walk_db import PathWalkModuleDb
+
+    state = PathWalkState(
+        index=index,
+        top="BIG",
+        mod_db=PathWalkModuleDb([str(rtl)], index),
+    )
+    t0 = time.perf_counter()
+    hit = state._resolve_signal_tail("BIG", "u_core.u_leaf", target_path="BIG.u_core.u_leaf")
+    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+    assert hit is False
+    assert elapsed_ms < 500.0
+
+
+def test_net_exists_port_map_only_wire(tmp_path: Path):
+    v = """
+    module top(input logic clk);
+      child u0 (.out(only_in_port));
+    endmodule
+    module child(output logic out); assign out = clk; endmodule
+    """
+    index, rows = _index_and_rows(v, tmp_path)
+    row = {r.full_path: r for r in rows}["top"]
+    assert net_exists_in_module_fast(index, row, "only_in_port", top="top")
+
+
 def test_signal_tail_wire_probe_large_module_under_one_second(tmp_path: Path):
     """4300+ line module: wire-tail regex probe must not run full connect/index walks."""
     lines = 4302

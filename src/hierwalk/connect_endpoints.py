@@ -41,6 +41,7 @@ from hierwalk.connect_scan import (
     collect_bind_records_for_module,
     extract_connect_nodes,
     net_base_in_assign_probe,
+    net_base_in_port_map_probe,
     hierwalkance_port_maps,
 )
 from hierwalk.hierarchy_log import format_row_provenance
@@ -320,6 +321,23 @@ def _decl_net_cache_key(row: FlatRow, ctx: Mapping[str, str]) -> DeclNetCacheKey
     return row.module, _ctx_key(ctx)
 
 
+def _cache_note_decl_net_hit(
+    cache: Optional[DeclNetCache],
+    key: DeclNetCacheKey,
+    net_name: str,
+    base: str,
+) -> None:
+    if cache is None:
+        return
+    bucket = cache.get(key)
+    if bucket is None:
+        bucket = set()
+        cache[key] = bucket
+    for name in (net_name, base):
+        if name:
+            bucket.add(name)
+
+
 def _net_base_declared_fast(body: str, base: str) -> bool:
     """
     Single-name declaration probe (wire/logic/reg/port) without full statement split.
@@ -427,16 +445,16 @@ def net_exists_in_module_fast(
         return True
     if not text:
         return False
-    names = module_declared_net_names(
-        index,
-        row,
-        top=top,
-        cache=cache,
-        param_ctx=ctx,
-        body=text,
-        deep=True,
-    )
-    return net_name in names or base in names
+    # Dotted tails are instance paths, not module-local signal names.
+    if "." in net_name.split("[", 1)[0]:
+        return False
+    if net_base_in_assign_probe(text, base, param_map=ctx):
+        _cache_note_decl_net_hit(cache, key, net_name, base)
+        return True
+    if net_base_in_port_map_probe(text, base, param_map=ctx):
+        _cache_note_decl_net_hit(cache, key, net_name, base)
+        return True
+    return False
 
 
 def _net_exists_in_module(

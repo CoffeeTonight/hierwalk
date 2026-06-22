@@ -664,6 +664,27 @@ def collect_assign_net_names(
     return _net_name_bases(names)
 
 
+def net_base_in_port_map_probe(
+    body: str,
+    base: str,
+    *,
+    param_map: Mapping[str, str] | None = None,
+) -> bool:
+    """Early-exit: does *base* appear in any instance port expression?"""
+    if not body or not base:
+        return False
+    target = base.split("[", 1)[0].split(".", 1)[0]
+    if not target:
+        return False
+    pmap = dict(param_map or {})
+    for _inst, ports in hierwalkance_port_maps(body, param_map=pmap).items():
+        for _port, expr in ports:
+            for net in extract_connect_nodes(expr, pmap):
+                if net.split("[", 1)[0].split(".", 1)[0] == target:
+                    return True
+    return False
+
+
 def net_base_in_assign_probe(
     body: str,
     base: str,
