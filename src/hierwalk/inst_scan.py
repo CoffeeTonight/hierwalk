@@ -6,7 +6,9 @@ import re
 from typing import Dict, Iterator, List, Mapping, Optional, Set, Tuple, TypedDict
 
 _IDENT = r"[A-Za-z_]\w*"
+_IDENT_RE = re.compile(_IDENT)
 _ESC_IDENT = r"\\(?:[A-Za-z_]\w*|\S+)"
+_DIM_PART_RE = re.compile(r"\[[^\]]+\]")
 
 _KEYWORDS = frozenset(
     {
@@ -41,6 +43,9 @@ _ENDIF_DIRECTIVE_SUFFIX_RE = re.compile(
 )
 _LARGE_BODY_ATTR_SKIP = 512 * 1024
 _LARGE_BODY_SLIM = 256 * 1024
+_ANCHOR_WINDOW_BACK = 8192
+_ANCHOR_WINDOW_FWD = 65536
+_MAX_ANCHOR_TRIES = 64
 
 _MODULE_KIND_END = {
     "module": "endmodule",
@@ -104,10 +109,10 @@ def _read_ident(text: str, i: int) -> Tuple[str, int]:
         while j < len(text) and not text[j].isspace():
             j += 1
         return text[i:j], j
-    m = re.match(_IDENT, text[i:])
+    m = _IDENT_RE.match(text, i)
     if not m:
         return "", i
-    return m.group(0), i + m.end()
+    return m.group(0), m.end()
 
 
 def _read_hier_inst_path(text: str, i: int) -> Tuple[str, int]:
@@ -189,7 +194,7 @@ def expand_inst_names(
     if not dims.startswith("["):
         return [base + dims]
     names = [base]
-    for part in re.findall(r"\[[^\]]+\]", dims):
+    for part in _DIM_PART_RE.findall(dims):
         inner = part[1:-1].strip()
         if ":" not in inner:
             names = [f"{n}{part}" for n in names]
@@ -333,6 +338,90 @@ def find_instance_by_child_module(
     return None
 
 
+def _prepare_instance_scan_text(body: str) -> str:
+    from hierwalk.preprocess import strip_comments_for_instance_scan
+
+    work = slim_body_for_instance_scan(strip_comments_for_instance_scan(body))
+    if len(work) <= _LARGE_BODY_ATTR_SKIP:
+        clean = _ATTR_RE.sub(" ", work)
+        clean = _BIND_LINE_RE.sub("", clean)
+        return clean
+    return work
+
+
+def _inst_leaf_anchor_pattern(inst_leaf: str) -> re.Pattern[str]:
+    leaf = inst_leaf.strip()
+    if not leaf:
+        return re.compile(r"(?!x)x")
+    if leaf.startswith("\\"):
+        return re.compile(re.escape(leaf) + r"(?=\s)", re.IGNORECASE)
+    if "[" in leaf:
+        base, rest = leaf.split("[", 1)
+        pat = (
+            r"(?<![A-Za-z0-9_$\\])"
+            + re.escape(base)
+            + r"\s*\["
+            + re.escape(rest)
+        )
+        return re.compile(pat, re.IGNORECASE)
+    pat = (
+        r"(?<![A-Za-z0-9_$\\])"
+        + re.escape(leaf)
+        + r"(?=\s*[\[;(]|\s*[,;]|\s*$|\s*\.|\s*#)"
+    )
+    return re.compile(pat, re.IGNORECASE)
+
+
+def _instance_stmt_window(
+    clean: str,
+    anchor: int,
+    *,
+    max_back: int = _ANCHOR_WINDOW_BACK,
+    max_fwd: int = _ANCHOR_WINDOW_FWD,
+) -> str:
+    back_lo = max(0, anchor - max_back)
+    prev_semi = clean.rfind(";", back_lo, anchor)
+    start = prev_semi + 1 if prev_semi >= 0 else back_lo
+    fwd_hi = min(len(clean), anchor + max_fwd)
+    depth_paren = 0
+    end = fwd_hi
+    i = anchor
+    while i < fwd_hi:
+        ch = clean[i]
+        if ch == "(":
+            depth_paren += 1
+        elif ch == ")":
+            depth_paren = max(0, depth_paren - 1)
+        elif ch == ";" and depth_paren == 0:
+            end = i + 1
+            break
+        i += 1
+    return clean[start:end]
+
+
+def _find_hierarchy_instance_anchored(
+    clean: str,
+    inst_leaf: str,
+    *,
+    param_map: Optional[Mapping[str, str]] = None,
+) -> Optional[InstanceEdge]:
+    """Grep-style anchor on *inst_leaf*, then parse only the local statement."""
+    pat = _inst_leaf_anchor_pattern(inst_leaf)
+    tries = 0
+    for m in pat.finditer(clean):
+        tries += 1
+        if tries > _MAX_ANCHOR_TRIES:
+            break
+        window = _instance_stmt_window(clean, m.start())
+        for edge in _iter_hierarchy_instance_edges_on_clean(
+            window,
+            param_map=param_map,
+        ):
+            if instance_edge_matches_leaf(edge, inst_leaf, param_map=param_map):
+                return edge
+    return None
+
+
 def find_hierarchy_instance(
     body: str,
     inst_leaf: str,
@@ -342,11 +431,21 @@ def find_hierarchy_instance(
     """
     Selective instance lookup: scan until *inst_leaf* matches, then stop.
 
-    Avoids building the full parent instance list used by path-walk DB tier1.
+    Large bodies (e.g. monolithic ``allinst.v``) use grep-style anchoring on
+    *inst_leaf* instead of walking every instance from the top of the module.
     """
     if not body or not inst_leaf:
         return None
-    for edge in _iter_hierarchy_instance_edges(body, param_map=param_map):
+    clean = _prepare_instance_scan_text(body)
+    if len(clean) > _LARGE_BODY_SLIM:
+        hit = _find_hierarchy_instance_anchored(
+            clean,
+            inst_leaf,
+            param_map=param_map,
+        )
+        if hit is not None:
+            return hit
+    for edge in _iter_hierarchy_instance_edges_on_clean(clean, param_map=param_map):
         if instance_edge_matches_leaf(edge, inst_leaf, param_map=param_map):
             return edge
     return None
@@ -378,15 +477,16 @@ def _iter_hierarchy_instance_edges(
     *,
     param_map: Optional[Mapping[str, str]] = None,
 ) -> Iterator[InstanceEdge]:
-    from hierwalk.preprocess import strip_comments_for_instance_scan
+    clean = _prepare_instance_scan_text(body)
+    yield from _iter_hierarchy_instance_edges_on_clean(clean, param_map=param_map)
 
+
+def _iter_hierarchy_instance_edges_on_clean(
+    clean: str,
+    *,
+    param_map: Optional[Mapping[str, str]] = None,
+) -> Iterator[InstanceEdge]:
     pmap = dict(param_map or {})
-    work = slim_body_for_instance_scan(strip_comments_for_instance_scan(body))
-    if len(work) <= _LARGE_BODY_ATTR_SKIP:
-        clean = _ATTR_RE.sub(" ", work)
-        clean = _BIND_LINE_RE.sub("", clean)
-    else:
-        clean = work
     seen: Set[Tuple[str, str]] = set()
     n = len(clean)
     i = 0
