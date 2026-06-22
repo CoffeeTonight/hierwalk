@@ -42,7 +42,7 @@ from hierwalk.connect_scan import (
     extract_connect_nodes,
     net_base_in_assign_probe,
     net_base_in_port_map_probe,
-    hierwalkance_port_maps,
+    instance_port_maps,
 )
 from hierwalk.hierarchy_log import format_row_provenance
 from hierwalk.index import DesignIndex
@@ -389,7 +389,7 @@ def module_declared_net_names(
         names.update(_collect_declared_net_names(text))
         if deep:
             names.update(collect_assign_net_names(text, param_map=ctx))
-            for _inst, ports in hierwalkance_port_maps(text, param_map=ctx).items():
+            for _inst, ports in instance_port_maps(text, param_map=ctx).items():
                 for _port, expr in ports:
                     names.update(_net_name_bases(extract_connect_nodes(expr, ctx)))
     if cache is not None:

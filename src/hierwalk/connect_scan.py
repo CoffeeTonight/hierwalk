@@ -677,7 +677,7 @@ def net_base_in_port_map_probe(
     if not target:
         return False
     pmap = dict(param_map or {})
-    for _inst, ports in hierwalkance_port_maps(body, param_map=pmap).items():
+    for _inst, ports in instance_port_maps(body, param_map=pmap).items():
         for _port, expr in ports:
             for net in extract_connect_nodes(expr, pmap):
                 if net.split("[", 1)[0].split(".", 1)[0] == target:
@@ -3229,7 +3229,7 @@ def _parse_port_list(text: str, start: int) -> Tuple[List[Tuple[str, str]], int]
     return ports, i
 
 
-def hierwalkance_port_maps(
+def instance_port_maps(
     body: str,
     *,
     param_map: Mapping[str, str] | None = None,
@@ -3583,7 +3583,7 @@ def _interface_mod_names_in_body(body: str) -> Set[str]:
     }
 
 
-def hierwalkance_cell_types(
+def instance_cell_types(
     body: str,
     *,
     param_map: Mapping[str, str] | None = None,
@@ -3615,7 +3615,7 @@ def _interface_inst_names_from_scan(
 ) -> Set[str]:
     """Interface instances via instance-scan cell types (no extra body regex)."""
     iface_mods = _interface_mod_names_in_body(body)
-    types = dict(cell_types or hierwalkance_cell_types(body, param_map=param_map))
+    types = dict(cell_types or instance_cell_types(body, param_map=param_map))
     return {
         inst
         for inst, cell in types.items()
@@ -3660,7 +3660,7 @@ def build_module_connect_index(
     raw_edge_prov: Dict[Tuple[str, str], ConnectEdgeProv] = {}
     inst_stmt_lines: Dict[str, int] = {}
     cell_types: Dict[str, str] = {}
-    inst_ports = hierwalkance_port_maps(
+    inst_ports = instance_port_maps(
         text,
         param_map=full_pmap,
         inst_stmt_lines=inst_stmt_lines,

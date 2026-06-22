@@ -520,7 +520,7 @@ def _module_header_body(text: str, mod_name: str) -> Tuple[str, str]:
     return "", ""
 
 
-def _hierwalkances_for_index(
+def _instances_for_index(
     header: str,
     body: str,
     *,
@@ -569,7 +569,7 @@ def scan_preprocessed(text: str, file_path: str) -> Dict[str, ModuleRecord]:
                 f"index: instance-first params ({len(body)} B) {file_path} :: {name}",
                 file=sys.stderr,
             )
-        raw_params, edges, defer_fold = _hierwalkances_for_index(
+        raw_params, edges, defer_fold = _instances_for_index(
             header,
             body,
             max_body_bytes=param_limit,

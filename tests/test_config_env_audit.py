@@ -40,7 +40,7 @@ def test_define_active_for_ifndef_semantics():
     assert _define_active("ABC", {"ABC": "1"}) is True
 
 
-def test_verilog_defines_audit_merged_and_ifndef_hints():
+def test_verilog_defines_audit_merged_active_flags():
     lines = format_verilog_defines_audit_lines(
         effective_defines={"ABC": "0", "SYNTH": "1"},
         json_defines={"ABC": "0"},
@@ -50,10 +50,9 @@ def test_verilog_defines_audit_merged_and_ifndef_hints():
     assert "from JSON defines" in text
     assert "ABC='0'" in text
     assert "SYNTH='1'" in text
-    assert "`ifndef ABC`=ON" in text
-    assert "`ifdef SYNTH`=ON" in text
-    assert "`ifndef SYNTH`=OFF" in text
-    assert "ifdef/ifndef semantics" in text
+    assert "active=0" in text
+    assert "active=1" in text
+    assert "`ifdef" not in text
 
 
 def test_cli_emits_verilog_defines_after_filelist(tmp_path: Path):
@@ -88,8 +87,8 @@ module DEF(output QW); endmodule
         cwd=str(tmp_path),
     )
     assert "verilog-defines:" in proc.stderr
-    assert "`ifndef ABC`=ON" in proc.stderr
-    assert "`ifndef SYNTH`=OFF" in proc.stderr
+    assert "ABC='0'" in proc.stderr
+    assert "SYNTH='1'" in proc.stderr
     assert "top.u_DEF" in proc.stdout
 
 

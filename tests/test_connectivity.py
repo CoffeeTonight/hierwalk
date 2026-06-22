@@ -538,13 +538,13 @@ def test_empty_module_port_passthrough(tmp_path):
     ).connected
 
 
-def test_hierwalkance_port_maps_multi_dim_array():
-    from hierwalk.connect_scan import hierwalkance_port_maps
+def test_instance_port_maps_multi_dim_array():
+    from hierwalk.connect_scan import instance_port_maps
 
     body = """
     md2d_leaf g[0:1][0:2] (.clk(clk), .probe_in(probe_in), .probe_out(leaf_out));
     """
-    ports = hierwalkance_port_maps(body, param_map={})
+    ports = instance_port_maps(body, param_map={})
     assert set(ports) == {
         "g[0][0]",
         "g[0][1]",

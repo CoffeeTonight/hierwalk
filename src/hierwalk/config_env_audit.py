@@ -263,24 +263,6 @@ def format_config_env_audit_lines(
     return lines
 
 
-def _ifdef_semantics_lines() -> List[str]:
-    return [
-        "verilog-defines: ifdef/ifndef semantics (SystemVerilog-style truth, not C #ifdef):",
-        "verilog-defines:   `ifdef MACRO`  — branch ON when MACRO is *active*",
-        "verilog-defines:   `ifndef MACRO` — branch ON when MACRO is *not active*",
-        "verilog-defines:   *active* = name appears in defines map AND value is truthy",
-        "verilog-defines:   truthy values: 1, true, yes, non-zero literals, etc.",
-        "verilog-defines:   inactive (same for ifdef OFF / ifndef ON): key missing, "
-        'value "", "0", "false", "1\'b0", "\'b0", "1\'h0", "\'h0"',
-        "verilog-defines:   example: defines ABC=0 → `ifndef ABC` stays ON (0 is inactive); "
-        "`ifdef ABC` is OFF",
-        "verilog-defines:   example: defines ABC=1 → `ifndef ABC` is OFF (branch removed "
-        "when index applies ifdef)",
-        "verilog-defines:   in-file `define in RTL is collected per file during preprocess "
-        "(not listed here unless also in JSON/filelist)",
-    ]
-
-
 def format_verilog_defines_audit_lines(
     *,
     effective_defines: Mapping[str, str],
@@ -291,13 +273,12 @@ def format_verilog_defines_audit_lines(
     json_map = dict(json_defines or {})
     connect_map = dict(connect_defines or {})
     lines: List[str] = [
-        "verilog-defines: === effective RTL macros (JSON + filelist +define+ + connect) ===",
+        "verilog-defines: effective RTL macros (JSON + filelist +define+ + connect)",
     ]
-    lines.extend(_ifdef_semantics_lines())
 
     if not effective_defines:
         lines.append(
-            "verilog-defines: (none from JSON or filelist — RTL `define may still add macros per file)"
+            "verilog-defines: (none — in-file `define may still apply per file during preprocess)"
         )
         return lines
 
@@ -321,10 +302,7 @@ def format_verilog_defines_audit_lines(
             f"{'; '.join(parts)}"
         )
 
-    lines.append(
-        f"verilog-defines: merged effective ({len(effective_defines)}) — "
-        "per-macro branch state if index applies ifdef:"
-    )
+    lines.append(f"verilog-defines: merged ({len(effective_defines)}):")
     for name in sorted(effective_defines):
         val = effective_defines[name]
         active = _define_active(name, effective_defines)
@@ -337,9 +315,7 @@ def format_verilog_defines_audit_lines(
             sources.append("filelist")
         src = "+".join(sources) if sources else "merged"
         lines.append(
-            f"verilog-defines:   {name}={val!r} source={src} "
-            f"active={int(active)} → `ifdef {name}`={'ON' if active else 'OFF'} "
-            f"`ifndef {name}`={'ON' if not active else 'OFF'}"
+            f"verilog-defines:   {name}={val!r} source={src} active={int(active)}"
         )
     return lines
 

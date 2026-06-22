@@ -43,14 +43,14 @@ def test_collect_module_params_small_body_still_scans(monkeypatch):
     assert params == {"A": "1", "B": "2"}
 
 
-def test_hierwalkances_strips_body_params_before_walk(monkeypatch):
+def test_instances_strips_body_params_before_walk(monkeypatch):
     """Instance scan must not walk millions of parameter lines."""
     monkeypatch.delenv("HIERWALK_BODY_PARAM_SCAN_MAX", raising=False)
-    from hierwalk.index import _hierwalkances_for_index
+    from hierwalk.index import _instances_for_index
 
     body = _huge_param_block(50000) + "\nleaf u0 ();\n"
     t0 = time.perf_counter()
-    _hierwalkances_for_index("", body)
+    _instances_for_index("", body)
     elapsed = time.perf_counter() - t0
     assert elapsed < 2.0, f"instance scan took {elapsed:.1f}s"
 
