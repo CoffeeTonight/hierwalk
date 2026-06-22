@@ -112,18 +112,61 @@ def test_confident_resolves_module_in_direct_child_filelist(tmp_path: Path):
     ) is not None
 
 
+def _minimal_mod_db_for_recovery_test(fl, tmp_path: Path):
+    """Build mod_db with explicit tier0 state (no create_path_walk_index side effects)."""
+    from hierwalk.filelist import filelist_provenance_maps
+    from hierwalk.index import DesignIndex
+    from hierwalk.path_walk_db import PathWalkModuleDb
+
+    sources = [str(Path(p).resolve()) for p in fl.source_files]
+    via_map, _chain_map = filelist_provenance_maps(fl)
+    index = DesignIndex._assemble(
+        {},
+        path_patterns=[],
+        module_patterns=[],
+        filelist_patterns=[],
+        library_files=[],
+        library_dirs=[],
+        libexts=[],
+        file_via_filelist={
+            str(Path(k).resolve()): str(Path(v).resolve())
+            for k, v in fl.source_via_filelist.items()
+        },
+        file_filelist_chain={
+            str(Path(k).resolve()): v for k, v in fl.source_filelist_chain.items()
+        },
+        preprocess_include_dirs=[str(p) for p in fl.include_dirs],
+        preprocess_defines={},
+    )
+    mod_db = PathWalkModuleDb(
+        sources,
+        index,
+        defines={},
+        no_cache=True,
+        file_via_filelist=via_map,
+        filelist_children={
+            str(Path(k).resolve()): [str(Path(c).resolve()) for c in v]
+            for k, v in fl.filelist_children.items()
+        },
+    )
+    blk_stub = str((tmp_path / "blk_stub.v").resolve())
+    blk_real = str((tmp_path / "blk_real.v").resolve())
+    mod_db._tier0_scan_file(blk_stub)
+    mod_db._tier0_scan_file(blk_real)
+    for src in sources:
+        if src not in mod_db._regex_scanned:
+            mod_db._tier0_scan_file(src)
+    return mod_db, blk_stub, blk_real
+
+
 def test_recovery_pass1_retries_mapped_candidates_when_pending_zero(tmp_path: Path):
     """Global tier0 done (pending==0) must still retry _module_to_files entries."""
     fl_path, _leaf = _write_stub_child_recovery_design(tmp_path)
     fl = parse_filelist(str(fl_path), index_cwd=str(tmp_path))
-    from hierwalk.path_walk import create_path_walk_index
-
-    _index, mod_db = create_path_walk_index(fl, "SOC_TOP", defines={}, no_cache=True)
-    blk_stub = str((tmp_path / "blk_stub.v").resolve())
-    blk_real = str((tmp_path / "blk_real.v").resolve())
+    mod_db, blk_stub, blk_real = _minimal_mod_db_for_recovery_test(fl, tmp_path)
 
     assert mod_db._scan_remaining_sources_tier0(None, target_module="BLK") == 0
-    assert "BLK" in mod_db._module_to_files
+    assert blk_stub in mod_db._module_to_files["BLK"]
     assert blk_real in mod_db._module_to_files["BLK"]
 
     refreshed = mod_db._recovery_pass1_candidates(
