@@ -10,10 +10,13 @@ from typing import Optional
 import hierwalk
 from hierwalk.coverage_audit import compute_coverage_audit
 from hierwalk.cache import (
-    default_cache_dir,
     get_cached_elab,
     load_or_build_index,
+    resolve_run_work_dir,
+    resolve_top_label,
+    set_active_work_dir,
     store_cached_elab,
+    work_base_dir,
 )
 from hierwalk.elab import elaborate_tops_parallel
 from hierwalk.lazy_scope import (
@@ -126,21 +129,10 @@ def execute_run(cfg: RunConfig, ap) -> int:
     extra_defines = dict(cfg.defines_map)
     if connect_request is not None:
         extra_defines.update(connect_request.defines)
-    cache_dir = default_cache_dir() if cfg.cache_dir is None else Path(cfg.cache_dir)
     use_cache = not cfg.no_cache
     reporter = ProgressReporter(enabled=not cfg.quiet)
     reporter.set_filelist(cfg.filelist)
     on_progress = progress_callback(reporter)
-    log_path: Path | None = None
-    if not cfg.no_log_file:
-        log_path = (
-            Path(cfg.log_file)
-            if cfg.log_file
-            else default_log_path(cfg.filelist, cfg.output)
-        )
-    timing_rec = get_active_recorder()
-    if timing_rec is not None:
-        timing_rec.register_log_path(log_path)
 
     lazy = lazy_processing_enabled()
     if lazy and on_progress:
@@ -161,6 +153,37 @@ def execute_run(cfg: RunConfig, ap) -> int:
     if not fl.source_files:
         print("No sources in filelist", file=sys.stderr)
         return 1
+
+    top_label = resolve_top_label(
+        cfg_top=cfg.top or "",
+        connect_top=connect_request.top if connect_request else "",
+        inst_trace_top=cfg.inst_trace.top if cfg.inst_trace else "",
+        filelist_tops=list(fl.top_modules),
+        filelist_path=cfg.filelist,
+    )
+    work_dir = resolve_run_work_dir(
+        top_label,
+        base=work_base_dir(cfg.index_cwd),
+        explicit_cache_dir=cfg.cache_dir,
+    )
+    cache_dir = work_dir
+    set_active_work_dir(work_dir)
+    if not cfg.quiet:
+        print(
+            f"run: work-dir: {work_dir} (top={top_label})",
+            file=sys.stderr,
+        )
+
+    log_path: Path | None = None
+    if not cfg.no_log_file:
+        log_path = (
+            Path(cfg.log_file)
+            if cfg.log_file
+            else default_log_path(cfg.filelist, cfg.output, work_dir=work_dir)
+        )
+    timing_rec = get_active_recorder()
+    if timing_rec is not None:
+        timing_rec.register_log_path(log_path)
 
     if not cfg.quiet:
         from hierwalk.config_env_audit import emit_verilog_defines_audit

@@ -45,6 +45,11 @@ hier-walk run.json -o out.tsv
 cd examples/stress_seed42 && hier-walk path_walk_example.json
 ```
 
+## Work dir · 작업 디렉터리
+
+**EN** Cache, DB, logs, and temp files default to `.db_{TOP}/` under `--index-cwd` (or cwd). Override with `--cache-dir` or `$HIERWALK_CACHE_DIR`.  
+**KO** 캐시·DB·로그·임시파일은 기본적으로 `--index-cwd`(또는 cwd) 아래 `.db_{TOP}/` 에 생성됩니다.
+
 ## Tests · 테스트
 
 ```bash

@@ -344,7 +344,7 @@ def slang_filelist_cache_path(
     fl: FilelistResult,
     cache_hint: Optional[Union[str, Path]] = None,
 ) -> Path:
-    """Stable path for a cached pyslang filelist (prefer beside output DB)."""
+    """Stable path for a cached pyslang filelist (under per-top work dir when set)."""
     tag = _defines_cache_tag(fl.defines)
     tag_part = f".{tag}" if tag else ""
 
@@ -353,8 +353,15 @@ def slang_filelist_cache_path(
             return path
         return path.parent / f"{path.stem}{tag_part}{path.suffix}"
 
+    from hierwalk.cache import get_active_work_dir
+
+    work_dir = get_active_work_dir()
+    if work_dir is not None:
+        return _with_tag(work_dir / "tmp" / f"{fl.top_path.stem}.hch_slang.f")
     if cache_hint:
         hint = Path(cache_hint)
+        if hint.is_dir():
+            return _with_tag(hint / "tmp" / f"{fl.top_path.stem}.hch_slang.f")
         if hint.suffix == ".db" or hint.name.endswith(".hch.db"):
             return _with_tag(hint.parent / f"{hint.name}.slang.f")
         return _with_tag(hint.resolve())
@@ -392,6 +399,15 @@ def write_slang_filelist(
     if dest is not None:
         out = Path(dest)
         out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(body, encoding="utf-8")
+        return out.resolve()
+    from hierwalk.cache import get_active_work_dir
+
+    work_dir = get_active_work_dir()
+    if work_dir is not None:
+        tmp = work_dir / "tmp"
+        tmp.mkdir(parents=True, exist_ok=True)
+        out = tmp / f".{fl.top_path.stem}.hch_slang.f"
         out.write_text(body, encoding="utf-8")
         return out.resolve()
     fd, path = tempfile.mkstemp(suffix=".f", prefix="hch_slang_")

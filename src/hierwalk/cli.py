@@ -457,7 +457,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--cache-dir",
         default=None,
         metavar="DIR",
-        help="cache root (default: $HIERWALK_CACHE_DIR or ~/.cache/hier-walk)",
+        help="cache/work root (default: .db_{TOP} under --index-cwd or cwd; override: $HIERWALK_CACHE_DIR)",
     )
     cache.add_argument(
         "--no-cache",

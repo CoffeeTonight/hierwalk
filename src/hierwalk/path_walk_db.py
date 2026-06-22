@@ -4,11 +4,11 @@ Path-walk module DB: Tier-0 regex decl index + Tier-1 validated instance scan.
 Built incrementally during path-walk; disk cache per RTL file (regex + validated).
 Does not participate in full DesignIndex build / load_or_build_index.
 
-Disk layout::
+Disk layout (default *cache_dir* = ``.db_{TOP}/`` beside ``--index-cwd`` or cwd)::
 
-    {cache_dir}/path-walk-db/{cache_key}/regex/{file_token}.pkl
-    {cache_dir}/path-walk-db/{cache_key}/validated/{file_token}_{defines}.pkl
-    {cache_dir}/path-walk-db/{cache_key}/module_index.tsv   (human-readable snapshot)
+    .db_{TOP}/path-walk-db/{cache_key}/regex/{file_token}.pkl
+    .db_{TOP}/path-walk-db/{cache_key}/validated/{file_token}_{defines}.pkl
+    .db_{TOP}/path-walk-db/{cache_key}/module_index.tsv   (human-readable snapshot)
 """
 
 from __future__ import annotations
@@ -312,9 +312,10 @@ class PathWalkModuleDb:
 
         base = cache_dir
         if base is None and not no_cache:
-            from hierwalk.cache import default_cache_dir
+            from hierwalk.cache import default_cache_dir, get_active_work_dir
 
-            base = default_cache_dir()
+            active = get_active_work_dir()
+            base = active if active is not None else default_cache_dir()
         self._cache_root: Optional[Path] = None
         if base is not None and cache_key and not no_cache:
             self._cache_root = Path(base) / "path-walk-db" / cache_key
@@ -1207,6 +1208,42 @@ class PathWalkModuleDb:
             return rest
         return candidates
 
+    def _recovery_pass1_candidates(
+        self,
+        module_name: str,
+        *,
+        pending: int,
+        tried: Set[str],
+        avoid_file: str,
+        scope_anchor: str,
+        trace_label: str,
+    ) -> Optional[List[str]]:
+        """
+        Recovery pass-1 global tier0 expand.
+
+        ``pending`` counts newly submitted tier0 scans only; ``_module_to_files``
+        may already list candidates when ``pending == 0``. Returns untried paths
+        to retry, or None to stop the outer pass loop.
+        """
+        if pending <= 0 and module_name not in self._module_to_files:
+            return None
+        if pending > 0:
+            self._trace(
+                f"pw-db tier0 expand policy=recovery {trace_label} "
+                f"global +{pending} file(s) -> "
+                f"{len(self._module_to_files.get(module_name, []))} candidate(s)"
+            )
+        candidates = self._order_candidate_files(
+            module_name,
+            avoid_file=avoid_file,
+            scope_anchor=scope_anchor,
+            policy=RESOLVE_RECOVERY,
+        )
+        untried = [f for f in candidates if f not in tried]
+        if not untried:
+            return None
+        return untried
+
     def tier1_scan_file(self, path: str) -> Dict[str, ModuleRecord]:
         """Light preprocess + instance scan for one translation unit."""
         key = str(Path(path).resolve())
@@ -1545,19 +1582,17 @@ class PathWalkModuleDb:
                     None,
                     target_module=module_name,
                 )
-                if pending <= 0:
-                    break
-                self._trace(
-                    f"pw-db tier0 expand policy=recovery module={module_name} "
-                    f"global +{pending} file(s) -> "
-                    f"{len(self._module_to_files.get(module_name, []))} candidate(s)"
-                )
-                candidates = self._order_candidate_files(
+                refreshed = self._recovery_pass1_candidates(
                     module_name,
+                    pending=pending,
+                    tried=tried,
                     avoid_file=avoid,
                     scope_anchor=scope_anchor,
-                    policy=policy,
+                    trace_label=f"module={module_name}",
                 )
+                if refreshed is None:
+                    break
+                candidates = refreshed
                 continue
             break
 
@@ -1717,19 +1752,17 @@ class PathWalkModuleDb:
                     None,
                     target_module=parent_module,
                 )
-                if pending <= 0:
-                    break
-                self._trace(
-                    f"pw-db tier0 expand policy=recovery edge {parent_module}.{inst_leaf} "
-                    f"global +{pending} file(s) -> "
-                    f"{len(self._module_to_files.get(parent_module, []))} candidate(s)"
-                )
-                candidates = self._order_candidate_files(
+                refreshed = self._recovery_pass1_candidates(
                     parent_module,
+                    pending=pending,
+                    tried=tried,
                     avoid_file=avoid,
                     scope_anchor=scope_anchor,
-                    policy=policy,
+                    trace_label=f"edge {parent_module}.{inst_leaf}",
                 )
+                if refreshed is None:
+                    break
+                candidates = refreshed
                 continue
             break
 

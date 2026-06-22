@@ -39,7 +39,7 @@ environment:
                               elab, lazy filelist; macro/ifdef/body on connect/elab
                               (HIERWALK_LAZY=0 for eager/full index)
   HIERWALK_LAZY_IFDEF        when lazy: run ifdef during index (default off)
-  HIERWALK_CACHE_DIR         index/elab cache root
+  HIERWALK_CACHE_DIR         override per-top work dir (.db_{TOP}); default is local .db_{TOP}
   HIERWALK_IGNORE_PATH       default --ignore-path patterns (comma-separated)
   HIERWALK_IGNORE_MODULE     default --ignore-module names (comma-separated)
   HIERWALK_IGNORE_FILELIST   default --ignore-filelist patterns (comma-separated)

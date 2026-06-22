@@ -112,6 +112,43 @@ def test_confident_resolves_module_in_direct_child_filelist(tmp_path: Path):
     ) is not None
 
 
+def test_recovery_pass1_retries_mapped_candidates_when_pending_zero(tmp_path: Path):
+    """Global tier0 done (pending==0) must still retry _module_to_files entries."""
+    fl_path, _leaf = _write_stub_child_recovery_design(tmp_path)
+    fl = parse_filelist(str(fl_path), index_cwd=str(tmp_path))
+    from hierwalk.path_walk import create_path_walk_index
+
+    _index, mod_db = create_path_walk_index(fl, "SOC_TOP", defines={}, no_cache=True)
+    blk_stub = str((tmp_path / "blk_stub.v").resolve())
+    blk_real = str((tmp_path / "blk_real.v").resolve())
+
+    assert mod_db._scan_remaining_sources_tier0(None, target_module="BLK") == 0
+    assert "BLK" in mod_db._module_to_files
+    assert blk_real in mod_db._module_to_files["BLK"]
+
+    refreshed = mod_db._recovery_pass1_candidates(
+        "BLK",
+        pending=0,
+        tried={blk_stub},
+        avoid_file=blk_stub,
+        scope_anchor=blk_stub,
+        trace_label="module=BLK",
+    )
+    assert refreshed is not None
+    assert blk_real in refreshed
+    assert blk_stub not in refreshed
+
+    edge = mod_db.resolve_child_edge(
+        "BLK",
+        {},
+        "u_core",
+        current_file=blk_stub,
+        policy=RESOLVE_RECOVERY,
+    )
+    assert edge is not None
+    assert edge.child_module == "CORE"
+
+
 def test_confident_defers_then_recovery_walks_full_chain(tmp_path: Path):
     fl_path, leaf = _write_stub_child_recovery_design(tmp_path)
     fl = parse_filelist(str(fl_path), index_cwd=str(tmp_path))

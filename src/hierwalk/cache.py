@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import pickle
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -24,6 +26,17 @@ from hierwalk.models import ElabNode, FlatRow
 
 CACHE_VERSION = 8
 
+_active_work_dir: Optional[Path] = None
+
+
+def set_active_work_dir(path: Optional[Path]) -> None:
+    global _active_work_dir
+    _active_work_dir = path.resolve() if path is not None else None
+
+
+def get_active_work_dir() -> Optional[Path]:
+    return _active_work_dir
+
 
 @dataclass
 class ScanInstCacheBundle:
@@ -38,9 +51,73 @@ class ScanInstCacheBundle:
         return self.config_key
 
 
-def default_cache_dir() -> Path:
-    import os
+_TOP_SAFE_RE = re.compile(r"[^\w.-]+")
 
+
+def sanitize_top_name(top: str) -> str:
+    safe = _TOP_SAFE_RE.sub("_", top.strip())
+    return safe.strip("._") or "top"
+
+
+def top_work_dir_name(top: str) -> str:
+    return f".db_{sanitize_top_name(top)}"
+
+
+def work_base_dir(index_cwd: Optional[str] = None) -> Path:
+    if index_cwd:
+        return Path(index_cwd).expanduser().resolve()
+    return Path.cwd()
+
+
+def top_work_dir(top: str, *, base: Optional[Path] = None) -> Path:
+    return (base or Path.cwd()) / top_work_dir_name(top)
+
+
+def ensure_top_work_dir(top: str, *, base: Optional[Path] = None) -> Path:
+    root = top_work_dir(top, base=base)
+    (root / "tmp").mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def resolve_top_label(
+    *,
+    cfg_top: str = "",
+    connect_top: str = "",
+    inst_trace_top: str = "",
+    filelist_tops: Sequence[str] = (),
+    filelist_path: str = "",
+) -> str:
+    for candidate in (cfg_top, connect_top, inst_trace_top):
+        if candidate and candidate.strip():
+            return candidate.strip()
+    if filelist_tops:
+        return str(filelist_tops[0])
+    if filelist_path:
+        return Path(filelist_path).stem
+    return "top"
+
+
+def resolve_run_work_dir(
+    top: str,
+    *,
+    base: Optional[Path] = None,
+    explicit_cache_dir: Optional[str] = None,
+) -> Path:
+    """Per-run work root: ``.db_{TOP}`` under *base*, unless overridden."""
+    if explicit_cache_dir:
+        path = Path(explicit_cache_dir).expanduser().resolve()
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+    env = os.environ.get("HIERWALK_CACHE_DIR")
+    if env:
+        path = Path(env).expanduser().resolve()
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+    return ensure_top_work_dir(top, base=base)
+
+
+def default_cache_dir() -> Path:
+    """Legacy fallback when top / index-cwd are unknown (prefer :func:`resolve_run_work_dir`)."""
     env = os.environ.get("HIERWALK_CACHE_DIR")
     if env:
         return Path(env)

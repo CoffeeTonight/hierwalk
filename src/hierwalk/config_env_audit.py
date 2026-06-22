@@ -39,7 +39,7 @@ _BEHAVIOR_ENV_VARS: Sequence[tuple[str, str, str]] = (
     (
         "HIERWALK_CACHE_DIR",
         "(unset)",
-        "index/elab disk cache root (unset=~/.cache/hier-walk or XDG_CACHE_HOME)",
+        "override work/cache root (unset=.db_{TOP} under index-cwd or cwd)",
     ),
     (
         "HIERWALK_IGNORE_PATH",

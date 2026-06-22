@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# hier-walk per-top work/cache directory (.db_{TOP})
+.db_*/

@@ -175,8 +175,20 @@ class RunReport:
         return edges
 
 
-def default_log_path(filelist_path: str, output_path: str = "-") -> Path:
-    """Default report log beside TSV output or top filelist."""
+def default_log_path(
+    filelist_path: str,
+    output_path: str = "-",
+    *,
+    work_dir: Optional[Path] = None,
+) -> Path:
+    """Default report log under per-top work dir, or legacy beside output/filelist."""
+    if work_dir is not None:
+        stem = (
+            Path(output_path).stem
+            if output_path != "-"
+            else (Path(filelist_path).stem if filelist_path else "run")
+        )
+        return work_dir / f"{stem}.hier-walk.log"
     if output_path != "-":
         out = Path(output_path).resolve()
         return out.parent / f"{out.name}.hier-walk.log"
