@@ -60,9 +60,11 @@ def _adapt(fl: HchFilelistResult) -> FilelistResult:
 def filelist_link_maps_from_raw(
     fl: HchFilelistResult,
 ) -> tuple[Dict[str, FilelistLinkInfo], Dict[str, List[str]], List[Tuple[str, str, str]]]:
+    from hierwalk.ignore_path import resolved_path_str
+
     info: Dict[str, FilelistLinkInfo] = {}
     for path, meta in fl.filelist_info.items():
-        key = str(Path(path).resolve())
+        key = resolved_path_str(path)
         info[key] = FilelistLinkInfo(
             path=key,
             exists=meta.get("exists") == "1",
@@ -72,10 +74,10 @@ def filelist_link_maps_from_raw(
         )
     children: Dict[str, List[str]] = {}
     for parent, kids in fl.filelist_children.items():
-        pk = str(Path(parent).resolve())
-        children[pk] = [str(Path(k).resolve()) for k in kids]
+        pk = resolved_path_str(parent)
+        children[pk] = [resolved_path_str(k) for k in kids]
     edges = [
-        (str(Path(a).resolve()), str(Path(b).resolve()), kind)
+        (resolved_path_str(a), resolved_path_str(b), kind)
         for a, b, kind in fl.filelist_edges
     ]
     return info, children, edges
@@ -85,15 +87,15 @@ def filelist_provenance_maps(
     fl: FilelistResult,
 ) -> tuple[Dict[str, str], Dict[str, str]]:
     """Normalize RTL path -> listing filelist / chain."""
-    from hierwalk.ignore_path import normalized_ignore_path
+    from hierwalk.ignore_path import resolved_path_str
 
     via: Dict[str, str] = {}
     chain: Dict[str, str] = {}
     for src, listing in fl.source_via_filelist.items():
-        key = normalized_ignore_path(src)
-        via[key] = str(Path(listing).resolve())
+        key = resolved_path_str(src)
+        via[key] = resolved_path_str(listing)
     for src, path_chain in fl.source_filelist_chain.items():
-        chain[normalized_ignore_path(src)] = path_chain
+        chain[resolved_path_str(src)] = path_chain
     return via, chain
 
 

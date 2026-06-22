@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple, Union
 
-from hierwalk.ignore_path import source_path_matches
+from hierwalk.ignore_path import resolved_path_str, source_path_matches
 from hierwalk.index import (
     DesignIndex,
     _ctx_key,
@@ -91,7 +91,7 @@ def _defines_digest(defines: Mapping[str, str]) -> str:
 
 
 def _file_cache_token(path: str) -> str:
-    return hashlib.sha256(str(Path(path).resolve()).encode("utf-8")).hexdigest()[:20]
+    return hashlib.sha256(resolved_path_str(path).encode("utf-8")).hexdigest()[:20]
 
 
 def path_walk_db_cache_key(
@@ -101,17 +101,29 @@ def path_walk_db_cache_key(
     include_dirs: Sequence[str | Path] = (),
     skip_path_patterns: Sequence[str] = (),
     path_digests: Optional[Mapping[str, str]] = None,
+    lazy_source_digests: bool = False,
 ) -> str:
     """Stable namespace for path-walk DB sidecars (independent of full-index cache)."""
+    from hierwalk.manifest import path_stat_fingerprint
+
     hasher = hashlib.sha256()
     hasher.update(f"pw-db-v={PATH_WALK_DB_VERSION}".encode())
-    for raw in sorted({str(Path(s).resolve()) for s in sources}):
+    if lazy_source_digests:
+        hasher.update(b"lazy-stat-v1\0")
+    digest_map = dict(path_digests) if path_digests is not None else None
+    for raw in sorted({resolved_path_str(s) for s in sources}):
         hasher.update(raw.encode())
         hasher.update(b"\0")
-        digest = path_content_digest(Path(raw), path_digests=path_digests)
+        if lazy_source_digests:
+            hasher.update(path_stat_fingerprint(raw).encode())
+            hasher.update(b"\0")
+            continue
+        digest = digest_map.get(raw) if digest_map is not None else None
+        if digest is None:
+            digest = path_content_digest(Path(raw), path_digests=path_digests)
         if digest is not None:
             hasher.update(digest.encode())
-    for raw in sorted({str(Path(p).resolve()) for p in include_dirs}):
+    for raw in sorted({resolved_path_str(p) for p in include_dirs}):
         hasher.update(b"inc:")
         hasher.update(raw.encode())
         hasher.update(b"\0")
@@ -324,7 +336,7 @@ class PathWalkModuleDb:
         jobs: int = 0,
         tier1_prefetch: Optional[bool] = None,
     ) -> None:
-        self._sources = [str(Path(s).resolve()) for s in sources]
+        self._sources = [resolved_path_str(s) for s in sources]
         self._path_digests: Optional[PathDigests] = (
             dict(path_digests) if path_digests is not None else None
         )
@@ -341,7 +353,7 @@ class PathWalkModuleDb:
         self._include_digest_cache: Dict[str, str] = {}
         self._file_via_filelist: Dict[str, str] = dict(file_via_filelist or {})
         self._filelist_children: Dict[str, List[str]] = {
-            str(Path(k).resolve()): [str(Path(c).resolve()) for c in v]
+            resolved_path_str(k): [resolved_path_str(c) for c in v]
             for k, v in (filelist_children or {}).items()
         }
         self._listing_siblings: Dict[str, Tuple[str, ...]] = (
@@ -876,7 +888,7 @@ class PathWalkModuleDb:
     def _listing_for_rtl(self, rtl_file: str) -> str:
         if not rtl_file:
             return ""
-        anchor = str(Path(rtl_file).resolve())
+        anchor = resolved_path_str(rtl_file)
         listing = self._file_via_filelist.get(anchor, "")
         if not listing:
             listing = self._index.filelist_for(anchor) or ""
@@ -888,16 +900,19 @@ class PathWalkModuleDb:
         *,
         include_anchor_rtl: str = "",
     ) -> List[str]:
-        reachable = {str(Path(fl).resolve()) for fl in listings if fl}
         scoped: List[str] = []
-        for src in self._sources:
-            key = str(Path(src).resolve())
-            via = self._file_via_filelist.get(key, "") or self._index.filelist_for(key)
-            if via in reachable:
+        seen: Set[str] = set()
+        for listing in listings:
+            if not listing:
+                continue
+            for key in self._sources_by_listing_ordered.get(listing, ()):
+                if key in seen:
+                    continue
+                seen.add(key)
                 scoped.append(key)
         if include_anchor_rtl:
-            anchor = str(Path(include_anchor_rtl).resolve())
-            if anchor not in scoped and anchor in self._sources:
+            anchor = resolved_path_str(include_anchor_rtl)
+            if anchor not in seen and anchor in self._sources:
                 scoped.insert(0, anchor)
         return scoped
 
@@ -909,12 +924,9 @@ class PathWalkModuleDb:
         """
         listing = self._listing_for_rtl(rtl_file)
         if not listing:
-            anchor = str(Path(rtl_file).resolve()) if rtl_file else ""
+            anchor = resolved_path_str(rtl_file) if rtl_file else ""
             return [anchor] if anchor in self._sources else []
-        child_listings = [
-            str(Path(fl).resolve())
-            for fl in self._filelist_children.get(listing, ())
-        ]
+        child_listings = list(self._filelist_children.get(listing, ()))
         if not child_listings:
             return self._scoped_sources_for_listings([listing], include_anchor_rtl=rtl_file)
         return self._scoped_sources_for_listings(child_listings)
@@ -927,7 +939,7 @@ class PathWalkModuleDb:
     ) -> Tuple[str, ...]:
         if not rtl_file:
             return tuple(self._sources)
-        anchor_key = str(Path(rtl_file).resolve())
+        anchor_key = resolved_path_str(rtl_file)
         cache_key = (anchor_key, policy)
         cached = self._scoped_pool_cache.get(cache_key)
         if cached is not None:
@@ -951,7 +963,7 @@ class PathWalkModuleDb:
             return list(self._sources)
         listing = self._listing_for_rtl(rtl_file)
         if not listing:
-            anchor = str(Path(rtl_file).resolve())
+            anchor = resolved_path_str(rtl_file)
             return [anchor] if anchor in self._sources else list(self._sources)
 
         reachable: Set[str] = {listing}
@@ -983,45 +995,39 @@ class PathWalkModuleDb:
     ) -> Tuple[Dict[str, Set[str]], Dict[str, List[str]]]:
         sets: Dict[str, Set[str]] = {}
         ordered: Dict[str, List[str]] = {}
-        for src in self._sources:
-            key = str(Path(src).resolve())
+        for key in self._sources:
             via = self._file_via_filelist.get(key, "") or self._index.filelist_for(key)
             if not via:
                 continue
-            listing_key = str(Path(via).resolve())
-            sets.setdefault(listing_key, set()).add(key)
-            ordered.setdefault(listing_key, []).append(key)
+            sets.setdefault(via, set()).add(key)
+            ordered.setdefault(via, []).append(key)
         return sets, ordered
 
     def _build_listing_ancestors(self) -> Dict[str, Tuple[str, ...]]:
         parents: Dict[str, List[str]] = {}
         all_listings: Set[str] = set()
-        for parent, kids in self._filelist_children.items():
-            parent_key = str(Path(parent).resolve())
+        for parent_key, kids in self._filelist_children.items():
             all_listings.add(parent_key)
-            for kid in kids:
-                child_key = str(Path(kid).resolve())
+            for child_key in kids:
                 all_listings.add(child_key)
                 parents.setdefault(child_key, []).append(parent_key)
         all_listings.update(self._sources_by_listing.keys())
         out: Dict[str, Tuple[str, ...]] = {}
         for listing in all_listings:
-            resolved = str(Path(listing).resolve())
-            ancestors: Set[str] = {resolved}
-            queue = [resolved]
+            ancestors: Set[str] = {listing}
+            queue = [listing]
             while queue:
                 fl = queue.pop()
                 for parent in parents.get(fl, ()):
                     if parent not in ancestors:
                         ancestors.add(parent)
                         queue.append(parent)
-            out[resolved] = tuple(sorted(ancestors))
+            out[listing] = tuple(sorted(ancestors))
         return out
 
     def _build_listing_siblings(self) -> Dict[str, Tuple[str, ...]]:
         siblings: Dict[str, Set[str]] = {}
-        for kids in self._filelist_children.values():
-            kid_keys = [str(Path(k).resolve()) for k in kids]
+        for kid_keys in self._filelist_children.values():
             for key in kid_keys:
                 siblings.setdefault(key, set()).update(
                     s for s in kid_keys if s != key
@@ -1103,12 +1109,12 @@ class PathWalkModuleDb:
         anchor_rtl: str = "",
     ) -> List[str]:
         """Order RTL paths depth-first through filelist listings (anchor subtree first)."""
-        allowed = {str(Path(s).resolve()) for s in sources}
+        allowed = {resolved_path_str(s) for s in sources}
         seen: Set[str] = set()
         ordered: List[str] = []
 
         if anchor_rtl:
-            anchor = str(Path(anchor_rtl).resolve())
+            anchor = resolved_path_str(anchor_rtl)
             if anchor in allowed:
                 ordered.append(anchor)
                 seen.add(anchor)
@@ -1123,8 +1129,7 @@ class PathWalkModuleDb:
                 if src in allowed:
                     ordered.append(src)
 
-        for src in self._sources:
-            key = str(Path(src).resolve())
+        for key in self._sources:
             if key in allowed and key not in seen:
                 ordered.append(key)
                 seen.add(key)
@@ -1414,7 +1419,6 @@ class PathWalkModuleDb:
         )
         with self._activation_lock:
             self._activation_pending.append(key)
-        self._kick_activation_worker()
 
     def _kick_activation_worker(self) -> None:
         if self._activation_thread is not None and self._activation_thread.is_alive():
@@ -1482,25 +1486,21 @@ class PathWalkModuleDb:
         )
 
     def drain_activation_audit(self, *, wait: bool = True) -> int:
-        """Wait for background activation audits; return resolved record count."""
-        if wait:
-            while True:
-                with self._activation_lock:
-                    pending = len(self._activation_pending)
-                if self._activation_thread is None or not self._activation_thread.is_alive():
-                    if pending == 0:
-                        break
-                if pending == 0 and (
-                    self._activation_thread is None or not self._activation_thread.is_alive()
-                ):
-                    break
-                if self._activation_thread is not None:
-                    self._activation_thread.join(timeout=0.25)
-                else:
-                    self._kick_activation_worker()
-            if self._activation_thread is not None:
-                self._activation_thread.join()
-                self._activation_thread = None
+        """Resolve queued activation audits (deferred until report/end of walk)."""
+        if not wait:
+            return sum(
+                1
+                for rec in self._mapped_inst_records.values()
+                if rec.activation != "pending"
+            )
+        self._kick_activation_worker()
+        if self._activation_thread is not None:
+            self._activation_thread.join()
+            self._activation_thread = None
+        with self._activation_lock:
+            while self._activation_pending:
+                key = self._activation_pending.pop(0)
+                self._resolve_activation_record(key)
         return sum(
             1 for rec in self._mapped_inst_records.values() if rec.activation != "pending"
         )
@@ -2494,11 +2494,6 @@ class PathWalkModuleDb:
                     return edge
 
         scope_anchor = avoid
-        scoped_pool = (
-            self._scoped_pool_for_policy(scope_anchor, policy=policy)
-            if scope_anchor
-            else None
-        )
         if avoid:
             selective = self._selective_child_edge_lookup(
                 parent_module,
@@ -2525,6 +2520,11 @@ class PathWalkModuleDb:
                 )
                 return selective
 
+        scoped_pool = (
+            self._scoped_pool_for_policy(scope_anchor, policy=policy)
+            if scope_anchor
+            else None
+        )
         self._trace(
             f"pw-db inst-resolve tier0-candidates {parent_module}.{inst_leaf} "
             f"file={avoid_name}"

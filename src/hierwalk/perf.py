@@ -116,6 +116,22 @@ def path_walk_recovery_pass_cap() -> int:
     return 32
 
 
+def pw_lazy_startup_digest() -> bool:
+    """
+    Path-walk startup: skip hashing every filelist source up front.
+
+    Uses path+size+mtime for cache namespace; per-file content digests load on
+    first tier0/preprocess sidecar touch only. ``HIERWALK_PW_LAZY_DIGEST=0`` restores
+    eager ``hash_paths_parallel`` over the full filelist.
+    """
+    raw = os.environ.get("HIERWALK_PW_LAZY_DIGEST", "").strip().lower()
+    if raw in ("0", "off", "false", "no", "disable", "disabled"):
+        return False
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    return True
+
+
 def slow_file_log_threshold_sec() -> Optional[float]:
     """
     Log per-file preprocess/scan timing when a source exceeds this many seconds.

@@ -28,7 +28,11 @@ from hierwalk.connect_endpoints import (
 from hierwalk.connect_request import ConnectivityRequest
 from hierwalk.connectivity import ConnectivityBatchResult, ConnectivitySession
 from hierwalk.filelist import FilelistResult
-from hierwalk.ignore_path import resolve_ignore_path_patterns, source_path_matches
+from hierwalk.ignore_path import (
+    resolve_ignore_path_patterns,
+    resolved_path_str,
+    source_path_matches,
+)
 from hierwalk.index import DesignIndex, _ctx_key
 from hierwalk.inst_scan import expand_inst_names
 from hierwalk.lazy_scope import endpoint_specs_from_request, hierarchy_prefixes
@@ -2114,7 +2118,7 @@ def acquire_path_walk_session(
 
     defines = dict(fl.defines)
     defines.update(extra_defines or {})
-    sources = [str(Path(p).resolve()) for p in fl.source_files]
+    sources = [resolved_path_str(p) for p in fl.source_files]
     path_digests = hash_paths_parallel(sources, jobs=jobs)
     session_key = path_walk_session_key(
         fl,
@@ -2662,45 +2666,65 @@ def create_path_walk_index(
         library_dirs=[str(p) for p in fl.library_dirs],
         libexts=list(fl.libexts),
         file_via_filelist={
-            str(Path(k).resolve()): v
+            resolved_path_str(k): resolved_path_str(v)
             for k, v in (fl.source_via_filelist or {}).items()
         },
         file_filelist_chain={
-            str(Path(k).resolve()): v
+            resolved_path_str(k): v
             for k, v in (fl.source_filelist_chain or {}).items()
         },
         preprocess_include_dirs=[str(p) for p in fl.include_dirs],
         preprocess_defines=dict(defines),
     )
-    sources = [str(Path(p).resolve()) for p in fl.source_files]
+    sources = [resolved_path_str(p) for p in fl.source_files]
+    from hierwalk.perf import pw_lazy_startup_digest
+
+    lazy_digest = pw_lazy_startup_digest()
     if path_digests is None:
         t_hash = time.perf_counter()
-        if on_progress:
-            on_progress(f"path-walk: hashing {len(sources)} sources")
-        if diagnostic_inst_trace:
-            _path_walk_trace_emit(
-                f"pw-db startup hashing {len(sources)} source(s)",
-                trace_stream=trace_stream,
-                trace_log_fh=trace_log_fh,
-                on_progress=on_progress,
-                force=True,
-            )
-        path_digests = hash_paths_parallel(sources, jobs=jobs)
-        set_digest_scope(path_digests)
-        if diagnostic_inst_trace:
-            _path_walk_trace_emit(
-                f"pw-db startup hashing done ms={(time.perf_counter() - t_hash) * 1000.0:.1f}",
-                trace_stream=trace_stream,
-                trace_log_fh=trace_log_fh,
-                on_progress=on_progress,
-                force=True,
-            )
+        if lazy_digest:
+            path_digests = {}
+            set_digest_scope(path_digests)
+            if diagnostic_inst_trace:
+                _path_walk_trace_emit(
+                    f"pw-db startup digest lazy (skip hash of {len(sources)} source(s))",
+                    trace_stream=trace_stream,
+                    trace_log_fh=trace_log_fh,
+                    on_progress=on_progress,
+                    force=True,
+                )
+            elif on_progress:
+                on_progress(
+                    f"path-walk: lazy digest ({len(sources)} sources; hash on first touch)"
+                )
+        else:
+            if on_progress:
+                on_progress(f"path-walk: hashing {len(sources)} sources")
+            if diagnostic_inst_trace:
+                _path_walk_trace_emit(
+                    f"pw-db startup hashing {len(sources)} source(s)",
+                    trace_stream=trace_stream,
+                    trace_log_fh=trace_log_fh,
+                    on_progress=on_progress,
+                    force=True,
+                )
+            path_digests = hash_paths_parallel(sources, jobs=jobs)
+            set_digest_scope(path_digests)
+            if diagnostic_inst_trace:
+                _path_walk_trace_emit(
+                    f"pw-db startup hashing done ms={(time.perf_counter() - t_hash) * 1000.0:.1f}",
+                    trace_stream=trace_stream,
+                    trace_log_fh=trace_log_fh,
+                    on_progress=on_progress,
+                    force=True,
+                )
     cache_key = path_walk_db_cache_key(
         sources,
         defines=defines,
         include_dirs=[str(p) for p in fl.include_dirs],
         skip_path_patterns=path_patterns,
         path_digests=path_digests,
+        lazy_source_digests=lazy_digest,
     )
     def _db_trace(msg: str) -> None:
         _path_walk_trace_emit(
@@ -2725,9 +2749,7 @@ def create_path_walk_index(
         on_trace=_db_trace,
         on_progress=on_progress,
         file_via_filelist=via_map,
-        filelist_children={
-            str(k): list(v) for k, v in (fl.filelist_children or {}).items()
-        },
+        filelist_children=dict(fl.filelist_children or {}),
         path_digests=path_digests,
         jobs=jobs,
         diagnostic_inst_trace=diagnostic_inst_trace,
@@ -2879,6 +2901,7 @@ def run_path_walk_connect(
         )
         batch = session.run_request(request, jobs=1, on_progress=on_progress)
         state.stats.checks_run = len(batch.results)
+        state.mod_db.drain_activation_audit(wait=True)
         state.mod_db.emit_activation_audit_report()
         return batch, index, state
     finally:

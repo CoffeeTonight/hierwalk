@@ -371,6 +371,37 @@ def test_inst_find_emits_preprocess_and_scan_trace(tmp_path: Path):
     assert "source=raw" in text
 
 
+def test_lazy_startup_digest_skips_full_filelist_hash(tmp_path: Path, monkeypatch):
+    n_stub = 200
+    allinst = tmp_path / "allinst.v"
+    allinst.write_text("module TOP (); endmodule\n", encoding="utf-8")
+    for i in range(n_stub):
+        (tmp_path / f"stub_{i}.v").write_text(f"module S{i} (); endmodule\n", encoding="utf-8")
+    fl_path = tmp_path / "design.f"
+    fl_path.write_text(
+        f"{allinst.resolve()}\n"
+        + "\n".join(str((tmp_path / f"stub_{i}.v").resolve()) for i in range(n_stub))
+        + "\n",
+        encoding="utf-8",
+    )
+    fl = parse_filelist(str(fl_path), index_cwd=str(tmp_path))
+
+    read_calls: list[str] = []
+    from hierwalk.manifest import _read_file_digest
+
+    orig = _read_file_digest
+
+    def traced_read(path):
+        read_calls.append(str(path))
+        return orig(path)
+
+    monkeypatch.setattr("hierwalk.manifest._read_file_digest", traced_read)
+    monkeypatch.setenv("HIERWALK_PW_LAZY_DIGEST", "1")
+
+    create_path_walk_index(fl, "TOP", defines={}, no_cache=True, jobs=1)
+    assert len(read_calls) < 20
+
+
 def test_provisional_map_reports_activation_after_audit(tmp_path: Path):
     rtl = tmp_path / "top.v"
     rtl.write_text(
