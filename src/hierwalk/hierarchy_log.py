@@ -561,6 +561,7 @@ def path_walk_trace_show_message(message: str) -> bool:
             msg.startswith("pw-db preprocess ")
             or msg.startswith("pw-db inst-find ")
             or msg.startswith("pw-db inst-resolve ")
+            or msg.startswith("pw-db activation")
         ):
             return True
         return False

@@ -2879,6 +2879,7 @@ def run_path_walk_connect(
         )
         batch = session.run_request(request, jobs=1, on_progress=on_progress)
         state.stats.checks_run = len(batch.results)
+        state.mod_db.emit_activation_audit_report()
         return batch, index, state
     finally:
         if opened_log and trace_log_fh is not None:

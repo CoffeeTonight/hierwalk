@@ -267,6 +267,28 @@ class DeferredResolve:
     reason: str = ""
 
 
+MappedInstKey = Tuple[str, str, Tuple[Tuple[str, str], ...]]
+
+
+@dataclass
+class MappedInstRecord:
+    """
+    Provisional instance map: RTL text match first, activation resolved later.
+
+    Hierarchy walk uses the provisional map immediately. A background audit compares
+    raw (comment-stripped) vs ifdef-filtered bodies under current defines.
+    """
+
+    parent_module: str
+    inst_leaf: str
+    child_module: str
+    file_path: str
+    parent_ctx: Tuple[Tuple[str, str], ...] = ()
+    map_source: str = "selective"
+    activation: str = "pending"
+    activation_detail: str = ""
+
+
 def _parent_ctx_key(ctx: Optional[Mapping[str, str]]) -> Tuple[Tuple[str, str], ...]:
     if not ctx:
         return ()
@@ -277,8 +299,9 @@ class PathWalkModuleDb:
     """
     Incremental module→files map (Tier 0) and per-file validated scan (Tier 1).
 
-    Tier 1 uses light preprocess + instance scan; Tier 0 hits are always confirmed
-    before use.
+    Instance/module mapping on the walk hot path is **provisional**: comment-stripped
+    RTL is scanned, edges are registered immediately, and ``ifdef``/``ifndef``
+    activation is resolved asynchronously (see :meth:`drain_activation_audit`).
     """
 
     def __init__(
@@ -375,6 +398,10 @@ class PathWalkModuleDb:
         self._tier1_scan_lock = threading.Lock()
         self._defer_queue: List[DeferredResolve] = []
         self._defer_seen: Set[Tuple[str, str, str, str, Optional[Tuple[str, str]]]] = set()
+        self._mapped_inst_records: Dict[MappedInstKey, MappedInstRecord] = {}
+        self._activation_pending: List[MappedInstKey] = []
+        self._activation_lock = threading.Lock()
+        self._activation_thread: Optional[threading.Thread] = None
 
     @property
     def cache_root(self) -> Optional[Path]:
@@ -1351,8 +1378,159 @@ class PathWalkModuleDb:
         if wait_all and self._tier1_prefetch_thread is not None:
             self._tier1_prefetch_thread.join()
             self._tier1_prefetch_thread = None
+        if wait_all:
+            self.drain_activation_audit(wait=True)
         if self._snapshot_dirty:
             self.write_module_index_snapshot()
+
+    def _mapped_inst_key(
+        self,
+        parent_module: str,
+        inst_leaf: str,
+        parent_ctx: Mapping[str, str],
+    ) -> MappedInstKey:
+        return (parent_module, inst_leaf, _parent_ctx_key(parent_ctx))
+
+    def _register_provisional_inst_map(
+        self,
+        parent_module: str,
+        inst_leaf: str,
+        edge: InstanceEdge,
+        fpath: str,
+        *,
+        parent_ctx: Mapping[str, str],
+        map_source: str,
+    ) -> None:
+        key = self._mapped_inst_key(parent_module, inst_leaf, parent_ctx)
+        if key in self._mapped_inst_records:
+            return
+        self._mapped_inst_records[key] = MappedInstRecord(
+            parent_module=parent_module,
+            inst_leaf=inst_leaf,
+            child_module=edge.child_module,
+            file_path=str(Path(fpath).resolve()),
+            parent_ctx=_parent_ctx_key(parent_ctx),
+            map_source=map_source,
+        )
+        with self._activation_lock:
+            self._activation_pending.append(key)
+        self._kick_activation_worker()
+
+    def _kick_activation_worker(self) -> None:
+        if self._activation_thread is not None and self._activation_thread.is_alive():
+            return
+
+        def _run() -> None:
+            while True:
+                with self._activation_lock:
+                    if not self._activation_pending:
+                        break
+                    key = self._activation_pending.pop(0)
+                self._resolve_activation_record(key)
+
+        self._activation_thread = threading.Thread(
+            target=_run,
+            name="pw-db-activation-audit",
+            daemon=True,
+        )
+        self._activation_thread.start()
+
+    def _resolve_activation_record(self, key: MappedInstKey) -> None:
+        rec = self._mapped_inst_records.get(key)
+        if rec is None:
+            return
+        parent_ctx = dict(rec.parent_ctx)
+        try:
+            raw_text = self._raw_text_for_inst_find(rec.file_path)
+            full_text = self._preprocessed_text_for_file(rec.file_path)
+        except OSError:
+            rec.activation = "unknown"
+            rec.activation_detail = "read or preprocess failed"
+            self._trace(
+                f"pw-db activation {rec.parent_module}.{rec.inst_leaf} "
+                f"unknown ({rec.activation_detail})"
+            )
+            return
+
+        mod_rec = self._index.get_module(rec.parent_module)
+        _raw_header, raw_body = _module_header_body(raw_text, rec.parent_module)
+        full_header, full_body = _module_header_body(full_text, rec.parent_module)
+        raw_params = (
+            dict(mod_rec.raw_params)
+            if mod_rec and mod_rec.raw_params
+            else parse_param_pairs(full_header or _raw_header)
+        )
+        pmap = resolve_param_map(raw_params, parent=parent_ctx)
+        raw_edge = find_hierarchy_instance(raw_body, rec.inst_leaf, param_map=pmap)
+        ifdef_edge = find_hierarchy_instance(full_body, rec.inst_leaf, param_map=pmap)
+        if ifdef_edge is not None:
+            rec.activation = "active"
+            rec.activation_detail = (
+                f"visible under current defines ({rec.map_source} map)"
+            )
+        elif raw_edge is not None:
+            rec.activation = "inactive"
+            rec.activation_detail = (
+                "mapped from raw RTL; gated by `ifdef`/`ifndef` under current defines"
+            )
+        else:
+            rec.activation = "unknown"
+            rec.activation_detail = "not found after ifdef-filtered rescan"
+        self._trace(
+            f"pw-db activation {rec.parent_module}.{rec.inst_leaf} "
+            f"->{rec.child_module} {rec.activation} ({rec.activation_detail})"
+        )
+
+    def drain_activation_audit(self, *, wait: bool = True) -> int:
+        """Wait for background activation audits; return resolved record count."""
+        if wait:
+            while True:
+                with self._activation_lock:
+                    pending = len(self._activation_pending)
+                if self._activation_thread is None or not self._activation_thread.is_alive():
+                    if pending == 0:
+                        break
+                if pending == 0 and (
+                    self._activation_thread is None or not self._activation_thread.is_alive()
+                ):
+                    break
+                if self._activation_thread is not None:
+                    self._activation_thread.join(timeout=0.25)
+                else:
+                    self._kick_activation_worker()
+            if self._activation_thread is not None:
+                self._activation_thread.join()
+                self._activation_thread = None
+        return sum(
+            1 for rec in self._mapped_inst_records.values() if rec.activation != "pending"
+        )
+
+    def format_activation_audit_lines(self) -> List[str]:
+        """Human-readable activation summary for run reports / trace."""
+        if not self._mapped_inst_records:
+            return []
+        lines = ["pw-db activation-report begin"]
+        pending = 0
+        for rec in sorted(
+            self._mapped_inst_records.values(),
+            key=lambda r: (r.parent_module, r.inst_leaf),
+        ):
+            if rec.activation == "pending":
+                pending += 1
+            lines.append(
+                f"pw-db activation map {rec.parent_module}.{rec.inst_leaf} "
+                f"->{rec.child_module} [{rec.activation}] "
+                f"src={rec.map_source} rtl={Path(rec.file_path).name} "
+                f"{rec.activation_detail}".rstrip()
+            )
+        if pending:
+            lines.append(f"pw-db activation-report pending={pending}")
+        lines.append("pw-db activation-report end")
+        return lines
+
+    def emit_activation_audit_report(self) -> None:
+        for line in self.format_activation_audit_lines():
+            self._trace(line)
 
     def shutdown_workers(self, *, wait: bool = True) -> None:
         self.drain_background_workers(wait_all=wait)
@@ -1930,6 +2108,7 @@ class PathWalkModuleDb:
         parent_module: str,
         edge: InstanceEdge,
         *,
+        inst_leaf: str,
         parent_ctx: Mapping[str, str],
     ) -> None:
         key = str(Path(fpath).resolve())
@@ -1968,6 +2147,14 @@ class PathWalkModuleDb:
         self._note_regex_modules(key, [parent_module, child])
         self._prefer_file[parent_module] = key
         self._register_inst_edges(parent_module, parent_ctx, instances)
+        self._register_provisional_inst_map(
+            parent_module,
+            inst_leaf=inst_leaf or edge.inst_name,
+            edge=edge,
+            fpath=fpath,
+            parent_ctx=parent_ctx,
+            map_source="selective",
+        )
         self._snapshot_dirty = True
 
     def _ensure_module_light(self, module_name: str, fpath: str) -> bool:
@@ -2324,6 +2511,7 @@ class PathWalkModuleDb:
                     avoid,
                     parent_module,
                     selective,
+                    inst_leaf=inst_leaf,
                     parent_ctx=parent_ctx,
                 )
                 self._trace(
@@ -2392,6 +2580,7 @@ class PathWalkModuleDb:
                         fpath,
                         parent_module,
                         selective,
+                        inst_leaf=inst_leaf,
                         parent_ctx=parent_ctx,
                     )
                     self._trace(
@@ -2437,6 +2626,14 @@ class PathWalkModuleDb:
                 if edge is not None:
                     self._apply_file_modules(fpath, modules)
                     self._prefer_file[parent_module] = fpath
+                    self._register_provisional_inst_map(
+                        parent_module,
+                        inst_leaf,
+                        edge,
+                        fpath,
+                        parent_ctx=parent_ctx,
+                        map_source="tier1",
+                    )
                     self._trace(
                         f"pw-db   edge hit {parent_module}.{inst_leaf} "
                         f"via {Path(fpath).name} -> child {edge.child_module!r}"

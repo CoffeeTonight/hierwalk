@@ -371,6 +371,63 @@ def test_inst_find_emits_preprocess_and_scan_trace(tmp_path: Path):
     assert "source=raw" in text
 
 
+def test_provisional_map_reports_activation_after_audit(tmp_path: Path):
+    rtl = tmp_path / "top.v"
+    rtl.write_text(
+        """
+        module TOP;
+        `ifdef ENABLED
+          CHILD u_gated ();
+        `endif
+          CHILD u_open ();
+        endmodule
+        module CHILD (); endmodule
+        """,
+        encoding="utf-8",
+    )
+    fl_path = tmp_path / "design.f"
+    fl_path.write_text(f"{rtl.resolve()}\n", encoding="utf-8")
+    fl = parse_filelist(str(fl_path), index_cwd=str(tmp_path))
+
+    from hierwalk.path_walk_db import PathWalkModuleDb
+
+    index, mod_db = create_path_walk_index(
+        fl,
+        "TOP",
+        defines={},
+        no_cache=True,
+        jobs=1,
+        diagnostic_inst_trace=True,
+    )
+    mod_db.resolve_child_edge(
+        "TOP",
+        {},
+        "u_gated",
+        current_file=str(rtl.resolve()),
+        policy=RESOLVE_CONFIDENT,
+    )
+    mod_db.resolve_child_edge(
+        "TOP",
+        {},
+        "u_open",
+        current_file=str(rtl.resolve()),
+        policy=RESOLVE_CONFIDENT,
+    )
+    mod_db.drain_activation_audit(wait=True)
+    lines = mod_db.format_activation_audit_lines()
+    joined = "\n".join(lines)
+    assert "u_gated" in joined
+    assert "u_open" in joined
+    gated = mod_db._mapped_inst_records[
+        mod_db._mapped_inst_key("TOP", "u_gated", {})
+    ]
+    open_inst = mod_db._mapped_inst_records[
+        mod_db._mapped_inst_key("TOP", "u_open", {})
+    ]
+    assert gated.activation == "inactive"
+    assert open_inst.activation == "active"
+
+
 def test_inst_leaf_index_avoids_repeat_selective_scan(tmp_path: Path, monkeypatch):
     fl_path = _write_large_flat_top(tmp_path, n_inst=6000)
     fl = parse_filelist(str(fl_path), index_cwd=str(tmp_path))
@@ -401,6 +458,7 @@ def test_inst_leaf_index_avoids_repeat_selective_scan(tmp_path: Path, monkeypatc
     state = PathWalkState(index=index, top="SOC_TOP", mod_db=mod_db)
     state.ensure_root()
     state.ensure_path("SOC_TOP.u_ip_100")
+    mod_db.drain_activation_audit(wait=True)
     find_calls.clear()
     state.ensure_path("SOC_TOP.u_ip_200")
     assert "u_ip_200" in find_calls
