@@ -422,6 +422,9 @@ class PathWalkModuleDb:
     def _trace(self, message: str) -> None:
         if not message:
             return
+        if self._on_trace is not None:
+            self._on_trace(message)
+            return
         if self._diagnostic_inst_trace and (
             message.startswith("pw-db preprocess")
             or message.startswith("pw-db inst-")
@@ -431,8 +434,6 @@ class PathWalkModuleDb:
             from hierwalk.hierarchy_log import emit_path_walk_log
 
             emit_path_walk_log(message, stream=sys.stderr)
-        if self._on_trace is not None:
-            self._on_trace(message)
 
     @staticmethod
     def _elapsed_ms(t0: float) -> float:
@@ -1823,6 +1824,7 @@ class PathWalkModuleDb:
 
     def tier1_scan_file(self, path: str) -> Dict[str, ModuleRecord]:
         """Light preprocess + instance scan for one translation unit."""
+        t0 = time.perf_counter()
         key = str(Path(path).resolve())
         with self._tier1_scan_lock:
             mem = self._validated_memory.get(key)
@@ -1856,7 +1858,10 @@ class PathWalkModuleDb:
                 summary = ",".join(
                     f"{n}({len(r.instances)}inst)" for n, r in sorted(disk.items())
                 )
-                self._trace(f"pw-db tier1 cache {Path(key).name} -> {summary or '(none)'}")
+                self._trace(
+                    f"pw-db tier1-scan done {Path(key).name} source=cache "
+                    f"ms={self._elapsed_ms(t0):.1f} -> {summary or '(none)'}"
+                )
                 return disk
 
             # Tier-1 must honour filelist + in-file defines (ifdef instance names, gated modules).
@@ -1876,7 +1881,11 @@ class PathWalkModuleDb:
             summary = ",".join(
                 f"{n}({len(r.instances)}inst)" for n, r in sorted(out.items())
             )
-            self._trace(f"pw-db tier1 scan {Path(key).name} -> {summary or '(none)'}")
+            self._trace(
+                f"pw-db tier1-scan done {Path(key).name} source=cold "
+                f"ms={self._elapsed_ms(t0):.1f} chars={len(text)} "
+                f"-> {summary or '(none)'}"
+            )
             return out
 
     def _invalidate_folded_edges_cache(

@@ -1443,12 +1443,19 @@ class PathWalkState:
                     return False
                 raw_source_has_inst = False
                 if parent_rec is not None and parent_rec.file_path and miss_leaf:
+                    t_probe = time.perf_counter()
                     try:
                         raw_source_has_inst = miss_leaf in Path(
                             parent_rec.file_path
                         ).read_text(encoding="utf-8", errors="ignore")
                     except OSError:
                         raw_source_has_inst = False
+                    probe_ms = (time.perf_counter() - t_probe) * 1000.0
+                    self._emit_walk(
+                        f"walk raw-inst-probe scope={cur} leaf={miss_leaf!r} "
+                        f"hit={raw_source_has_inst} rtl={Path(parent_rec.file_path).name} "
+                        f"ms={probe_ms:.1f}"
+                    )
                 self._queue_walk_miss(
                     cur,
                     miss_leaf,
@@ -2409,6 +2416,22 @@ def _wire_db_trace_to_state(mod_db: PathWalkModuleDb, state: PathWalkState) -> N
     mod_db._on_trace = state._emit_walk
 
 
+_path_walk_phase_emit: Optional[Callable[[str], None]] = None
+
+
+def bind_path_walk_phase_emit(
+    emit: Optional[Callable[[str], None]],
+) -> None:
+    """Register walk trace sink for connect-COI / comb-build phases."""
+    global _path_walk_phase_emit
+    _path_walk_phase_emit = emit
+
+
+def emit_path_walk_phase(message: str) -> None:
+    if _path_walk_phase_emit is not None:
+        _path_walk_phase_emit(message)
+
+
 def build_path_walk_state_from_specs(
     index: DesignIndex,
     top: str,
@@ -2902,10 +2925,31 @@ def run_path_walk_connect(
                 rows=walk_rows,
             ),
         )
-        batch = session.run_request(request, jobs=1, on_progress=on_progress)
-        state.stats.checks_run = len(batch.results)
-        state.mod_db.drain_activation_audit(wait=True)
-        state.mod_db.emit_activation_audit_report()
+        bind_path_walk_phase_emit(state._emit_walk)
+        try:
+            t_coi = time.perf_counter()
+            state._emit_walk(
+                f"connect-coi begin checks={len(request.checks)} "
+                f"rows={len(walk_rows)}"
+            )
+            batch = session.run_request(request, jobs=1, on_progress=on_progress)
+            state._emit_walk(
+                f"connect-coi done checks={len(batch.results)} "
+                f"modules_cached={session.modules_cached} "
+                f"ms={(time.perf_counter() - t_coi) * 1000.0:.1f}"
+            )
+            state.stats.checks_run = len(batch.results)
+            t_act = time.perf_counter()
+            state.mod_db.drain_activation_audit(wait=True)
+            state.mod_db.emit_activation_audit_report()
+            if state.mod_db._mapped_inst_records:
+                state._emit_walk(
+                    f"pw-db activation-audit done "
+                    f"maps={len(state.mod_db._mapped_inst_records)} "
+                    f"ms={(time.perf_counter() - t_act) * 1000.0:.1f}"
+                )
+        finally:
+            bind_path_walk_phase_emit(None)
         return batch, index, state
     finally:
         if opened_log and trace_log_fh is not None:

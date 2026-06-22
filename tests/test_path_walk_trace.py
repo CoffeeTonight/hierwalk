@@ -40,6 +40,16 @@ def test_path_walk_trace_filter_hides_search_keeps_hits():
         "pw-db inst-find done SOC_TOP.u_ip file=allinst.v hit ms=12.3 "
         "preprocess=10.0 module_body=0.1 inst_scan=2.2 body_chars=50000"
     )
+    assert path_walk_trace_show_message(
+        "pw-db tier1-scan done allinst.v source=cold ms=120000.0 chars=3451958"
+    )
+    assert path_walk_trace_show_message("connect-coi done checks=1 modules_cached=3 ms=45000.0")
+    assert path_walk_trace_show_message(
+        "connect-comb build module=TOP body_chars=3451958 insts=12 ms=8000.0"
+    )
+    assert path_walk_trace_show_message(
+        "walk raw-inst-probe scope=TOP.u_x leaf='u_y' hit=False rtl=allinst.v ms=1200.0"
+    )
     assert path_walk_trace_show_message("pw-db preprocess enter allinst.v")
     assert path_walk_trace_show_message(
         "pw-db preprocess done allinst.v source=cold ms=9000.0 chars=120000"
@@ -143,7 +153,9 @@ def test_path_walk_connect_trace_writes_pw_db_to_run_log(tmp_path: Path):
     text = log_path.read_text(encoding="utf-8")
     assert "# path-walk trace" in text
     assert "pw-db tier0" not in text
-    assert "pw-db tier1" not in text
+    assert "pw-db tier1 scan " not in text
+    assert "connect-coi done" in text
+    assert "ms=" in text
     assert "ok A" in text
     assert "[hier-walk path-walk]" in text
 

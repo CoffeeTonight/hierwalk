@@ -345,6 +345,36 @@ def test_selective_inst_find_uses_raw_not_full_preprocess(tmp_path: Path, monkey
     assert preprocess_calls == []
 
 
+def test_inst_trace_not_duplicated_on_stderr(tmp_path: Path):
+    fl_path = _write_large_flat_top(tmp_path, n_inst=20)
+    fl = parse_filelist(str(fl_path), index_cwd=str(tmp_path))
+    import sys
+
+    cap = io.StringIO()
+    old_stderr = sys.stderr
+    sys.stderr = cap
+    try:
+        run_path_walk_connect(
+            ConnectivityRequest(
+                checks=(
+                    ConnectivityCheck("SOC_TOP.u_ip_5", "SOC_TOP.u_ip_5"),
+                ),
+                top="SOC_TOP",
+            ),
+            fl,
+            top="SOC_TOP",
+            no_cache=True,
+            jobs=1,
+            trace_stream=sys.stderr,
+            diagnostic_inst_trace=True,
+        )
+    finally:
+        sys.stderr = old_stderr
+    text = cap.getvalue()
+    assert text.count("pw-db inst-find enter SOC_TOP.u_ip_5") == 1
+    assert text.count("pw-db inst-resolve enter SOC_TOP.u_ip_5") == 1
+
+
 def test_inst_find_emits_preprocess_and_scan_trace(tmp_path: Path):
     fl_path = _write_large_flat_top(tmp_path, n_inst=50)
     fl = parse_filelist(str(fl_path), index_cwd=str(tmp_path))

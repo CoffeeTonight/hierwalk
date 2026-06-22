@@ -691,6 +691,9 @@ def _build_module_index_entry(
     over_approximate_if: bool = True,
     ff_barrier: bool = False,
 ) -> ModuleConnectIndex:
+    import time
+
+    t0 = time.perf_counter()
     rec = index.get_module(mod_name)
     body = index.module_body(mod_name) if rec else ""
     if not body.strip():
@@ -722,4 +725,16 @@ def _build_module_index_entry(
                 over_approximate_if=over_approximate_if,
             )
     cache[key] = built
+    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+    body_chars = len(body)
+    if elapsed_ms >= 50.0 or body_chars >= 256 * 1024:
+        try:
+            from hierwalk.path_walk import emit_path_walk_phase
+
+            emit_path_walk_phase(
+                f"connect-comb build module={mod_name} body_chars={body_chars} "
+                f"insts={len(built.inst_ports)} ms={elapsed_ms:.1f}"
+            )
+        except ImportError:
+            pass
     return built

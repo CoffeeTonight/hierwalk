@@ -524,7 +524,7 @@ def format_signal_tail_line(
     status = "hit" if hit else "miss"
     rtl_name = Path(rtl_file).name if rtl_file else "?"
     target = f" target={target_path}" if target_path else ""
-    timing = f" check_ms={check_ms:.1f}" if check_ms > 0 else ""
+    timing = f" check_ms={check_ms:.1f}"
     lines_note = f" lines={rtl_lines}" if rtl_lines > 0 else ""
     return (
         f"signal-tail {status} kind={kind} scope={parent_path} tail={tail!r}"
@@ -544,6 +544,12 @@ def path_walk_trace_show_message(message: str) -> bool:
         return False
     if msg.startswith("signal-tail "):
         return True
+    if msg.startswith("connect-coi "):
+        return True
+    if msg.startswith("connect-comb "):
+        return True
+    if msg.startswith("walk raw-inst-probe "):
+        return True
     if msg.startswith("confident-miss "):
         return True
     if msg.startswith("recovery-pass "):
@@ -561,6 +567,7 @@ def path_walk_trace_show_message(message: str) -> bool:
             msg.startswith("pw-db preprocess ")
             or msg.startswith("pw-db inst-find ")
             or msg.startswith("pw-db inst-resolve ")
+            or msg.startswith("pw-db tier1-scan ")
             or msg.startswith("pw-db activation")
         ):
             return True
