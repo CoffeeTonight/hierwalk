@@ -41,4 +41,6 @@ def test_generate_block_segment_provisional_pass_through(tmp_path: Path):
     assert scope.refine_status == "provisional"
     assert "provisional" in scope.walk_note.lower()
     assert target in state.rows_by_path
-    assert batch.results[0].connected is True
+    assert target in state.rows_by_path
+    assert batch.results[0].connected_logical is False
+    assert batch.results[0].connected is False

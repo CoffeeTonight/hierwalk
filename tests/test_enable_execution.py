@@ -298,7 +298,7 @@ def test_filelist_json_path_runs_suite_not_legacy_hierarchy(tmp_path: Path):
         check=True,
     )
     err = proc.stderr
-    assert "test-suite 1 step(s)" in err
+    assert "test-suite 1 verification block(s), text then logical" in err
     assert "enable-audit: block=run_on_full_index raw_enable=0 parsed_enable=0 action=SKIP" in err
     assert "effective_mode=hierarchy" not in err
     assert "index_loader=load_or_build_index" not in err
@@ -399,7 +399,9 @@ def test_verify_enable_gate_json_subprocess():
     assert "kind=run_on_full_index" not in err
     assert "index_loader=load_or_build_index" not in err
     assert "index: building from" not in err
-    assert (root / "VERIFY_gate_conn.tsv").is_file()
+    assert (root / ".db_stress_top" / "conn.text.tsv").is_file()
+    assert (root / ".db_stress_top" / "conn.tsv").is_file()
+    assert (root / "VERIFY_gate_trace.text.tsv").is_file()
     assert (root / "VERIFY_gate_trace.tsv").is_file()
     assert not (root / "VERIFY_gate_instances.tsv").exists()
     assert not (root / "VERIFY_gate_cone.tsv").exists()

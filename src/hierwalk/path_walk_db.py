@@ -414,6 +414,15 @@ class PathWalkModuleDb:
         self._activation_pending: List[MappedInstKey] = []
         self._activation_lock = threading.Lock()
         self._activation_thread: Optional[threading.Thread] = None
+        self._text_conn_fast: bool = False
+
+    @property
+    def text_conn_fast(self) -> bool:
+        """When true, defer tier1/recovery/activation work to logical-conn."""
+        return self._text_conn_fast
+
+    def set_text_conn_fast(self, enabled: bool) -> None:
+        self._text_conn_fast = bool(enabled)
 
     @property
     def cache_root(self) -> Optional[Path]:
@@ -1425,7 +1434,13 @@ class PathWalkModuleDb:
         self._trace(f"pw-db tier1 prefetch start ({len(work)} file(s))")
         return len(work)
 
-    def drain_background_workers(self, *, wait_all: bool = True) -> None:
+    def drain_background_workers(
+        self,
+        *,
+        wait_all: bool = True,
+        skip_activation: bool = False,
+        skip_snapshot: bool = False,
+    ) -> None:
         """Ingest completed tier-0 workers; optionally wait for stragglers (no cancel)."""
         if wait_all:
             while self._tier0_inflight:
@@ -1435,9 +1450,9 @@ class PathWalkModuleDb:
         if wait_all and self._tier1_prefetch_thread is not None:
             self._tier1_prefetch_thread.join()
             self._tier1_prefetch_thread = None
-        if wait_all:
+        if wait_all and not skip_activation and not self._text_conn_fast:
             self.drain_activation_audit(wait=True)
-        if self._snapshot_dirty:
+        if self._snapshot_dirty and not skip_snapshot and not self._text_conn_fast:
             self.write_module_index_snapshot()
 
     def _mapped_inst_key(
@@ -2344,9 +2359,9 @@ class PathWalkModuleDb:
             raw_params=raw_params,
             instances=instances,
             needs_generate_fold=prior.needs_generate_fold if prior else False,
-            is_blackbox=prior.is_blackbox if prior else False,
+            is_blackbox=False if instances else (prior.is_blackbox if prior else False),
             is_interface=prior.is_interface if prior else False,
-            stop_reason=prior.stop_reason if prior else "",
+            stop_reason="" if instances else (prior.stop_reason if prior else ""),
         )
         self._index._rebuild_file_modules()
         self._note_regex_modules(key, [module_name])
@@ -2357,6 +2372,8 @@ class PathWalkModuleDb:
 
     def _warm_tier1_background(self, fpath: str) -> None:
         """Best-effort full tier1 DB warm in a background thread (not on walk hot path)."""
+        if self._text_conn_fast:
+            return
         key = str(Path(fpath).resolve())
         if key in self._validated_memory or key in self._tier1_warm_inflight:
             return
@@ -2510,6 +2527,33 @@ class PathWalkModuleDb:
                 if fpath in tried:
                     continue
                 tried.add(fpath)
+                if self._text_conn_fast:
+                    if self._ensure_module_light(module_name, fpath):
+                        rec = self._index.get_module(module_name)
+                        more_candidates = any(
+                            candidate not in tried for candidate in trial_files
+                        )
+                        if (
+                            more_candidates
+                            and rec is not None
+                            and not _is_placeholder_module(rec)
+                            and not rec.instances
+                        ):
+                            self._trace(
+                                f"pw-db   module light stub {module_name!r} "
+                                f"via {Path(fpath).name} (text-conn-fast, try next)"
+                            )
+                            continue
+                        self._prefer_file[module_name] = fpath
+                        self._trace(
+                            f"pw-db   module light hit {module_name!r} "
+                            f"via {Path(fpath).name} (text-conn-fast)"
+                        )
+                        return True
+                    self._trace(
+                        f"pw-db   skip tier1 {Path(fpath).name}: text-conn-fast"
+                    )
+                    continue
                 modules = self.tier1_scan_file(fpath)
                 hit = modules.get(module_name)
                 if hit is None:
@@ -2721,7 +2765,12 @@ class PathWalkModuleDb:
             and not rec.needs_generate_fold
             and tier1_fast_edges > 0
         )
-        if rec is not None and not _is_placeholder_module(rec) and not redundant_fold:
+        if (
+            rec is not None
+            and not _is_placeholder_module(rec)
+            and not redundant_fold
+            and not self._text_conn_fast
+        ):
             body_needs_fold = rec.needs_generate_fold
             if not body_needs_fold and avoid:
                 try:
@@ -2766,10 +2815,11 @@ class PathWalkModuleDb:
                 f"edges={tier1_edges} tier1_fold_ms={tier1_ms:.1f} "
                 f"since_enter_ms={self._elapsed_ms(t_resolve):.1f}"
             )
-        elif redundant_fold:
+        elif redundant_fold or self._text_conn_fast:
+            reason = "text-conn-fast" if self._text_conn_fast else "redundant-fast"
             self._trace(
                 f"pw-db inst-resolve tier1-fold skip {parent_module}.{inst_leaf} "
-                f"reason=redundant-fast edges={tier1_fast_edges} "
+                f"reason={reason} edges={tier1_fast_edges} "
                 f"since_enter_ms={self._elapsed_ms(t_resolve):.1f}"
             )
 
@@ -2861,6 +2911,12 @@ class PathWalkModuleDb:
                         f"path=selective-candidate ms={self._elapsed_ms(t_resolve):.1f}"
                     )
                     return selective
+                if self._text_conn_fast:
+                    self._trace(
+                        f"pw-db inst-resolve tier1 skip {parent_module}.{inst_leaf} "
+                        f"file={Path(fpath).name} reason=text-conn-fast"
+                    )
+                    continue
                 self._trace(
                     f"pw-db inst-resolve tier1 enter {parent_module}.{inst_leaf} "
                     f"file={Path(fpath).name}"

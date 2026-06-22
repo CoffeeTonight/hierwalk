@@ -42,7 +42,12 @@ from hierwalk.connectivity import (
     print_connect_trace_reports,
     run_connectivity_request,
 )
-from hierwalk.path_walk import run_path_walk_connect, run_path_walk_index
+from hierwalk.path_walk import (
+    finalize_logical_walk_for_specs,
+    run_path_walk_connect,
+    run_path_walk_index,
+)
+from hierwalk.connect_artifacts import verification_output_path
 from hierwalk.run_request import (
     normalize_run_mode,
     resolve_connectivity_request,
@@ -68,6 +73,32 @@ from hierwalk.verification_timing import (
     record_connect_check,
     record_verification_item,
 )
+
+
+def _verification_phase(cfg: RunConfig) -> str:
+    phase = (cfg.verification_phase or "both").strip().lower()
+    return phase if phase in ("text", "logical", "both") else "both"
+
+
+def _write_verification_output(
+    cfg: RunConfig,
+    body: str,
+    output_path: str,
+    *,
+    label: str,
+) -> None:
+    if output_path == "-":
+        sys.stdout.write(body)
+        return
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(body, encoding="utf-8")
+    if not cfg.quiet:
+        print(
+            f"run: {label} written: {out.resolve()}",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def _write_connect_output(cfg: RunConfig, body: str) -> None:
@@ -189,6 +220,14 @@ def execute_run(cfg: RunConfig, ap) -> int:
             f"run: work-dir: {work_dir} (top={top_label})",
             file=sys.stderr,
         )
+    from hierwalk.connect_artifacts import archive_run_config_sources
+
+    for archived in archive_run_config_sources(work_dir, cfg):
+        if not cfg.quiet:
+            print(
+                f"run: config archived: {archived.resolve()}",
+                file=sys.stderr,
+            )
 
     log_path: Path | None = None
     if not cfg.no_log_file:
@@ -244,139 +283,290 @@ def execute_run(cfg: RunConfig, ap) -> int:
             on_progress=on_progress,
             trace_stream=sys.stderr if pw_trace else None,
             trace_log_path=log_path,
-            diagnostic_inst_trace=cfg.connect_trace or cfg.connect_log,
         )
+        pw_connect_ignore = {
+            **pw_ignore,
+            "diagnostic_inst_trace": cfg.connect_trace or cfg.connect_log,
+        }
         compile_defines = dict(fl.defines)
         compile_defines.update(extra_defines)
         elapsed = time.perf_counter() - t0
 
         if inst_trace_mode:
             assert cfg.inst_trace is not None
+            phase = _verification_phase(cfg)
+            do_text = phase in ("text", "both")
+            do_logical = phase in ("logical", "both")
+            spec = cfg.inst_trace.instance
+            index: object = None
+            pw_state = None
+            top_name = ""
+            body = ""
+            report_mode = "inst-trace"
+            search_pattern = spec
             try:
-                index, pw_state, top_name = run_path_walk_index(
-                    fl,
-                    [cfg.inst_trace.instance],
-                    top=top_for_walk,
-                    extra_defines=extra_defines,
-                    reuse_suite_session=cfg.flat_suite_step,
-                    jobs=cfg.jobs,
-                    **pw_ignore,
-                )
-            except ValueError as exc:
-                print(str(exc), file=sys.stderr)
-                return 2
-            _item_t0 = time.perf_counter()
-            trace_result = run_inst_trace(
-                cfg.inst_trace,
-                rows=pw_state.rows(),
-                index=index,
-                top=top_name,
-                defines=compile_defines,
-            )
-            record_verification_item(
-                cfg.inst_trace.instance,
-                time.perf_counter() - _item_t0,
-            )
-            if not cfg.quiet:
-                emit_path_provenance_log(
-                    trace_result.instance,
-                    rows_lookup(pw_state.rows()),
-                    stream=sys.stderr,
-                    label="instance",
-                    prefix="[hier-walk inst-trace]",
-                )
-            trace_rows = rows_lookup(pw_state.rows())
-            term_stream = sys.stderr if cfg.output == "-" else sys.stdout
-            print_inst_trace_report(
-                trace_result,
-                stream=term_stream,
-                rows_by_path=trace_rows,
-            )
-            if log_path is not None:
-                with open(log_path, "a", encoding="utf-8") as fh:
+                if do_text:
+                    index, pw_state, top_name = run_path_walk_index(
+                        fl,
+                        [spec],
+                        top=top_for_walk,
+                        extra_defines=extra_defines,
+                        reuse_suite_session=cfg.flat_suite_step,
+                        jobs=cfg.jobs,
+                        walk_phase="text",
+                        **pw_ignore,
+                    )
+                    _item_t0 = time.perf_counter()
+                    trace_result = run_inst_trace(
+                        cfg.inst_trace,
+                        rows=pw_state.rows(),
+                        index=index,
+                        top=top_name,
+                        defines=compile_defines,
+                    )
+                    record_verification_item(spec, time.perf_counter() - _item_t0)
+                    trace_rows = rows_lookup(pw_state.rows())
+                    text_out = (
+                        str(verification_output_path(cfg.output, "text"))
+                        if cfg.output != "-"
+                        else "-"
+                    )
+                    _write_verification_output(
+                        cfg,
+                        format_inst_trace_tsv(
+                            trace_result,
+                            rows_by_path=trace_rows,
+                        ),
+                        text_out,
+                        label="inst-trace text results",
+                    )
+                if do_logical:
+                    if do_text and pw_state is not None:
+                        finalize_logical_walk_for_specs(pw_state, [spec])
+                    else:
+                        index, pw_state, top_name = run_path_walk_index(
+                            fl,
+                            [spec],
+                            top=top_for_walk,
+                            extra_defines=extra_defines,
+                            reuse_suite_session=cfg.flat_suite_step,
+                            jobs=cfg.jobs,
+                            walk_phase="logical",
+                            **pw_ignore,
+                        )
+                    _item_t0 = time.perf_counter()
+                    trace_result = run_inst_trace(
+                        cfg.inst_trace,
+                        rows=pw_state.rows(),
+                        index=index,
+                        top=top_name,
+                        defines=compile_defines,
+                    )
+                    record_verification_item(spec, time.perf_counter() - _item_t0)
+                    if not cfg.quiet:
+                        emit_path_provenance_log(
+                            trace_result.instance,
+                            rows_lookup(pw_state.rows()),
+                            stream=sys.stderr,
+                            label="instance",
+                            prefix="[hier-walk inst-trace]",
+                        )
+                    trace_rows = rows_lookup(pw_state.rows())
+                    term_stream = sys.stderr if cfg.output == "-" else sys.stdout
                     print_inst_trace_report(
                         trace_result,
-                        stream=fh,
+                        stream=term_stream,
                         rows_by_path=trace_rows,
                     )
-            body = format_inst_trace_tsv(
-                trace_result,
-                rows_by_path=trace_rows,
-            )
-            report_mode = "inst-trace"
-            search_pattern = cfg.inst_trace.instance
-        elif cone_mode:
-            cone_label = cfg.fanout_cone or cfg.fanin_cone or ""
-            try:
-                index, pw_state, top_name = run_path_walk_index(
-                    fl,
-                    [cone_label],
-                    top=top_for_walk,
-                    extra_defines=extra_defines,
-                    reuse_suite_session=cfg.flat_suite_step,
-                    jobs=cfg.jobs,
-                    **pw_ignore,
-                )
+                    if log_path is not None:
+                        with open(log_path, "a", encoding="utf-8") as fh:
+                            print_inst_trace_report(
+                                trace_result,
+                                stream=fh,
+                                rows_by_path=trace_rows,
+                            )
+                    body = format_inst_trace_tsv(
+                        trace_result,
+                        rows_by_path=trace_rows,
+                    )
             except ValueError as exc:
                 print(str(exc), file=sys.stderr)
                 return 2
+            if do_logical:
+                _write_verification_output(
+                    cfg,
+                    body,
+                    cfg.output,
+                    label="inst-trace logical results",
+                )
+            if on_progress and not cfg.quiet:
+                on_progress(
+                    f"path-walk: done inst-trace phase={phase}, "
+                    f"{len(pw_state.rows_by_path)} row(s), "
+                    f"{pw_state.stats.modules_loaded} module(s), "
+                    f"{time.perf_counter() - t0:.1f}s"
+                )
+            emit_run_report(
+                RunReport(
+                    filelist_path=cfg.filelist,
+                    elapsed_sec=time.perf_counter() - t0,
+                    fl=fl,
+                    index=index,
+                    cache_enabled=False,
+                    elab_tops=[top_name],
+                    instance_rows=len(pw_state.rows_by_path),
+                    mode=report_mode,
+                    output_path=cfg.output if do_logical else str(
+                        verification_output_path(cfg.output, "text")
+                    ),
+                    filelist_warnings=len(fl.errors),
+                    search_pattern=search_pattern,
+                ),
+                log_path=log_path,
+            )
+            return 0
+        elif cone_mode:
+            cone_label = cfg.fanout_cone or cfg.fanin_cone or ""
+            phase = _verification_phase(cfg)
+            do_text = phase in ("text", "both")
+            do_logical = phase in ("logical", "both")
+            index = None
+            pw_state = None
+            top_name = ""
+            body = ""
+            report_mode = "fanout-cone" if cfg.fanout_cone else "fanin-cone"
+            search_pattern = cone_label
             over_approx = (
                 cfg.over_approximate_if
                 if cfg.over_approximate_if is not None
                 else True
             )
-            _item_t0 = time.perf_counter()
-            if cfg.fanout_cone:
-                cone_result = fanout_cone(
-                    cfg.fanout_cone,
-                    rows=pw_state.rows(),
-                    index=index,
-                    top=top_name,
-                    defines=compile_defines,
-                    over_approximate_if=over_approx,
-                )
-                report_mode = "fanout-cone"
-            else:
-                assert cfg.fanin_cone is not None
-                cone_result = fanin_cone(
-                    cfg.fanin_cone,
-                    rows=pw_state.rows(),
-                    index=index,
-                    top=top_name,
-                    defines=compile_defines,
-                    over_approximate_if=over_approx,
-                )
-                report_mode = "fanin-cone"
-            record_verification_item(cone_label, time.perf_counter() - _item_t0)
-            if not cfg.quiet:
-                emit_path_provenance_log(
-                    cone_result.origin_scope,
-                    rows_lookup(pw_state.rows()),
-                    stream=sys.stderr,
-                    label="origin",
-                    prefix="[hier-walk cone]",
-                )
-            cone_rows = rows_lookup(pw_state.rows())
-            term_stream = sys.stderr if cfg.output == "-" else sys.stdout
-            print_cone_report(
-                cone_result,
-                stream=term_stream,
-                rows_by_path=cone_rows,
-            )
-            if log_path is not None:
-                with open(log_path, "a", encoding="utf-8") as fh:
+
+            def _run_cone(pw_state, index, top_name):
+                _item_t0 = time.perf_counter()
+                if cfg.fanout_cone:
+                    result = fanout_cone(
+                        cfg.fanout_cone,
+                        rows=pw_state.rows(),
+                        index=index,
+                        top=top_name,
+                        defines=compile_defines,
+                        over_approximate_if=over_approx,
+                    )
+                else:
+                    assert cfg.fanin_cone is not None
+                    result = fanin_cone(
+                        cfg.fanin_cone,
+                        rows=pw_state.rows(),
+                        index=index,
+                        top=top_name,
+                        defines=compile_defines,
+                        over_approximate_if=over_approx,
+                    )
+                record_verification_item(cone_label, time.perf_counter() - _item_t0)
+                return result
+
+            try:
+                if do_text:
+                    index, pw_state, top_name = run_path_walk_index(
+                        fl,
+                        [cone_label],
+                        top=top_for_walk,
+                        extra_defines=extra_defines,
+                        reuse_suite_session=cfg.flat_suite_step,
+                        jobs=cfg.jobs,
+                        walk_phase="text",
+                        **pw_ignore,
+                    )
+                    cone_result = _run_cone(pw_state, index, top_name)
+                    cone_rows = rows_lookup(pw_state.rows())
+                    text_out = (
+                        str(verification_output_path(cfg.output, "text"))
+                        if cfg.output != "-"
+                        else "-"
+                    )
+                    _write_verification_output(
+                        cfg,
+                        format_cone_tsv(cone_result, rows_by_path=cone_rows),
+                        text_out,
+                        label="cone text results",
+                    )
+                if do_logical:
+                    if do_text and pw_state is not None:
+                        finalize_logical_walk_for_specs(pw_state, [cone_label])
+                    else:
+                        index, pw_state, top_name = run_path_walk_index(
+                            fl,
+                            [cone_label],
+                            top=top_for_walk,
+                            extra_defines=extra_defines,
+                            reuse_suite_session=cfg.flat_suite_step,
+                            jobs=cfg.jobs,
+                            walk_phase="logical",
+                            **pw_ignore,
+                        )
+                    cone_result = _run_cone(pw_state, index, top_name)
+                    if not cfg.quiet:
+                        emit_path_provenance_log(
+                            cone_result.origin_scope,
+                            rows_lookup(pw_state.rows()),
+                            stream=sys.stderr,
+                            label="origin",
+                            prefix="[hier-walk cone]",
+                        )
+                    cone_rows = rows_lookup(pw_state.rows())
+                    term_stream = sys.stderr if cfg.output == "-" else sys.stdout
                     print_cone_report(
                         cone_result,
-                        stream=fh,
+                        stream=term_stream,
                         rows_by_path=cone_rows,
                     )
-            if cfg.cone_graph:
-                write_cone_dot(cone_result, cfg.cone_graph)
-            body = format_cone_tsv(
-                cone_result,
-                rows_by_path=cone_rows,
+                    if log_path is not None:
+                        with open(log_path, "a", encoding="utf-8") as fh:
+                            print_cone_report(
+                                cone_result,
+                                stream=fh,
+                                rows_by_path=cone_rows,
+                            )
+                    if cfg.cone_graph:
+                        write_cone_dot(cone_result, cfg.cone_graph)
+                    body = format_cone_tsv(cone_result, rows_by_path=cone_rows)
+            except ValueError as exc:
+                print(str(exc), file=sys.stderr)
+                return 2
+            if do_logical:
+                _write_verification_output(
+                    cfg,
+                    body,
+                    cfg.output,
+                    label="cone logical results",
+                )
+            if on_progress and not cfg.quiet:
+                on_progress(
+                    f"path-walk: done cone phase={phase}, "
+                    f"{len(pw_state.rows_by_path)} row(s), "
+                    f"{pw_state.stats.modules_loaded} module(s), "
+                    f"{time.perf_counter() - t0:.1f}s"
+                )
+            emit_run_report(
+                RunReport(
+                    filelist_path=cfg.filelist,
+                    elapsed_sec=time.perf_counter() - t0,
+                    fl=fl,
+                    index=index,
+                    cache_enabled=False,
+                    elab_tops=[top_name],
+                    instance_rows=len(pw_state.rows_by_path),
+                    mode=report_mode,
+                    output_path=cfg.output if do_logical else str(
+                        verification_output_path(cfg.output, "text")
+                    ),
+                    filelist_warnings=len(fl.errors),
+                    search_pattern=search_pattern,
+                ),
+                log_path=log_path,
             )
-            search_pattern = cone_label
+            return 0
         else:
             if cfg.check_connect and connect_request is None:
                 connect_request = ConnectivityRequest(
@@ -395,6 +585,11 @@ def execute_run(cfg: RunConfig, ap) -> int:
                     print("missing connectivity request", file=sys.stderr)
                     return 1
                 extra_defines.update(connect_request.defines)
+            from hierwalk.connect_artifacts import connect_output_paths
+
+            phase = _verification_phase(cfg)
+            do_text = phase in ("text", "both")
+            do_logical = phase in ("logical", "both")
             try:
                 batch, index, pw_state = run_path_walk_connect(
                     connect_request,
@@ -403,19 +598,40 @@ def execute_run(cfg: RunConfig, ap) -> int:
                     extra_defines=extra_defines,
                     reuse_suite_session=cfg.flat_suite_step,
                     jobs=cfg.jobs,
-                    **pw_ignore,
+                    connect_output_dir=work_dir,
+                    connect_phase=phase,
+                    **pw_connect_ignore,
                 )
             except ValueError as exc:
                 print(str(exc), file=sys.stderr)
                 return 2
             connect_results = batch.results
             endpoint_rows = pw_state.rows_by_path
-            body = format_connect_results_tsv(
-                connect_results,
-                modules_cached=batch.modules_cached,
-                rows_by_path=endpoint_rows,
-            )
-            _write_connect_output(cfg, body)
+            conn_paths = connect_output_paths(work_dir)
+            if not cfg.quiet:
+                if do_text:
+                    print(
+                        f"run: connect text results written: "
+                        f"{conn_paths.text_tsv.resolve()}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                if do_logical:
+                    print(
+                        f"run: connect logical results written: "
+                        f"{conn_paths.logical_tsv.resolve()}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+            if cfg.output == "-":
+                stdout_phase = "logical" if do_logical else "text"
+                body = format_connect_results_tsv(
+                    connect_results,
+                    modules_cached=batch.modules_cached,
+                    rows_by_path=endpoint_rows,
+                    phase=stdout_phase,
+                )
+                sys.stdout.write(body)
             if not cfg.quiet:
                 emit_hierarchy_rows_log(
                     pw_state.rows(),
@@ -437,7 +653,7 @@ def execute_run(cfg: RunConfig, ap) -> int:
                         title="path-walk instance rows (rtl + filelist)",
                     )
             use_trace = cfg.connect_trace or cfg.connect_log
-            if connect_request.trace or use_trace:
+            if do_logical and (connect_request.trace or use_trace):
                 term_stream = sys.stderr if cfg.output == "-" else sys.stdout
                 print_connect_trace_reports(
                     connect_results,
@@ -469,7 +685,11 @@ def execute_run(cfg: RunConfig, ap) -> int:
                     elab_tops=[top_for_walk],
                     instance_rows=len(pw_state.rows_by_path),
                     mode="path-walk",
-                    output_path=cfg.output,
+                    output_path=str(
+                        conn_paths.logical_tsv
+                        if do_logical
+                        else conn_paths.text_tsv
+                    ),
                     filelist_warnings=len(fl.errors),
                 ),
                 log_path=log_path,

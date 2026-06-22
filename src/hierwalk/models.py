@@ -168,6 +168,9 @@ class ConnectResult:
     check_id: str = ""
     sub_results: Tuple["ConnectResult", ...] = ()
     waypoint_events: Tuple[Any, ...] = ()
+    connected_text: Optional[bool] = None
+    connected_logical: Optional[bool] = None
+    logical_notes: List[str] = field(default_factory=list)
 
 
 @dataclass

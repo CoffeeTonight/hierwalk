@@ -36,6 +36,7 @@ def test_path_walk_abcd_trace_shows_hits_not_search(tmp_path: Path):
         fl,
         top="A",
         no_cache=True,
+        connect_phase="logical",
         trace_stream=buf,
     )
     assert "A.B.C.D" in state.rows_by_path

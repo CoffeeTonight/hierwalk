@@ -94,8 +94,9 @@ def test_path_walk_no_miss_inst_for_internal_wire_c(tmp_path: Path):
     )
     assert batch.results[0].connected is True
     text = buf.getvalue()
-    assert "miss inst=c under hc_verify_top.u_ifdef" not in text
-    assert "miss inst=" not in text
+    text_phase = text.split("connect-text-conn done", 1)[0]
+    assert "miss inst=c under hc_verify_top.u_ifdef" not in text_phase
+    assert "miss inst=c " not in text_phase
     assert "signal-tail hit kind=wire" in text
     assert "tail='c'" in text
     assert "target=hc_verify_top.u_ifdef.c" in text

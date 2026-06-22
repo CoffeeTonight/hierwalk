@@ -77,6 +77,7 @@ from hierwalk.run_tests import (
     RunTestSuite,
     build_test_run_configs,
     detect_enable_key_typos,
+    expand_suite_verification_plan,
     format_suite_enable_trace,
     list_disabled_suite_blocks,
     spec_for_test_entry,
@@ -559,7 +560,7 @@ def main(argv=None) -> int:
             json_env_applied,
         ) = _bootstrap_flat_suite_config(config_path, quiet=args.quiet)
         if suite_plan:
-            test_plan = [(entry, run_cfg) for entry, run_cfg in suite_plan]
+            test_plan = list(expand_suite_verification_plan(suite_plan))
         cfg = merge_run_config(base_cfg, cli_cfg, args)
         config_env_document = test_document
 
@@ -660,11 +661,27 @@ def main(argv=None) -> int:
         and test_plan
         and not cfg.quiet
     ):
-        print(
-            f"run: test-suite {len(test_plan)} step(s) from "
-            f"{config_path.resolve()}",
-            file=sys.stderr,
+        verify_exec_count = sum(
+            1
+            for entry, _ in test_plan
+            if entry is not None and entry.kind in VERIFICATION_KINDS
         )
+        index_exec_count = len(test_plan) - verify_exec_count
+        if verify_exec_count and verify_exec_count % 2 == 0:
+            verify_blocks = verify_exec_count // 2
+            print(
+                f"run: test-suite {verify_blocks} verification block(s), "
+                f"text then logical ({len(test_plan)} execute step(s)"
+                f"{f', {index_exec_count} index' if index_exec_count else ''}) "
+                f"from {config_path.resolve()}",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"run: test-suite {len(test_plan)} step(s) from "
+                f"{config_path.resolve()}",
+                file=sys.stderr,
+            )
         for warn in parsed_suite.enable_warnings:
             print(f"run: WARNING {warn}", file=sys.stderr)
         for typo in detect_enable_key_typos(test_document):
@@ -698,6 +715,23 @@ def main(argv=None) -> int:
                 "or set run_on_full_index enable: 1"
             )
         test_plan = [(None, cfg)]
+
+    run_config_source: Optional[str] = None
+    if config_path is not None:
+        run_config_source = str(config_path.resolve())
+    elif connect_batch_path is not None:
+        run_config_source = str(connect_batch_path.resolve())
+    if run_config_source:
+        cfg = replace(cfg, run_config_source=run_config_source)
+        test_plan = [
+            (
+                entry,
+                run_cfg
+                if run_cfg.run_config_source
+                else replace(run_cfg, run_config_source=run_config_source),
+            )
+            for entry, run_cfg in test_plan
+        ]
 
     has_verification = any(
         entry is not None and entry.kind in VERIFICATION_KINDS
@@ -779,9 +813,15 @@ def main(argv=None) -> int:
                     f"run_on_full_index.enable is 0 — using path-walk",
                     file=sys.stderr,
                 )
+            phase_note = (
+                f" phase={run_cfg.verification_phase}"
+                if run_cfg.verification_phase
+                and run_cfg.verification_phase != "both"
+                else ""
+            )
             print(
                 f"run: test {label} kind={test_entry.kind} mode={test_entry.mode} "
-                f"index={index_note} output={run_cfg.output}",
+                f"index={index_note}{phase_note} output={run_cfg.output}",
                 file=sys.stderr,
             )
         step_label = verification_step_label(run_cfg)

@@ -1011,6 +1011,53 @@ def spec_for_test_entry(
     return _spec_block(document, entry.kind)
 
 
+def expand_suite_verification_plan(
+    plan: Sequence[Tuple[RunTestEntry, RunConfig]],
+) -> Sequence[Tuple[RunTestEntry, RunConfig]]:
+    """
+    Flat-suite orchestration: run_on_full_index steps first, then all verification
+    blocks in a text pass, then the same blocks in a logical pass.
+    """
+    index_steps: list[Tuple[RunTestEntry, RunConfig]] = []
+    verify_steps: list[Tuple[RunTestEntry, RunConfig]] = []
+    for entry, run_cfg in plan:
+        if entry is None or entry.kind == RUN_ON_FULL_INDEX:
+            index_steps.append((entry, run_cfg))
+        elif entry.kind in VERIFICATION_KINDS:
+            verify_steps.append((entry, run_cfg))
+        else:
+            index_steps.append((entry, run_cfg))
+    if not verify_steps:
+        return tuple(plan)
+    expanded: list[Tuple[RunTestEntry, RunConfig]] = []
+    expanded.extend(index_steps)
+    for entry, run_cfg in verify_steps:
+        name = run_cfg.verification_step_name or entry.name or f"{entry.kind}[{entry.index}]"
+        expanded.append(
+            (
+                entry,
+                replace(
+                    run_cfg,
+                    verification_phase="text",
+                    verification_step_name=f"{name}:text",
+                ),
+            )
+        )
+    for entry, run_cfg in verify_steps:
+        name = run_cfg.verification_step_name or entry.name or f"{entry.kind}[{entry.index}]"
+        expanded.append(
+            (
+                entry,
+                replace(
+                    run_cfg,
+                    verification_phase="logical",
+                    verification_step_name=f"{name}:logical",
+                ),
+            )
+        )
+    return tuple(expanded)
+
+
 def build_test_run_configs(
     suite: RunTestSuite,
     document: Mapping[str, Any],

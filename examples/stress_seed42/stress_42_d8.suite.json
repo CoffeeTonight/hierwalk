@@ -25,7 +25,7 @@
       {
         "id": "missing_hierarchy",
         "a": "stress_top.u_missing.probe_in",
-        "b": "stress_top.u_spine.u_spine.u_spine.u_spine.u_spine.u_spine.u_spine.u_spine.probe_out"
+        "b": "stress_top.u_spine.probe_out"
       }
     ],
     "output": "suite_conn.tsv"

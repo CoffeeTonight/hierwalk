@@ -131,7 +131,8 @@ def parse_connect_endpoint(
     top: str = "",
 ) -> Tuple[str, Optional[str]]:
     text = spec.strip()
-    if text in rows_by_path:
+    row_hit = rows_by_path.get(text)
+    if row_hit is not None and row_hit.refine_status != "provisional":
         return text, None
     parts = text.split(".")
     for i in range(len(parts) - 1, 0, -1):

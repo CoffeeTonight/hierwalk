@@ -217,5 +217,27 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# hier-walk per-top work/cache directory (.db_{TOP})
+# hier-walk run / verification artifacts
+# Per-top work dir (.db_{TOP}): path-walk-db, conn.tsv, archived run JSON, logs
 .db_*/
+*.hier-walk.log
+*.hier-walk.pkl
+
+# Two-phase verification text sidecar (text-conn / text trace / text cone)
+*.text.tsv
+
+# Example run outputs (run.json / suite.json "output" paths)
+examples/**/*.tsv
+
+# Common CLI -o / "output" names (repo root or ad-hoc verification runs)
+conn.tsv
+instances.tsv
+trace.tsv
+cone.tsv
+connect.tsv
+search_hits.tsv
+out_*.tsv
+suite_*.tsv
+VERIFY_*.tsv
+example_*.tsv
+path_walk_*_conn.tsv

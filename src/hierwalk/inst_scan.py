@@ -302,6 +302,19 @@ def iter_module_blocks(text: str) -> Iterator[ModuleBlock]:
         }
 
 
+def inst_base_name(name: str) -> str:
+    """
+    Drop index/generate dimensions from an instance path segment.
+
+    ``c[0][1]`` → ``c``, ``gen_blk[2]`` → ``gen_blk``.  Used for fast text-conn
+    inst grep when exact indices are unknown or differ from RTL ranges.
+    """
+    text = name.strip()
+    if not text or text.startswith("\\"):
+        return text
+    return _DIM_PART_RE.sub("", text)
+
+
 def instance_edge_matches_leaf(
     edge: InstanceEdge,
     inst_leaf: str,
@@ -320,6 +333,29 @@ def instance_edge_matches_leaf(
     if edge.inst_name.lower() == leaf_lower:
         return True
     return any(name.lower() == leaf_lower for name in expand_inst_names(edge.inst_name, "", pmap))
+
+
+def instance_edge_matches_leaf_base(
+    edge: InstanceEdge,
+    inst_leaf: str,
+    *,
+    param_map: Optional[Mapping[str, str]] = None,
+) -> bool:
+    """Text-conn: *inst_leaf* matches *edge* on identifier base (ignore ``[...]``)."""
+    if not inst_leaf:
+        return False
+    leaf_base = inst_base_name(inst_leaf)
+    if not leaf_base:
+        return False
+    pmap = dict(param_map or {})
+    if inst_base_name(edge.inst_name).lower() == leaf_base.lower():
+        return True
+    if edge.inst_name.lower() == leaf_base.lower():
+        return True
+    return any(
+        inst_base_name(name).lower() == leaf_base.lower()
+        for name in expand_inst_names(edge.inst_name, "", pmap)
+    )
 
 
 def find_instance_by_child_module(
@@ -399,14 +435,30 @@ def _instance_stmt_window(
     return clean[start:end]
 
 
+def _leaf_match_for_anchor(
+    edge: InstanceEdge,
+    inst_leaf: str,
+    *,
+    param_map: Optional[Mapping[str, str]] = None,
+    base_only: bool = False,
+) -> bool:
+    if base_only:
+        return instance_edge_matches_leaf_base(edge, inst_leaf, param_map=param_map)
+    return instance_edge_matches_leaf(edge, inst_leaf, param_map=param_map)
+
+
 def _find_hierarchy_instance_anchored(
     clean: str,
     inst_leaf: str,
     *,
     param_map: Optional[Mapping[str, str]] = None,
+    base_only: bool = False,
 ) -> Optional[InstanceEdge]:
     """Grep-style anchor on *inst_leaf*, then parse only the local statement."""
-    pat = _inst_leaf_anchor_pattern(inst_leaf)
+    anchor = inst_base_name(inst_leaf) if base_only else inst_leaf
+    if not anchor:
+        return None
+    pat = _inst_leaf_anchor_pattern(anchor)
     tries = 0
     for m in pat.finditer(clean):
         tries += 1
@@ -417,9 +469,39 @@ def _find_hierarchy_instance_anchored(
             window,
             param_map=param_map,
         ):
-            if instance_edge_matches_leaf(edge, inst_leaf, param_map=param_map):
+            if _leaf_match_for_anchor(
+                edge,
+                inst_leaf,
+                param_map=param_map,
+                base_only=base_only,
+            ):
                 return edge
     return None
+
+
+def _find_hierarchy_instance_with_base_fallback(
+    clean: str,
+    inst_leaf: str,
+    *,
+    param_map: Optional[Mapping[str, str]] = None,
+) -> Optional[InstanceEdge]:
+    """Exact anchored lookup, then base-only (``[]`` stripped) for generate/array."""
+    hit = _find_hierarchy_instance_anchored(
+        clean,
+        inst_leaf,
+        param_map=param_map,
+    )
+    if hit is not None:
+        return hit
+    base = inst_base_name(inst_leaf)
+    if not base or base == inst_leaf:
+        return None
+    return _find_hierarchy_instance_anchored(
+        clean,
+        inst_leaf,
+        param_map=param_map,
+        base_only=True,
+    )
 
 
 def find_hierarchy_instance(
@@ -438,7 +520,7 @@ def find_hierarchy_instance(
         return None
     clean = _prepare_instance_scan_text(body)
     if len(clean) > _LARGE_BODY_SLIM:
-        hit = _find_hierarchy_instance_anchored(
+        hit = _find_hierarchy_instance_with_base_fallback(
             clean,
             inst_leaf,
             param_map=param_map,
@@ -448,7 +530,38 @@ def find_hierarchy_instance(
     for edge in _iter_hierarchy_instance_edges_on_clean(clean, param_map=param_map):
         if instance_edge_matches_leaf(edge, inst_leaf, param_map=param_map):
             return edge
+    base = inst_base_name(inst_leaf)
+    if base and base != inst_leaf:
+        for edge in _iter_hierarchy_instance_edges_on_clean(clean, param_map=param_map):
+            if instance_edge_matches_leaf_base(edge, inst_leaf, param_map=param_map):
+                return edge
     return None
+
+
+def probe_inst_in_module_text(
+    body: str,
+    inst_leaf: str,
+    *,
+    param_map: Optional[Mapping[str, str]] = None,
+) -> bool:
+    """Fast text-conn probe: instance *inst_leaf* (or its base) appears in *body*."""
+    if not body or not inst_leaf:
+        return False
+    if find_hierarchy_instance(body, inst_leaf, param_map=param_map) is not None:
+        return True
+    clean = _prepare_instance_scan_text(body)
+    base = inst_base_name(inst_leaf)
+    if not base or base == inst_leaf:
+        return False
+    if len(clean) > _LARGE_BODY_SLIM:
+        return _find_hierarchy_instance_anchored(
+            clean,
+            inst_leaf,
+            param_map=param_map,
+            base_only=True,
+        ) is not None
+    pat = _inst_leaf_anchor_pattern(base)
+    return pat.search(clean) is not None
 
 
 def scan_hierarchy_instances(

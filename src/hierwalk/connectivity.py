@@ -269,6 +269,7 @@ def _connect_pair(
     check_id: str = "",
     elab_index: Optional[ElabIndex] = None,
     rows_by_path: Optional[Mapping[str, FlatRow]] = None,
+    text_fast: bool = False,
 ) -> ConnectResult:
     lookup = (
         rows_by_path
@@ -283,6 +284,21 @@ def _connect_pair(
         require_port=False,
         rows_by_path=lookup,
     )
+    if text_fast and err_a:
+        ep_b = ConnectEndpoint(
+            spec=endpoint_b,
+            inst_path="",
+            module="",
+            port_name="",
+        )
+        return ConnectResult(
+            ep_a,
+            ep_b,
+            False,
+            "unknown",
+            errors=list(err_a),
+            check_id=check_id,
+        )
     ep_b, err_b = resolve_endpoint(
         endpoint_b,
         rows,
@@ -438,6 +454,7 @@ class ConnectivitySession:
         trace: bool = False,
         check_id: str = "",
         expand: Optional[Any] = None,
+        text_fast: bool = False,
     ) -> ConnectResult:
         t0 = time.perf_counter()
         if expand is not None and expand.map_kind == "waypoint-fanout":
@@ -496,6 +513,7 @@ class ConnectivitySession:
                 check_id=check_id,
                 elab_index=self.elab_index,
                 rows_by_path=self.rows_by_path,
+                text_fast=text_fast,
             )
         else:
             fanout_mode = expand.fanout_mode if expand is not None else "all"
@@ -519,6 +537,7 @@ class ConnectivitySession:
                         check_id=sub_id,
                         elab_index=self.elab_index,
                         rows_by_path=self.rows_by_path,
+                        text_fast=text_fast,
                     )
                 )
             result = aggregate_connect_results(
@@ -543,6 +562,7 @@ class ConnectivitySession:
         chk: ConnectivityCheck,
         *,
         trace: bool = False,
+        text_fast: bool = False,
     ) -> ConnectResult:
         return self.check(
             chk.endpoint_a,
@@ -550,6 +570,7 @@ class ConnectivitySession:
             trace=trace,
             check_id=chk.check_id,
             expand=chk.expand,
+            text_fast=text_fast,
         )
 
     def check_many(
@@ -601,6 +622,7 @@ class ConnectivitySession:
         trace: Optional[bool] = None,
         jobs: int = 0,
         on_progress: Optional[Any] = None,
+        text_fast: bool = False,
     ) -> ConnectivityBatchResult:
         from hierwalk.validate_connect import waypoint_perf_warnings
 
@@ -613,7 +635,8 @@ class ConnectivitySession:
         workers = _resolve_connect_jobs(jobs, len(checks))
         if workers == 1 or len(checks) < 4:
             results = tuple(
-                self.check_entry(chk, trace=use_trace) for chk in checks
+                self.check_entry(chk, trace=use_trace, text_fast=text_fast)
+                for chk in checks
             )
             return ConnectivityBatchResult(
                 results=results,
@@ -640,7 +663,10 @@ class ConnectivitySession:
                 param_ctx_cache=self.param_ctx_cache,
                 elab_index=self.elab_index,
             )
-            return [local.check_entry(chk, trace=use_trace) for chk in chunk]
+            return [
+                local.check_entry(chk, trace=use_trace, text_fast=text_fast)
+                for chk in chunk
+            ]
 
         merged: List[ConnectResult] = []
         with ThreadPoolExecutor(max_workers=len(chunks)) as pool:
@@ -808,15 +834,29 @@ def run_connectivity_request(
     return session.run_request(request, jobs=jobs, on_progress=on_progress)
 
 
+def _connected_text_value(result: ConnectResult) -> bool:
+    if result.connected_text is not None:
+        return result.connected_text
+    return result.connected
+
+
+def _connected_logical_value(result: ConnectResult) -> bool:
+    if result.connected_logical is not None:
+        return result.connected_logical
+    return result.connected
+
+
 def format_connect_result_row(
     result: ConnectResult,
     *,
     rows_by_path: Optional[Mapping[str, FlatRow]] = None,
+    phase: str = "logical",
 ) -> str:
     from hierwalk.hierarchy_log import endpoint_provenance_fields
 
     err_text = " | ".join(result.errors)
     hop_text = " | ".join(format_connect_hop(h) for h in result.hops)
+    logical_notes = " | ".join(result.logical_notes)
     a_prov = (
         endpoint_provenance_fields(result.endpoint_a, rows_by_path)
         if rows_by_path is not None
@@ -827,15 +867,31 @@ def format_connect_result_row(
         if rows_by_path is not None
         else {}
     )
+    text_connected = _connected_text_value(result)
+    logical_connected = _connected_logical_value(result)
+    if phase == "text":
+        return (
+            f"{result.check_id}\t{result.endpoint_a.spec}\t{result.endpoint_b.spec}\t"
+            f"{text_connected}\t{result.mode}\t{result.note}\t"
+            f"{err_text}\t"
+            f"{hop_text}\t"
+            f"{a_prov.get('rtl', '')}\t{a_prov.get('via_filelist', '')}\t"
+            f"{a_prov.get('filelist_chain', '')}\t"
+            f"{b_prov.get('rtl', '')}\t{b_prov.get('via_filelist', '')}\t"
+            f"{b_prov.get('filelist_chain', '')}\t"
+            f"text"
+        )
     return (
         f"{result.check_id}\t{result.endpoint_a.spec}\t{result.endpoint_b.spec}\t"
-        f"{result.connected}\t{result.mode}\t{result.note}\t"
+        f"{text_connected}\t{logical_connected}\t{logical_connected}\t"
+        f"{result.mode}\t{result.note}\t{logical_notes}\t"
         f"{err_text}\t"
         f"{hop_text}\t"
         f"{a_prov.get('rtl', '')}\t{a_prov.get('via_filelist', '')}\t"
         f"{a_prov.get('filelist_chain', '')}\t"
         f"{b_prov.get('rtl', '')}\t{b_prov.get('via_filelist', '')}\t"
-        f"{b_prov.get('filelist_chain', '')}"
+        f"{b_prov.get('filelist_chain', '')}\t"
+        f"logical"
     )
 
 
@@ -844,16 +900,28 @@ def format_connect_results_tsv(
     *,
     modules_cached: Optional[int] = None,
     rows_by_path: Optional[Mapping[str, FlatRow]] = None,
+    phase: str = "logical",
 ) -> str:
     from hierwalk.waypoint_fanout import format_waypoint_fanout_tsv
 
     leaf_results = flatten_connect_results(results)
+    if phase == "text":
+        header = (
+            "check_id\tendpoint_a\tendpoint_b\tconnected_text\tmode\tnote\terrors\thops\t"
+            "a_rtl\ta_via_filelist\ta_filelist_chain\t"
+            "b_rtl\tb_via_filelist\tb_filelist_chain\tphase"
+        )
+    else:
+        header = (
+            "check_id\tendpoint_a\tendpoint_b\tconnected_text\tconnected_logical\t"
+            "connected\tmode\tnote\tlogical_notes\terrors\thops\t"
+            "a_rtl\ta_via_filelist\ta_filelist_chain\t"
+            "b_rtl\tb_via_filelist\tb_filelist_chain\tphase"
+        )
     lines = [
-        "check_id\tendpoint_a\tendpoint_b\tconnected\tmode\tnote\terrors\thops\t"
-        "a_rtl\ta_via_filelist\ta_filelist_chain\t"
-        "b_rtl\tb_via_filelist\tb_filelist_chain",
+        header,
         *(
-            format_connect_result_row(r, rows_by_path=rows_by_path)
+            format_connect_result_row(r, rows_by_path=rows_by_path, phase=phase)
             for r in leaf_results
         ),
     ]
