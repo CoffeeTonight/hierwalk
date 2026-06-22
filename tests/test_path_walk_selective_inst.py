@@ -141,6 +141,113 @@ def test_preprocessed_text_disk_cache(tmp_path: Path, monkeypatch):
     assert preprocess_calls == []
 
 
+def test_find_top_in_allinst_v_scans_one_file(tmp_path: Path, monkeypatch):
+    """Top in root-listed allinst.v must not tier0-scan the rest of the filelist."""
+    n_stub = 120
+    allinst = tmp_path / "allinst.v"
+    allinst.write_text(
+        "module SOC_TOP(input logic clk);\n"
+        "  IP_BLK u_ip (.clk(clk));\n"
+        "endmodule\n",
+        encoding="utf-8",
+    )
+    stub_dir = tmp_path / "stubs"
+    stub_dir.mkdir()
+    stub_paths = []
+    for i in range(n_stub):
+        stub = stub_dir / f"stub_{i}.v"
+        stub.write_text(f"module STUB_{i} (); endmodule\n", encoding="utf-8")
+        stub_paths.append(stub)
+    child_fl = tmp_path / "stubs.f"
+    child_fl.write_text("\n".join(str(p.resolve()) for p in stub_paths) + "\n", encoding="utf-8")
+    root_fl = tmp_path / "design.f"
+    root_fl.write_text(
+        f"{allinst.resolve()}\n-f {child_fl.resolve()}\n",
+        encoding="utf-8",
+    )
+    fl = parse_filelist(str(root_fl), index_cwd=str(tmp_path))
+
+    tier0_calls: list[str] = []
+    from hierwalk.path_walk_db import PathWalkModuleDb
+
+    orig_tier0 = PathWalkModuleDb._tier0_scan_file
+
+    def traced_tier0(self, path):
+        tier0_calls.append(str(path))
+        return orig_tier0(self, path)
+
+    monkeypatch.setattr(PathWalkModuleDb, "_tier0_scan_file", traced_tier0)
+
+    t0 = time.perf_counter()
+    create_path_walk_index(fl, "SOC_TOP", defines={}, no_cache=True, jobs=1)
+    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+
+    assert tier0_calls
+    assert all(Path(p).name == "allinst.v" for p in tier0_calls)
+    assert len(tier0_calls) <= 2  # find + seed may re-enter cached file
+    assert elapsed_ms < 5000.0
+
+
+def test_hierarchy_source_order_is_linear_in_source_count(tmp_path: Path):
+    """Regression: listing order must not re-scan all sources per filelist node."""
+    n_stub = 400
+    allinst = tmp_path / "allinst.v"
+    allinst.write_text("module SOC_TOP (); endmodule\n", encoding="utf-8")
+    stubs = []
+    for i in range(n_stub):
+        stub = tmp_path / f"stub_{i}.v"
+        stub.write_text(f"module STUB_{i} (); endmodule\n", encoding="utf-8")
+        stubs.append(stub)
+    child_fl = tmp_path / "stubs.f"
+    child_fl.write_text("\n".join(str(p.resolve()) for p in stubs) + "\n", encoding="utf-8")
+    root_fl = tmp_path / "design.f"
+    root_fl.write_text(
+        f"{allinst.resolve()}\n-f {child_fl.resolve()}\n",
+        encoding="utf-8",
+    )
+    fl = parse_filelist(str(root_fl), index_cwd=str(tmp_path))
+    sources = [str(Path(p).resolve()) for p in fl.source_files]
+    from hierwalk.index import DesignIndex
+    from hierwalk.path_walk_db import PathWalkModuleDb
+
+    index = DesignIndex._assemble(
+        {},
+        path_patterns=[],
+        module_patterns=[],
+        filelist_patterns=[],
+        library_files=[],
+        library_dirs=[],
+        libexts=[],
+        file_via_filelist={
+            str(Path(k).resolve()): str(Path(v).resolve())
+            for k, v in fl.source_via_filelist.items()
+        },
+        file_filelist_chain={
+            str(Path(k).resolve()): v for k, v in fl.source_filelist_chain.items()
+        },
+        preprocess_include_dirs=[],
+        preprocess_defines={},
+    )
+    mod_db = PathWalkModuleDb(
+        sources,
+        index,
+        file_via_filelist={
+            str(Path(k).resolve()): str(Path(v).resolve())
+            for k, v in fl.source_via_filelist.items()
+        },
+        filelist_children={
+            str(Path(k).resolve()): [str(Path(c).resolve()) for c in v]
+            for k, v in fl.filelist_children.items()
+        },
+    )
+    t0 = time.perf_counter()
+    ordered = mod_db._order_sources_by_filelist_hierarchy(sources)
+    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+    assert ordered[0] == str(allinst.resolve())
+    assert len(ordered) == len(sources)
+    assert elapsed_ms < 500.0
+
+
 def test_first_child_edge_skips_scoped_tier0_when_parent_seeded(tmp_path: Path, monkeypatch):
     """Seeded top module must not tier0-scan the child filelist pool before selective."""
     n_stub = 80

@@ -319,7 +319,9 @@ class PathWalkModuleDb:
         self._listing_siblings: Dict[str, Tuple[str, ...]] = (
             self._build_listing_siblings()
         )
-        self._sources_by_listing: Dict[str, Set[str]] = self._build_sources_by_listing()
+        self._sources_by_listing, self._sources_by_listing_ordered = (
+            self._build_sources_by_listing_maps()
+        )
         self._listing_ancestors: Dict[str, Tuple[str, ...]] = (
             self._build_listing_ancestors()
         )
@@ -878,16 +880,20 @@ class PathWalkModuleDb:
             item.expect_inst,
         )
 
-    def _build_sources_by_listing(self) -> Dict[str, Set[str]]:
-        out: Dict[str, Set[str]] = {}
+    def _build_sources_by_listing_maps(
+        self,
+    ) -> Tuple[Dict[str, Set[str]], Dict[str, List[str]]]:
+        sets: Dict[str, Set[str]] = {}
+        ordered: Dict[str, List[str]] = {}
         for src in self._sources:
             key = str(Path(src).resolve())
             via = self._file_via_filelist.get(key, "") or self._index.filelist_for(key)
             if not via:
                 continue
             listing_key = str(Path(via).resolve())
-            out.setdefault(listing_key, set()).add(key)
-        return out
+            sets.setdefault(listing_key, set()).add(key)
+            ordered.setdefault(listing_key, []).append(key)
+        return sets, ordered
 
     def _build_listing_ancestors(self) -> Dict[str, Tuple[str, ...]]:
         parents: Dict[str, List[str]] = {}
@@ -974,13 +980,7 @@ class PathWalkModuleDb:
 
     def _sources_for_listing_in_order(self, listing: str) -> List[str]:
         listing_key = str(Path(listing).resolve())
-        out: List[str] = []
-        for src in self._sources:
-            key = str(Path(src).resolve())
-            via = self._file_via_filelist.get(key, "") or self._index.filelist_for(key)
-            if via and str(Path(via).resolve()) == listing_key:
-                out.append(key)
-        return out
+        return list(self._sources_by_listing_ordered.get(listing_key, ()))
 
     def _walk_listing_subtree_sources(
         self,
@@ -1017,15 +1017,13 @@ class PathWalkModuleDb:
             listing = self._listing_for_rtl(anchor_rtl)
             if listing:
                 for src in self._walk_listing_subtree_sources(listing, seen=seen):
-                    if src in allowed and src not in seen:
+                    if src in allowed:
                         ordered.append(src)
-                        seen.add(src)
 
         for root in self._filelist_root_listings():
             for src in self._walk_listing_subtree_sources(root, seen=seen):
-                if src in allowed and src not in seen:
+                if src in allowed:
                     ordered.append(src)
-                    seen.add(src)
 
         for src in self._sources:
             key = str(Path(src).resolve())
@@ -1456,10 +1454,14 @@ class PathWalkModuleDb:
                 for s in self._sources
                 if s not in self._regex_scanned and s not in self._tier0_inflight
             ]
-            self._regex_queue = self._order_sources_by_filelist_hierarchy(
-                pending,
-                anchor_rtl=scope_anchor,
-            )
+            if scope_anchor:
+                self._regex_queue = self._order_sources_by_filelist_hierarchy(
+                    pending,
+                    anchor_rtl=scope_anchor,
+                )
+            else:
+                # Filelist expansion order: top/allinst RTL is usually near the front.
+                self._regex_queue = list(pending)
 
         workers = _resolve_pw_db_jobs(self._jobs, len(self._sources))
         batch_size = max(workers * 4, _PARALLEL_MIN_TIER0)
@@ -2359,10 +2361,31 @@ class PathWalkModuleDb:
         return None
 
     def find_module_decl_file(self, module_name: str) -> Optional[str]:
-        files = self._ensure_regex_candidates(module_name)
-        if not files:
-            return None
-        preferred = self._prefer_file.get(module_name)
-        if preferred and preferred in files:
-            return preferred
-        return files[0]
+        """
+        Locate a module declaration via tier-0 regex only.
+
+        Scans ``_sources`` in filelist expansion order one file at a time and
+        stops on first hit (e.g. ``allinst.v`` at the root of the top .f).
+        Does not batch-scan the whole design or build a global regex queue.
+        """
+        if module_name in self._module_to_files:
+            files = list(self._module_to_files.get(module_name, []))
+            preferred = self._prefer_file.get(module_name)
+            if preferred and preferred in files:
+                return preferred
+            return files[0] if files else None
+
+        self._set_phase("mapping", detail=f"top {module_name}")
+        for src in self._sources:
+            key = str(Path(src).resolve())
+            if key in self._regex_scanned:
+                continue
+            self._tier0_scan_file(key)
+            if module_name not in self._module_to_files:
+                continue
+            files = list(self._module_to_files.get(module_name, []))
+            preferred = self._prefer_file.get(module_name)
+            if preferred and preferred in files:
+                return preferred
+            return files[0] if files else None
+        return None
