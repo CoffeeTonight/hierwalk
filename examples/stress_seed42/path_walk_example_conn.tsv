@@ -1,0 +1,3 @@
+check_id	endpoint_a	endpoint_b	connected	mode	note	errors	hops	a_rtl	a_via_filelist	a_filelist_chain	b_rtl	b_via_filelist	b_filelist_chain
+spine	stress_top.probe_in	stress_top.u_spine.u_spine.u_spine.u_spine.u_spine.u_spine.u_spine.u_spine.probe_out	False	port-port	no path; 9 module(s)			/home/user/Desktop/hierwalk/examples/stress_seed42/stress_42_d8.v	/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f	/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f	/home/user/Desktop/hierwalk/examples/stress_seed42/stress_42_d8.v	/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f	/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f
+# modules_cached	9

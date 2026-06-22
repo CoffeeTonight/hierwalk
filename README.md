@@ -50,3 +50,29 @@ cd examples/stress_seed42 && hier-walk path_walk_example.json
 ```bash
 python -m pytest tests/ -q
 ```
+
+## Corp PC · 회사 PC (`hier-walk` not found)
+
+**EN** `pip install -e .` can succeed while the `hier-walk` script is not on PATH (user install dir, pyenv, IT policy). Use one of these instead.  
+**KO** `pip install -e .`는 됐는데 `hier-walk`만 없는 경우가 많습니다 (PATH·권한). 아래 중 하나를 쓰세요.
+
+```bash
+# A) pip install 후 — hier-walk 스크립트 없어도 OK
+cd hierwalk && python3 -m pip install -e .
+python3 -m hierwalk design.f --top TOP -o out.tsv
+
+# B) pip 없이 — PYTHONPATH만 · no pip
+cd hierwalk
+export PYTHONPATH="$(pwd)/src${PYTHONPATH:+:$PYTHONPATH}"
+python3 -m hierwalk --version
+
+# C) pip 없이 — wrapper가 PYTHONPATH 설정 · no pip
+cd hierwalk && chmod +x scripts/hier-walk
+./scripts/hier-walk design.f --top TOP -o out.tsv
+
+# D) venv (회사 PC 권장) · venv recommended
+cd hierwalk
+python3 -m venv .venv && . .venv/bin/activate
+pip install -e .
+hier-walk --version
+```
