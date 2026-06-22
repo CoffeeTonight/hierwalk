@@ -555,7 +555,15 @@ def path_walk_trace_show_message(message: str) -> bool:
     if msg.startswith("pw-db "):
         if " load failed " in msg:
             return True
-        return " edge hit " in msg or msg.startswith("pw-db   hit ")
+        if " edge hit " in msg or msg.startswith("pw-db   hit "):
+            return True
+        if (
+            msg.startswith("pw-db preprocess ")
+            or msg.startswith("pw-db inst-find ")
+            or msg.startswith("pw-db inst-resolve ")
+        ):
+            return True
+        return False
     return True
 
 

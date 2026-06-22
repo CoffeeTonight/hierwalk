@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import time
 from pathlib import Path
 
@@ -300,6 +301,30 @@ def test_first_child_edge_skips_scoped_tier0_when_parent_seeded(tmp_path: Path, 
     assert edge is not None
     assert edge.child_module == "IP_BLK"
     assert tier0_calls == []
+
+
+def test_inst_find_emits_preprocess_and_scan_trace(tmp_path: Path):
+    fl_path = _write_large_flat_top(tmp_path, n_inst=50)
+    fl = parse_filelist(str(fl_path), index_cwd=str(tmp_path))
+    buf = io.StringIO()
+    target = "SOC_TOP.u_ip_10"
+    req = ConnectivityRequest(
+        checks=(ConnectivityCheck(target, target),),
+        top="SOC_TOP",
+    )
+    run_path_walk_connect(
+        req,
+        fl,
+        top="SOC_TOP",
+        no_cache=True,
+        jobs=1,
+        trace_stream=buf,
+    )
+    text = buf.getvalue()
+    assert "pw-db inst-resolve enter SOC_TOP.u_ip_10" in text
+    assert "pw-db inst-find enter SOC_TOP.u_ip_10" in text
+    assert "pw-db inst-find done SOC_TOP.u_ip_10" in text
+    assert "pw-db preprocess" in text
 
 
 def test_inst_leaf_index_avoids_repeat_selective_scan(tmp_path: Path, monkeypatch):

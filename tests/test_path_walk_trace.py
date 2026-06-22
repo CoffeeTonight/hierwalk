@@ -30,6 +30,20 @@ def test_path_walk_trace_filter_hides_search_keeps_hits():
     assert not path_walk_trace_show_message("pw-db tier0 scan a.v -> A")
     assert not path_walk_trace_show_message("pw-db tier1 scan a.v -> A(1inst)")
     assert not path_walk_trace_show_message("pw-db edge B.C candidates=2")
+    assert path_walk_trace_show_message(
+        "pw-db inst-resolve enter SOC_TOP.u_ip file=allinst.v policy=confident"
+    )
+    assert path_walk_trace_show_message(
+        "pw-db inst-find enter SOC_TOP.u_ip file=allinst.v"
+    )
+    assert path_walk_trace_show_message(
+        "pw-db inst-find done SOC_TOP.u_ip file=allinst.v hit ms=12.3 "
+        "preprocess=10.0 module_body=0.1 inst_scan=2.2 body_chars=50000"
+    )
+    assert path_walk_trace_show_message("pw-db preprocess enter allinst.v")
+    assert path_walk_trace_show_message(
+        "pw-db preprocess done allinst.v source=cold ms=9000.0 chars=120000"
+    )
     assert not path_walk_trace_show_message("pw-db   edge miss b.v: no inst 'C'")
     assert not path_walk_trace_show_message("pw-db tier0 expand edge B.C +1 file(s)")
     assert not path_walk_trace_show_message("pw-db v3 root=/cache module_map=3")

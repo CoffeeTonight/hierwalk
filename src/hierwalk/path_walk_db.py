@@ -18,6 +18,7 @@ import os
 import pickle
 import re
 import threading
+import time
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
@@ -378,6 +379,10 @@ class PathWalkModuleDb:
     def _trace(self, message: str) -> None:
         if self._on_trace is not None and message:
             self._on_trace(message)
+
+    @staticmethod
+    def _elapsed_ms(t0: float) -> float:
+        return (time.perf_counter() - t0) * 1000.0
 
     def _set_phase(self, phase: str, *, detail: str = "") -> None:
         if not phase or phase == self._phase:
@@ -1733,12 +1738,19 @@ class PathWalkModuleDb:
 
     def _preprocessed_text_for_file(self, fpath: str) -> str:
         key = str(Path(fpath).resolve())
+        fname = Path(key).name
         defines_digest = self._defines_digest
         include_digest = self._include_closure_digest(key)
         mem_key = (key, defines_digest, include_digest)
+        t0 = time.perf_counter()
         cached = self._preprocessed_text_cache.get(mem_key)
         if cached is not None:
+            self._trace(
+                f"pw-db preprocess done {fname} source=mem "
+                f"ms={self._elapsed_ms(t0):.1f} chars={len(cached)}"
+            )
             return cached
+        self._trace(f"pw-db preprocess enter {fname}")
         disk = self._load_preprocessed_sidecar(
             key,
             defines_digest=defines_digest,
@@ -1746,11 +1758,13 @@ class PathWalkModuleDb:
         )
         if disk is not None:
             self._preprocessed_text_cache[mem_key] = disk
-            self._trace(f"pw-db preprocess cache {Path(key).name}")
+            self._trace(
+                f"pw-db preprocess done {fname} source=disk "
+                f"ms={self._elapsed_ms(t0):.1f} chars={len(disk)}"
+            )
             return disk
         from hierwalk.lazy_scope import lazy_index_ifdef
         from hierwalk.preprocess import apply_ifdef_filter, preprocess_file_for_index
-
         defs = dict(self._defines)
         text = preprocess_file_for_index(
             Path(key),
@@ -1767,6 +1781,10 @@ class PathWalkModuleDb:
             text,
             defines_digest=defines_digest,
             include_closure_digest=include_digest,
+        )
+        self._trace(
+            f"pw-db preprocess done {fname} source=cold "
+            f"ms={self._elapsed_ms(t0):.1f} chars={len(text)}"
         )
         return text
 
@@ -1799,17 +1817,46 @@ class PathWalkModuleDb:
         fpath: str,
     ) -> Optional[InstanceEdge]:
         """Targeted parent-body scan for one instance (no full tier1 file walk)."""
+        fname = Path(fpath).name
+        t0 = time.perf_counter()
+        self._trace(
+            f"pw-db inst-find enter {parent_module}.{inst_leaf} file={fname}"
+        )
         try:
+            t_pre = time.perf_counter()
             text = self._preprocessed_text_for_file(fpath)
+            pre_ms = self._elapsed_ms(t_pre)
         except OSError:
+            self._trace(
+                f"pw-db inst-find done {parent_module}.{inst_leaf} file={fname} "
+                f"miss reason=read-fail ms={self._elapsed_ms(t0):.1f}"
+            )
             return None
+        t_body = time.perf_counter()
         header, body = _module_header_body(text, parent_module)
+        body_ms = self._elapsed_ms(t_body)
         if not body and not header:
+            self._trace(
+                f"pw-db inst-find done {parent_module}.{inst_leaf} file={fname} "
+                f"miss reason=no-module-body ms={self._elapsed_ms(t0):.1f} "
+                f"preprocess={pre_ms:.1f}"
+            )
             return None
         rec = self._index.get_module(parent_module)
         raw_params = dict(rec.raw_params) if rec and rec.raw_params else parse_param_pairs(header)
         pmap = resolve_param_map(raw_params, parent=parent_ctx)
-        return find_hierarchy_instance(body, inst_leaf, param_map=pmap)
+        t_scan = time.perf_counter()
+        edge = find_hierarchy_instance(body, inst_leaf, param_map=pmap)
+        scan_ms = self._elapsed_ms(t_scan)
+        status = "hit" if edge is not None else "miss"
+        child = f" child={edge.child_module!r}" if edge is not None else ""
+        self._trace(
+            f"pw-db inst-find done {parent_module}.{inst_leaf} file={fname} "
+            f"{status}{child} ms={self._elapsed_ms(t0):.1f} "
+            f"preprocess={pre_ms:.1f} module_body={body_ms:.1f} "
+            f"inst_scan={scan_ms:.1f} body_chars={len(body)}"
+        )
+        return edge
 
     def _apply_selective_edge_hit(
         self,
@@ -2154,8 +2201,18 @@ class PathWalkModuleDb:
     ) -> Optional[InstanceEdge]:
         """Tier-1 confirmed child edge, trying alternate decl files on miss."""
         avoid = current_file
+        t_resolve = time.perf_counter()
+        avoid_name = Path(avoid).name if avoid else "-"
+        self._trace(
+            f"pw-db inst-resolve enter {parent_module}.{inst_leaf} "
+            f"file={avoid_name} policy={policy}"
+        )
         indexed = self.lookup_inst_edge(parent_module, parent_ctx, inst_leaf)
         if indexed is not None:
+            self._trace(
+                f"pw-db inst-resolve done {parent_module}.{inst_leaf} "
+                f"path=inst_index ms={self._elapsed_ms(t_resolve):.1f}"
+            )
             return indexed
         if self._index_has_resolved_module(
             parent_module,
@@ -2177,6 +2234,10 @@ class PathWalkModuleDb:
                         self._prefer_file[parent_module] = str(
                             Path(rec.file_path).resolve()
                         )
+                    self._trace(
+                        f"pw-db inst-resolve done {parent_module}.{inst_leaf} "
+                        f"path=tier1-index ms={self._elapsed_ms(t_resolve):.1f}"
+                    )
                     return edge
 
         scope_anchor = avoid
@@ -2204,8 +2265,16 @@ class PathWalkModuleDb:
                     f"via {Path(avoid).name} -> child {selective.child_module!r}"
                 )
                 self._warm_tier1_background(avoid)
+                self._trace(
+                    f"pw-db inst-resolve done {parent_module}.{inst_leaf} "
+                    f"path=selective ms={self._elapsed_ms(t_resolve):.1f}"
+                )
                 return selective
 
+        self._trace(
+            f"pw-db inst-resolve tier0-candidates {parent_module}.{inst_leaf} "
+            f"file={avoid_name}"
+        )
         candidates = self._order_candidate_files(
             parent_module,
             avoid_file=avoid,
@@ -2264,8 +2333,21 @@ class PathWalkModuleDb:
                         f"via {Path(fpath).name} -> child {selective.child_module!r}"
                     )
                     self._warm_tier1_background(fpath)
+                    self._trace(
+                        f"pw-db inst-resolve done {parent_module}.{inst_leaf} "
+                        f"path=selective-candidate ms={self._elapsed_ms(t_resolve):.1f}"
+                    )
                     return selective
+                self._trace(
+                    f"pw-db inst-resolve tier1 enter {parent_module}.{inst_leaf} "
+                    f"file={Path(fpath).name}"
+                )
+                t_t1 = time.perf_counter()
                 modules = self.tier1_scan_file(fpath)
+                self._trace(
+                    f"pw-db inst-resolve tier1 done {parent_module}.{inst_leaf} "
+                    f"file={Path(fpath).name} ms={self._elapsed_ms(t_t1):.1f}"
+                )
                 hit = modules.get(parent_module)
                 if hit is None:
                     self._trace(
@@ -2294,6 +2376,10 @@ class PathWalkModuleDb:
                         f"via {Path(fpath).name} -> child {edge.child_module!r}"
                     )
                     self.write_module_index_snapshot()
+                    self._trace(
+                        f"pw-db inst-resolve done {parent_module}.{inst_leaf} "
+                        f"path=tier1 ms={self._elapsed_ms(t_resolve):.1f}"
+                    )
                     return edge
                 insts = ", ".join(
                     f"{e.inst_name}->{e.child_module}" for e in tier_edges[:12]
@@ -2358,6 +2444,10 @@ class PathWalkModuleDb:
                     reason="no-edge-in-child-fl",
                 )
             )
+        self._trace(
+            f"pw-db inst-resolve done {parent_module}.{inst_leaf} "
+            f"miss ms={self._elapsed_ms(t_resolve):.1f}"
+        )
         return None
 
     def find_module_decl_file(self, module_name: str) -> Optional[str]:
