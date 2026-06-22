@@ -111,6 +111,18 @@ def _port_decl_bit_indices(
             out[info.base_name] = sorted(set(bits))
     return out
 
+def is_module_local_signal_name(name: str) -> bool:
+    """
+    True when *name* can denote a port/net declared in one module.
+
+    Dotted tails (``c.d``, ``u_core.u_leaf``) are hierarchy paths under an
+    instance scope, not a single module-local identifier — matching only the
+    first segment (e.g. wire ``c``) would false-positive instance paths.
+    """
+    text = name.strip()
+    return bool(text) and "." not in text.split("[", 1)[0]
+
+
 def parse_connect_endpoint(
     spec: str,
     rows_by_path: Mapping[str, FlatRow],
@@ -130,7 +142,7 @@ def parse_connect_endpoint(
         tail = ".".join(parts[i:])
         if not tail:
             return hier, None
-        if index is not None:
+        if index is not None and is_module_local_signal_name(tail):
             if _port_exists(index, row, tail, top=top):
                 return hier, tail
             if _net_exists_in_module(index, row, tail, top=top):
@@ -181,7 +193,7 @@ def wire_tail_exists_fast(
     """
     Cheapest wire/reg tail probe: decl/assign regex only (no param refine, no stmt walk).
     """
-    if not body or not net_name:
+    if not body or not net_name or not is_module_local_signal_name(net_name):
         return False
     base = net_name.split("[", 1)[0].split(".", 1)[0]
     if _net_base_declared_fast(body, base):
@@ -406,31 +418,51 @@ def net_exists_in_module_fast(
     cache: Optional[DeclNetCache] = None,
     param_ctx: Optional[Mapping[str, str]] = None,
     body: Optional[str] = None,
+    prechecked: bool = False,
 ) -> bool:
     """
     Fast signal-tail existence check: ports, declarations, assign-driven implicit nets.
 
     Wire/reg probes run before param-refine and before full statement walks.
     Avoids :func:`build_module_connect_index` (assign/FF scan + UF compression).
+
+    When *prechecked* is true, wire/port/cheap-regex probes were already run by the
+    caller (e.g. fork-join signal-tail classification).
     """
     if not net_name:
         return False
+    if not is_module_local_signal_name(net_name):
+        return False
     base = net_name.split("[", 1)[0].split(".", 1)[0]
     text = body if body is not None else _module_body_for_row(index, row)
-    if wire_tail_exists_fast(text, net_name, param_ctx=row.param_ctx or None):
-        return True
     ctx = (
         dict(param_ctx)
         if param_ctx is not None
         else (dict(row.param_ctx) if row.param_ctx else _port_param_ctx(index, row, top))
     )
     key = _decl_net_cache_key(row, ctx)
-    if cache is not None and key in cache:
+    if not prechecked:
+        if wire_tail_exists_fast(text, net_name, param_ctx=row.param_ctx or None):
+            return True
+        if cache is not None and key in cache:
+            names = cache[key]
+            if net_name in names or base in names:
+                return True
+        if text and wire_tail_exists_fast(text, net_name, param_ctx=ctx):
+            return True
+        if _port_exists(index, row, net_name, top=top, param_ctx=ctx):
+            return True
+    elif cache is not None and key in cache:
         names = cache[key]
-        return net_name in names or base in names
-    if text and wire_tail_exists_fast(text, net_name, param_ctx=ctx):
+        if net_name in names or base in names:
+            return True
+    if not text:
+        return False
+    if net_base_in_assign_probe(text, base, param_map=ctx):
+        _cache_note_decl_net_hit(cache, key, net_name, base)
         return True
-    if _port_exists(index, row, net_name, top=top, param_ctx=ctx):
+    if net_base_in_port_map_probe(text, base, param_map=ctx):
+        _cache_note_decl_net_hit(cache, key, net_name, base)
         return True
     names = module_declared_net_names(
         index,
@@ -441,20 +473,7 @@ def net_exists_in_module_fast(
         body=text,
         deep=False,
     )
-    if net_name in names or base in names:
-        return True
-    if not text:
-        return False
-    # Dotted tails are instance paths, not module-local signal names.
-    if "." in net_name.split("[", 1)[0]:
-        return False
-    if net_base_in_assign_probe(text, base, param_map=ctx):
-        _cache_note_decl_net_hit(cache, key, net_name, base)
-        return True
-    if net_base_in_port_map_probe(text, base, param_map=ctx):
-        _cache_note_decl_net_hit(cache, key, net_name, base)
-        return True
-    return False
+    return net_name in names or base in names
 
 
 def _net_exists_in_module(

@@ -116,6 +116,68 @@ def path_walk_recovery_pass_cap() -> int:
     return 32
 
 
+def pw_module_file_cap() -> int:
+    """
+    Max RTL paths kept per module in tier0 regex map (0 = unlimited).
+
+    Stops ``module_index.tsv`` and recovery tier1 from trying thousands of
+    regex hits for common module names. ``HIERWALK_PW_MODULE_FILE_CAP``.
+    """
+    raw = os.environ.get("HIERWALK_PW_MODULE_FILE_CAP", "").strip()
+    if raw.lower() in ("0", "off", "false", "no", "disable", "disabled"):
+        return 0
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    return 32
+
+
+def pw_tier0_global_scan_max() -> int:
+    """
+    Max previously-unscanned sources per *global* tier0 expand (0 = unlimited).
+
+    Recovery pass-1 uses this instead of regex-scanning the entire filelist.
+    ``HIERWALK_PW_TIER0_GLOBAL_MAX``.
+    """
+    raw = os.environ.get("HIERWALK_PW_TIER0_GLOBAL_MAX", "").strip()
+    if raw.lower() in ("0", "off", "false", "no", "disable", "disabled"):
+        return 0
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    return 128
+
+
+def pw_inst_resolve_tier1_max(policy: str) -> int:
+    """
+    Max tier1 candidate files tried per inst-resolve (0 = unlimited).
+
+    ``HIERWALK_PW_TIER1_MAX`` (recovery default) /
+    ``HIERWALK_PW_TIER1_MAX_CONFIDENT`` (confident default).
+    """
+    key = (
+        "HIERWALK_PW_TIER1_MAX_CONFIDENT"
+        if policy == "confident"
+        else "HIERWALK_PW_TIER1_MAX"
+    )
+    default = 12 if policy == "confident" else 24
+    raw = os.environ.get(key, "").strip()
+    if not raw and policy == "confident":
+        raw = os.environ.get("HIERWALK_PW_TIER1_MAX", "").strip()
+    if raw.lower() in ("0", "off", "false", "no", "disable", "disabled"):
+        return 0
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    return default
+
+
 def pw_lazy_startup_digest() -> bool:
     """
     Path-walk startup: skip hashing every filelist source up front.

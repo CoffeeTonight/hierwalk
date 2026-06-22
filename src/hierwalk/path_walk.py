@@ -18,13 +18,17 @@ from typing import Callable, Dict, List, Mapping, Optional, Sequence, Set, TextI
 
 from hierwalk.connect_endpoints import (
     DeclNetCache,
+    _cache_note_decl_net_hit,
+    _decl_net_cache_key,
     _lca,
     _module_body_for_row,
     _net_exists_in_module,
     _port_exists,
+    is_module_local_signal_name,
     net_exists_in_module_fast,
     wire_tail_exists_fast,
 )
+from hierwalk.connect_scan import net_base_in_assign_probe, net_base_in_port_map_probe
 from hierwalk.connect_request import ConnectivityRequest
 from hierwalk.connectivity import ConnectivityBatchResult, ConnectivitySession
 from hierwalk.filelist import FilelistResult
@@ -887,30 +891,91 @@ class PathWalkState:
             return (time.perf_counter() - t0) * 1000.0
 
         body = self._cached_module_body(row)
-        if wire_tail_exists_fast(body, signal_name, param_ctx=row.param_ctx or None):
-            return "wire", _elapsed()
         ctx = self._cached_param_ctx(row)
-        if wire_tail_exists_fast(body, signal_name, param_ctx=ctx):
-            return "wire", _elapsed()
-        if _port_exists(
-            self.index,
-            row,
-            signal_name,
-            top=self.top,
-            param_ctx=ctx,
-        ):
+        if not is_module_local_signal_name(signal_name):
+            return None, _elapsed()
+        base = signal_name.split("[", 1)[0].split(".", 1)[0]
+
+        # Fork-join cheap probes: first wire hit returns immediately.
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            f_wire0 = ex.submit(
+                wire_tail_exists_fast,
+                body,
+                signal_name,
+                param_ctx=row.param_ctx or None,
+            )
+            f_wire1 = ex.submit(
+                wire_tail_exists_fast,
+                body,
+                signal_name,
+                param_ctx=ctx,
+            )
+            f_port = ex.submit(
+                _port_exists,
+                self.index,
+                row,
+                signal_name,
+                top=self.top,
+                param_ctx=ctx,
+            )
+            port_hit = False
+            for fut in as_completed((f_wire0, f_wire1, f_port)):
+                if fut in (f_wire0, f_wire1):
+                    try:
+                        if fut.result():
+                            return "wire", _elapsed()
+                    except Exception:
+                        pass
+                elif fut is f_port:
+                    try:
+                        port_hit = bool(fut.result())
+                    except Exception:
+                        port_hit = False
+        if port_hit:
             return "port", _elapsed()
+
+        cache = self._decl_net_cache
+        key = _decl_net_cache_key(row, ctx)
+        if cache is not None and key in cache:
+            names = cache[key]
+            if signal_name in names or base in names:
+                return "wire", _elapsed()
+
+        # Targeted deep probes in parallel before full decl scan.
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            f_assign = ex.submit(net_base_in_assign_probe, body, base, param_map=ctx)
+            f_pmap = ex.submit(net_base_in_port_map_probe, body, base, param_map=ctx)
+            for fut in as_completed((f_assign, f_pmap)):
+                try:
+                    if fut.result():
+                        _cache_note_decl_net_hit(cache, key, signal_name, base)
+                        return "wire", _elapsed()
+                except Exception:
+                    pass
+
         if net_exists_in_module_fast(
             self.index,
             row,
             signal_name,
             top=self.top,
-            cache=self._decl_net_cache,
+            cache=cache,
             param_ctx=ctx,
             body=body,
+            prechecked=True,
         ):
             return "wire", _elapsed()
         return None, _elapsed()
+
+    @staticmethod
+    def _probe_raw_inst_in_source(miss_leaf: str, probe_rtl: str) -> Tuple[bool, float]:
+        if not probe_rtl or not miss_leaf:
+            return False, 0.0
+        t0 = time.perf_counter()
+        try:
+            hit = miss_leaf in Path(probe_rtl).read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            hit = False
+        return hit, (time.perf_counter() - t0) * 1000.0
 
     def _emit_signal_tail(
         self,
@@ -969,7 +1034,11 @@ class PathWalkState:
             return True
 
         miss_leaf = self._inst_leaf_prefix(remainder)
-        if miss_leaf and miss_leaf != remainder:
+        if (
+            miss_leaf
+            and miss_leaf != remainder
+            and is_module_local_signal_name(remainder)
+        ):
             prefix_kind, prefix_ms = self._classify_signal_tail(parent_path, miss_leaf, row)
             if prefix_kind is not None:
                 self._emit_signal_tail(
@@ -1526,32 +1595,47 @@ class PathWalkState:
                         remainder = remainder[len(miss_leaf) :].lstrip(".")
                         continue
                     return False
-                if self._is_signal_or_port_tail_miss(cur, remainder, target_path=path):
-                    return False
-                raw_source_has_inst = False
-                raw_probe_done = False
                 probe_rtl = ""
                 if parent_rec is not None and miss_leaf:
                     probe_rtl = self.mod_db._parent_body_file(
                         parent_mod,
                         row.file if row else "",
                     )
-                if probe_rtl and miss_leaf:
-                    t_probe = time.perf_counter()
-                    try:
-                        raw_source_has_inst = miss_leaf in Path(
-                            probe_rtl
-                        ).read_text(encoding="utf-8", errors="ignore")
-                    except OSError:
-                        raw_source_has_inst = False
-                    probe_ms = (time.perf_counter() - t_probe) * 1000.0
-                    raw_probe_done = True
-                    self._last_raw_inst_probe_t = time.perf_counter()
-                    self._emit_walk(
-                        f"walk raw-inst-probe scope={cur} leaf={miss_leaf!r} "
-                        f"hit={raw_source_has_inst} rtl={Path(probe_rtl).name} "
-                        f"ms={probe_ms:.1f}"
+                raw_source_has_inst = False
+                raw_probe_done = False
+                probe_ms = 0.0
+                fork_workers = 2 if probe_rtl and miss_leaf else 1
+                with ThreadPoolExecutor(max_workers=fork_workers) as ex:
+                    fut_signal = ex.submit(
+                        self._resolve_signal_tail,
+                        cur,
+                        remainder,
+                        target_path=path,
                     )
+                    fut_raw = (
+                        ex.submit(
+                            self._probe_raw_inst_in_source,
+                            miss_leaf,
+                            probe_rtl,
+                        )
+                        if probe_rtl and miss_leaf
+                        else None
+                    )
+                    pending = [f for f in (fut_signal, fut_raw) if f is not None]
+                    for fut in as_completed(pending):
+                        if fut is fut_signal and fut.result():
+                            return False
+                    if fut_signal.result():
+                        return False
+                    if fut_raw is not None:
+                        raw_source_has_inst, probe_ms = fut_raw.result()
+                        raw_probe_done = True
+                        self._last_raw_inst_probe_t = time.perf_counter()
+                        self._emit_walk(
+                            f"walk raw-inst-probe scope={cur} leaf={miss_leaf!r} "
+                            f"hit={raw_source_has_inst} rtl={Path(probe_rtl).name} "
+                            f"ms={probe_ms:.1f}"
+                        )
                 if self._try_provisional_scope_step(cur, miss_leaf, row=row):
                     cur = f"{cur}.{miss_leaf}"
                     remainder = remainder[len(miss_leaf) :].lstrip(".")
@@ -1668,6 +1752,8 @@ def _walk_target_from_spec(spec: str, state: PathWalkState) -> str:
         if row is None:
             continue
         port = ".".join(parts[i:])
+        if not is_module_local_signal_name(port):
+            continue
         if _port_exists(state.index, row, port, top=state.top):
             return hier
         if net_exists_in_module_fast(
@@ -1734,7 +1820,7 @@ def _inst_path_from_spec(
         nxt = f"{cur}.{seg}"
         if nxt not in lookup:
             row = lookup.get(cur)
-            if row is not None:
+            if row is not None and is_module_local_signal_name(remainder):
                 if _port_exists(state.index, row, remainder, top=state.top):
                     return cur
                 if net_exists_in_module_fast(

@@ -470,10 +470,10 @@ class PathWalkModuleDb:
         if self._cache_root is None:
             return None
         out = self._cache_root / "module_index.tsv"
-        if not force and self._on_trace is None:
+        if not force:
             self._snapshot_dirty = True
             return out
-        if not force and self._snapshot_written and not self._snapshot_dirty:
+        if self._snapshot_written and not self._snapshot_dirty:
             return out
         lines = ["module\tfiles"]
         for name in sorted(self._module_to_files):
@@ -875,6 +875,9 @@ class PathWalkModuleDb:
         return best_name, best_edge
 
     def _note_regex_modules(self, path: str, names: Iterable[str]) -> None:
+        from hierwalk.perf import pw_module_file_cap
+
+        cap = pw_module_file_cap()
         key = str(Path(path).resolve())
         file_names = self._file_to_modules.setdefault(key, [])
         for name in names:
@@ -883,8 +886,56 @@ class PathWalkModuleDb:
             if name not in file_names:
                 file_names.append(name)
             files = self._module_to_files.setdefault(name, [])
-            if key not in files:
+            if key in files:
+                continue
+            preferred = self._prefer_file.get(name)
+            if cap > 0 and len(files) >= cap:
+                if preferred == key:
+                    files.insert(0, key)
+                    if len(files) > cap:
+                        files.pop()
+                continue
+            if preferred == key:
+                files.insert(0, key)
+            else:
                 files.append(key)
+
+    def _tier0_target_satisfied(
+        self,
+        target_module: str,
+        *,
+        policy: ResolvePolicy = RESOLVE_CONFIDENT,
+    ) -> bool:
+        """Enough tier0 regex candidates collected for one inst-resolve."""
+        if not target_module or target_module not in self._module_to_files:
+            return False
+        from hierwalk.perf import pw_inst_resolve_tier1_max, pw_module_file_cap
+
+        tier1_need = pw_inst_resolve_tier1_max(policy)
+        file_cap = pw_module_file_cap()
+        limits = [n for n in (tier1_need, file_cap) if n > 0]
+        if not limits:
+            return True
+        return len(self._module_to_files.get(target_module, [])) >= min(limits)
+
+    def _limit_resolve_candidates(
+        self,
+        candidates: Sequence[str],
+        *,
+        policy: ResolvePolicy,
+        label: str = "",
+    ) -> List[str]:
+        from hierwalk.perf import pw_inst_resolve_tier1_max
+
+        ordered = list(candidates)
+        max_n = pw_inst_resolve_tier1_max(policy)
+        if max_n > 0 and len(ordered) > max_n:
+            self._trace(
+                f"pw-db inst-resolve candidate-cap "
+                f"{label}{len(ordered)} -> {max_n} policy={policy}"
+            )
+            return ordered[:max_n]
+        return ordered
 
     def _listing_for_rtl(self, rtl_file: str) -> str:
         if not rtl_file:
@@ -1544,6 +1595,7 @@ class PathWalkModuleDb:
         paths: Sequence[str],
         *,
         target_module: str = "",
+        policy: ResolvePolicy = RESOLVE_CONFIDENT,
     ) -> int:
         pending = [
             str(Path(p).resolve())
@@ -1558,7 +1610,10 @@ class PathWalkModuleDb:
         submitted = self._tier0_submit(pending)
         while self._tier0_inflight:
             self._tier0_drain_completed(block=True, timeout=0.1)
-            if target_module and target_module in self._module_to_files:
+            if target_module and self._tier0_target_satisfied(
+                target_module,
+                policy=policy,
+            ):
                 return submitted
         return submitted
 
@@ -1567,6 +1622,7 @@ class PathWalkModuleDb:
         sources: Sequence[str],
         *,
         target_module: str = "",
+        policy: ResolvePolicy = RESOLVE_CONFIDENT,
     ) -> int:
         keys = [str(Path(src).resolve()) for src in sources]
         pending = [k for k in keys if k not in self._regex_scanned and k not in self._tier0_inflight]
@@ -1580,11 +1636,18 @@ class PathWalkModuleDb:
             for key in pending:
                 self._tier0_scan_file(key)
                 added += 1
-                if target_module and target_module in self._module_to_files:
+                if target_module and self._tier0_target_satisfied(
+                    target_module,
+                    policy=policy,
+                ):
                     return added
             return added
 
-        return self._tier0_scan_sources_parallel(pending, target_module=target_module)
+        return self._tier0_scan_sources_parallel(
+            pending,
+            target_module=target_module,
+            policy=policy,
+        )
 
     def _tier0_scan_file(self, path: str) -> List[str]:
         key = str(Path(path).resolve())
@@ -1628,6 +1691,7 @@ class PathWalkModuleDb:
         sources: Optional[Sequence[str]] = None,
         *,
         target_module: str = "",
+        policy: ResolvePolicy = RESOLVE_CONFIDENT,
     ) -> int:
         """Tier-0 scan sources not yet regex-indexed (scoped pool or full design)."""
         pool = (
@@ -1635,7 +1699,22 @@ class PathWalkModuleDb:
             if sources is not None
             else list(self._sources)
         )
-        return self._tier0_scan_sources(pool, target_module=target_module)
+        if sources is None:
+            from hierwalk.perf import pw_tier0_global_scan_max
+
+            global_max = pw_tier0_global_scan_max()
+            if global_max > 0:
+                pending = [
+                    s
+                    for s in pool
+                    if s not in self._regex_scanned and s not in self._tier0_inflight
+                ]
+                pool = pending[:global_max]
+        return self._tier0_scan_sources(
+            pool,
+            target_module=target_module,
+            policy=policy,
+        )
 
     def _sort_module_files(
         self,
@@ -1685,7 +1764,11 @@ class PathWalkModuleDb:
                 scope_pool,
                 anchor_rtl=scope_anchor,
             )
-            self._tier0_scan_sources(ordered_pool, target_module=module_name)
+            self._tier0_scan_sources(
+                ordered_pool,
+                target_module=module_name,
+                policy=policy,
+            )
             if module_name in self._module_to_files:
                 files = list(self._module_to_files.get(module_name, []))
                 return self._sort_module_files(
@@ -1715,7 +1798,10 @@ class PathWalkModuleDb:
 
         workers = _resolve_pw_db_jobs(self._jobs, len(self._sources))
         batch_size = max(workers * 4, _PARALLEL_MIN_TIER0)
-        while module_name not in self._module_to_files and self._regex_queue:
+        while (
+            not self._tier0_target_satisfied(module_name, policy=policy)
+            and self._regex_queue
+        ):
             batch: List[str] = []
             while self._regex_queue and len(batch) < batch_size:
                 nxt = self._regex_queue.pop(0)
@@ -1728,18 +1814,34 @@ class PathWalkModuleDb:
                 if not self._tier0_inflight:
                     break
                 continue
-            self._tier0_scan_sources(batch, target_module=module_name)
-            if module_name in self._module_to_files:
+            self._tier0_scan_sources(
+                batch,
+                target_module=module_name,
+                policy=policy,
+            )
+            if self._tier0_target_satisfied(module_name, policy=policy):
                 break
 
-        if module_name not in self._module_to_files:
+        if (
+            policy == RESOLVE_RECOVERY
+            and not self._tier0_target_satisfied(module_name, policy=policy)
+        ):
             remaining = [
                 src
                 for src in self._sources
                 if src not in self._regex_scanned and src not in self._tier0_inflight
             ]
             if remaining:
-                self._tier0_scan_sources(remaining, target_module=module_name)
+                from hierwalk.perf import pw_tier0_global_scan_max
+
+                global_max = pw_tier0_global_scan_max()
+                if global_max > 0:
+                    remaining = remaining[:global_max]
+                self._tier0_scan_sources(
+                    remaining,
+                    target_module=module_name,
+                    policy=policy,
+                )
 
         files = list(self._module_to_files.get(module_name, []))
         scope_pool = (
@@ -2399,7 +2501,12 @@ class PathWalkModuleDb:
         tried: Set[str] = set()
         max_pass = 2 if policy == RESOLVE_CONFIDENT else 3
         for pass_idx in range(max_pass):
-            for fpath in candidates:
+            trial_files = self._limit_resolve_candidates(
+                candidates,
+                policy=policy,
+                label=f"module={module_name} ",
+            )
+            for fpath in trial_files:
                 if fpath in tried:
                     continue
                 tried.add(fpath)
@@ -2444,6 +2551,7 @@ class PathWalkModuleDb:
                     pending = self._scan_remaining_sources_tier0(
                         scoped_pool,
                         target_module=module_name,
+                        policy=policy,
                     )
                     if pending > 0:
                         expand_label = (
@@ -2466,6 +2574,7 @@ class PathWalkModuleDb:
                 pending = self._scan_remaining_sources_tier0(
                     None,
                     target_module=module_name,
+                    policy=policy,
                 )
                 refreshed = self._recovery_pass1_candidates(
                     module_name,
@@ -2719,7 +2828,12 @@ class PathWalkModuleDb:
             tried.add(avoid)
         max_pass = 2 if policy == RESOLVE_CONFIDENT else 3
         for pass_idx in range(max_pass):
-            for fpath in candidates:
+            trial_files = self._limit_resolve_candidates(
+                candidates,
+                policy=policy,
+                label=f"{parent_module}.{inst_leaf} ",
+            )
+            for fpath in trial_files:
                 if fpath in tried:
                     continue
                 tried.add(fpath)
@@ -2810,6 +2924,7 @@ class PathWalkModuleDb:
                     pending = self._scan_remaining_sources_tier0(
                         scoped_pool,
                         target_module=parent_module,
+                        policy=policy,
                     )
                     if pending > 0:
                         expand_label = (
@@ -2832,6 +2947,7 @@ class PathWalkModuleDb:
                 pending = self._scan_remaining_sources_tier0(
                     None,
                     target_module=parent_module,
+                    policy=policy,
                 )
                 refreshed = self._recovery_pass1_candidates(
                     parent_module,
