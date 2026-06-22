@@ -34,6 +34,13 @@ def test_path_walk_trace_filter_hides_search_keeps_hits():
         "pw-db inst-resolve enter SOC_TOP.u_ip file=allinst.v policy=confident"
     )
     assert path_walk_trace_show_message(
+        "pw-db inst-resolve tier1-probe miss SOC_TOP.u_ip edges=12000 "
+        "tier1_ms=45000.0 since_enter_ms=45001.2"
+    )
+    assert path_walk_trace_show_message(
+        "pw-db inst-find enter SOC_TOP.u_ip file=allinst.v pre_ms=45001.2"
+    )
+    assert path_walk_trace_show_message(
         "pw-db inst-find enter SOC_TOP.u_ip file=allinst.v"
     )
     assert path_walk_trace_show_message(

@@ -2068,12 +2068,19 @@ class PathWalkModuleDb:
         parent_ctx: Mapping[str, str],
         inst_leaf: str,
         fpath: str,
+        *,
+        pre_resolve_ms: Optional[float] = None,
     ) -> Optional[InstanceEdge]:
         """Targeted parent-body scan for one instance (no full tier1 file walk)."""
         fname = Path(fpath).name
         t0 = time.perf_counter()
+        pre_note = (
+            f" pre_ms={pre_resolve_ms:.1f}"
+            if pre_resolve_ms is not None
+            else ""
+        )
         self._trace(
-            f"pw-db inst-find enter {parent_module}.{inst_leaf} file={fname}"
+            f"pw-db inst-find enter {parent_module}.{inst_leaf} file={fname}{pre_note}"
         )
         try:
             t_pre = time.perf_counter()
@@ -2476,31 +2483,37 @@ class PathWalkModuleDb:
                 f"path=inst_index ms={self._elapsed_ms(t_resolve):.1f}"
             )
             return indexed
-        if self._index_has_resolved_module(
-            parent_module,
-            expect_inst=(parent_module, inst_leaf),
-            parent_ctx=parent_ctx,
-        ):
-            rec = self._index.get_module(parent_module)
-            if rec is not None:
-                pmap = resolve_param_map(rec.raw_params, parent=parent_ctx)
-                edge = self._edge_matches(
-                    self._parent_instance_edges(parent_module, parent_ctx),
-                    inst_leaf,
-                    pmap,
-                    parent_module=parent_module,
-                    parent_ctx=parent_ctx,
-                )
-                if edge is not None:
-                    if rec.file_path:
-                        self._prefer_file[parent_module] = str(
-                            Path(rec.file_path).resolve()
-                        )
-                    self._trace(
-                        f"pw-db inst-resolve done {parent_module}.{inst_leaf} "
-                        f"path=tier1-index ms={self._elapsed_ms(t_resolve):.1f}"
-                    )
-                    return edge
+
+        t_tier1 = time.perf_counter()
+        rec = self._index.get_module(parent_module)
+        tier1_edge: Optional[InstanceEdge] = None
+        tier1_edges = 0
+        if rec is not None and not _is_placeholder_module(rec):
+            tier1_edge_list = self._parent_instance_edges(parent_module, parent_ctx)
+            tier1_edges = len(tier1_edge_list)
+            pmap = resolve_param_map(rec.raw_params, parent=parent_ctx)
+            tier1_edge = self._edge_matches(
+                tier1_edge_list,
+                inst_leaf,
+                pmap,
+                parent_module=parent_module,
+                parent_ctx=parent_ctx,
+            )
+        tier1_ms = self._elapsed_ms(t_tier1)
+        if tier1_edge is not None:
+            if rec is not None and rec.file_path:
+                self._prefer_file[parent_module] = resolved_path_str(rec.file_path)
+            self._trace(
+                f"pw-db inst-resolve done {parent_module}.{inst_leaf} "
+                f"path=tier1-index edges={tier1_edges} tier1_ms={tier1_ms:.1f} "
+                f"ms={self._elapsed_ms(t_resolve):.1f}"
+            )
+            return tier1_edge
+        self._trace(
+            f"pw-db inst-resolve tier1-probe miss {parent_module}.{inst_leaf} "
+            f"edges={tier1_edges} tier1_ms={tier1_ms:.1f} "
+            f"since_enter_ms={self._elapsed_ms(t_resolve):.1f}"
+        )
 
         scope_anchor = avoid
         if avoid:
@@ -2509,6 +2522,7 @@ class PathWalkModuleDb:
                 parent_ctx,
                 inst_leaf,
                 avoid,
+                pre_resolve_ms=self._elapsed_ms(t_resolve),
             )
             if selective is not None:
                 self._apply_selective_edge_hit(
