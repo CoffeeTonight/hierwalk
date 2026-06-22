@@ -79,3 +79,98 @@ def test_selective_child_edge_finds_one_inst_in_large_top(tmp_path: Path, monkey
     assert target in state.rows_by_path
     assert tier1_calls == []
     assert elapsed_ms < 15_000.0
+
+
+def test_preprocessed_text_disk_cache(tmp_path: Path, monkeypatch):
+    fl_path = _write_large_flat_top(tmp_path, n_inst=200)
+    fl = parse_filelist(str(fl_path), index_cwd=str(tmp_path))
+    rtl = str((tmp_path / "top.v").resolve())
+    cache_dir = tmp_path / ".db_cache"
+    preprocess_calls: list[str] = []
+
+    from hierwalk.index import DesignIndex
+    from hierwalk.path_walk_db import PathWalkModuleDb, path_walk_db_cache_key
+    from hierwalk.preprocess import preprocess_file_for_index
+
+    orig = preprocess_file_for_index
+
+    def traced_preprocess(path, *args, **kwargs):
+        preprocess_calls.append(str(path))
+        return orig(path, *args, **kwargs)
+
+    monkeypatch.setattr(
+        "hierwalk.preprocess.preprocess_file_for_index",
+        traced_preprocess,
+    )
+
+    sources = [rtl]
+    cache_key = path_walk_db_cache_key(sources, defines={})
+    index = DesignIndex._assemble(
+        {},
+        path_patterns=[],
+        module_patterns=[],
+        filelist_patterns=[],
+        library_files=[],
+        library_dirs=[],
+        libexts=[],
+        file_via_filelist={},
+        file_filelist_chain={},
+        preprocess_include_dirs=[],
+        preprocess_defines={},
+    )
+    mod_db = PathWalkModuleDb(
+        sources,
+        index,
+        cache_dir=cache_dir,
+        cache_key=cache_key,
+        no_cache=False,
+    )
+    mod_db._preprocessed_text_for_file(rtl)
+    assert len(preprocess_calls) == 1
+
+    preprocess_calls.clear()
+    mod_db2 = PathWalkModuleDb(
+        sources,
+        index,
+        cache_dir=cache_dir,
+        cache_key=cache_key,
+        no_cache=False,
+    )
+    mod_db2._preprocessed_text_for_file(rtl)
+    assert preprocess_calls == []
+
+
+def test_inst_leaf_index_avoids_repeat_selective_scan(tmp_path: Path, monkeypatch):
+    fl_path = _write_large_flat_top(tmp_path, n_inst=6000)
+    fl = parse_filelist(str(fl_path), index_cwd=str(tmp_path))
+
+    from hierwalk import inst_scan
+
+    orig_find = inst_scan.find_hierarchy_instance
+    find_calls: list[str] = []
+
+    def traced_find(body, inst_leaf, *, param_map=None):
+        find_calls.append(inst_leaf)
+        return orig_find(body, inst_leaf, param_map=param_map)
+
+    monkeypatch.setattr(inst_scan, "find_hierarchy_instance", traced_find)
+    monkeypatch.setattr(
+        "hierwalk.path_walk_db.find_hierarchy_instance",
+        traced_find,
+    )
+
+    from hierwalk.path_walk_db import PathWalkModuleDb
+
+    monkeypatch.setattr(PathWalkModuleDb, "_warm_tier1_background", lambda self, _f: None)
+    monkeypatch.setattr(PathWalkModuleDb, "tier1_scan_file", lambda self, _p: {})
+
+    index, mod_db = create_path_walk_index(fl, "SOC_TOP", defines={}, no_cache=True, jobs=1)
+    from hierwalk.path_walk import PathWalkState
+
+    state = PathWalkState(index=index, top="SOC_TOP", mod_db=mod_db)
+    state.ensure_root()
+    state.ensure_path("SOC_TOP.u_ip_100")
+    find_calls.clear()
+    state.ensure_path("SOC_TOP.u_ip_200")
+    assert "u_ip_200" in find_calls
+    assert "u_ip_100" not in find_calls

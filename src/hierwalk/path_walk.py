@@ -1003,8 +1003,17 @@ class PathWalkState:
             out: Tuple[str, Optional[InstanceEdge]] = ("", None)
             self._set_resolve_step_cache(step_key, out)
             return out
+        best_name, best_edge = self.mod_db.longest_inst_prefix_match(
+            row.module,
+            row.param_ctx or {},
+            remainder,
+        )
+        if best_edge is not None:
+            out = (best_name, best_edge)
+            self._set_resolve_step_cache(step_key, out)
+            return out
         best_name = ""
-        best_edge: Optional[InstanceEdge] = None
+        best_edge = None
         for name, edge in self._expanded_inst_pairs(row):
             if self._remainder_matches_inst(remainder, name):
                 if len(name) > len(best_name):

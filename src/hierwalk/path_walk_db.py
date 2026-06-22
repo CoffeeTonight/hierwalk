@@ -26,6 +26,7 @@ from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, 
 from hierwalk.ignore_path import source_path_matches
 from hierwalk.index import (
     DesignIndex,
+    _ctx_key,
     _module_header_body,
     _scan_module_body,
     scan_preprocessed,
@@ -43,7 +44,7 @@ from hierwalk.manifest import PathDigests, path_content_digest
 from hierwalk.models import InstanceEdge, ModuleRecord
 from hierwalk.params import resolve_param_map
 
-PATH_WALK_DB_VERSION = 10
+PATH_WALK_DB_VERSION = 11
 
 _PARALLEL_MIN_TIER0 = 4
 
@@ -65,6 +66,17 @@ class _FileValidatedCacheEntry:
     defines_digest: str
     modules: Tuple[Tuple[str, ModuleRecord], ...]
     include_closure_digest: str = ""
+
+
+@dataclass(frozen=True)
+class _FilePreprocessedCacheEntry:
+    content_digest: str
+    defines_digest: str
+    include_closure_digest: str
+    text: str
+
+
+InstLeafIndexKey = Tuple[str, str]
 
 
 def _defines_digest(defines: Mapping[str, str]) -> str:
@@ -339,7 +351,8 @@ class PathWalkModuleDb:
         self.cache_regex_hits: int = 0
         self.cache_validated_hits: int = 0
         self._folded_edges_cache: Dict[Tuple[str, str, str], List[InstanceEdge]] = {}
-        self._preprocessed_text_cache: Dict[str, str] = {}
+        self._preprocessed_text_cache: Dict[Tuple[str, str, str], str] = {}
+        self._inst_leaf_index: Dict[InstLeafIndexKey, Dict[str, InstanceEdge]] = {}
         self._tier1_warm_inflight: Set[str] = set()
         self._snapshot_dirty: bool = False
         self._snapshot_written: bool = False
@@ -472,6 +485,21 @@ class PathWalkModuleDb:
             / f"{_file_cache_token(path)}_{defines_digest}.pkl"
         )
 
+    def _preprocessed_sidecar(
+        self,
+        path: str,
+        *,
+        defines_digest: str,
+        include_closure_digest: str,
+    ) -> Optional[Path]:
+        if self._cache_root is None:
+            return None
+        return (
+            self._cache_root
+            / "preprocessed"
+            / f"{_file_cache_token(path)}_{defines_digest}_{include_closure_digest}.pkl"
+        )
+
     def _include_closure_digest(self, path: str) -> str:
         from hierwalk.preprocess import _collect_include_closure
 
@@ -574,6 +602,164 @@ class PathWalkModuleDb:
         with tmp.open("wb") as fh:
             pickle.dump(entry, fh, protocol=pickle.HIGHEST_PROTOCOL)
         tmp.replace(sidecar)
+
+    def _load_preprocessed_sidecar(
+        self,
+        path: str,
+        *,
+        defines_digest: str,
+        include_closure_digest: str,
+    ) -> Optional[str]:
+        sidecar = self._preprocessed_sidecar(
+            path,
+            defines_digest=defines_digest,
+            include_closure_digest=include_closure_digest,
+        )
+        if sidecar is None or not sidecar.is_file():
+            return None
+        try:
+            with sidecar.open("rb") as fh:
+                obj = pickle.load(fh)
+        except (OSError, pickle.PickleError, EOFError, ValueError):
+            return None
+        if not isinstance(obj, _FilePreprocessedCacheEntry):
+            return None
+        live = self._source_digest(path)
+        if live is None or live != obj.content_digest:
+            return None
+        if obj.defines_digest != defines_digest:
+            return None
+        if obj.include_closure_digest != include_closure_digest:
+            return None
+        return obj.text
+
+    def _save_preprocessed_sidecar(
+        self,
+        path: str,
+        text: str,
+        *,
+        defines_digest: str,
+        include_closure_digest: str,
+    ) -> None:
+        if self._no_cache:
+            return
+        sidecar = self._preprocessed_sidecar(
+            path,
+            defines_digest=defines_digest,
+            include_closure_digest=include_closure_digest,
+        )
+        if sidecar is None:
+            return
+        digest = self._source_digest(path)
+        if digest is None:
+            return
+        entry = _FilePreprocessedCacheEntry(
+            digest,
+            defines_digest,
+            include_closure_digest,
+            text,
+        )
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        tmp = sidecar.with_suffix(sidecar.suffix + ".tmp")
+        with tmp.open("wb") as fh:
+            pickle.dump(entry, fh, protocol=pickle.HIGHEST_PROTOCOL)
+        tmp.replace(sidecar)
+
+    def _inst_index_key(
+        self,
+        parent_module: str,
+        parent_ctx: Mapping[str, str],
+    ) -> InstLeafIndexKey:
+        rec = self._index.get_module(parent_module)
+        raw = dict(rec.raw_params) if rec else {}
+        pmap = resolve_param_map(raw, parent=parent_ctx)
+        return parent_module, _ctx_key(pmap)
+
+    def _register_inst_edges(
+        self,
+        parent_module: str,
+        parent_ctx: Mapping[str, str],
+        edges: Sequence[InstanceEdge],
+    ) -> None:
+        if not edges:
+            return
+        key = self._inst_index_key(parent_module, parent_ctx)
+        rec = self._index.get_module(parent_module)
+        raw = dict(rec.raw_params) if rec else {}
+        pmap = resolve_param_map(raw, parent=parent_ctx)
+        bucket = self._inst_leaf_index.setdefault(key, {})
+        for edge in edges:
+            for name in expand_inst_names(edge.inst_name, "", pmap):
+                bucket[name] = edge
+                bucket[name.lower()] = edge
+
+    def _invalidate_inst_leaf_index(
+        self,
+        mod_names: Optional[Set[str]] = None,
+    ) -> None:
+        if not mod_names:
+            self._inst_leaf_index.clear()
+            return
+        drop = [key for key in self._inst_leaf_index if key[0] in mod_names]
+        for key in drop:
+            del self._inst_leaf_index[key]
+
+    def lookup_inst_edge(
+        self,
+        parent_module: str,
+        parent_ctx: Mapping[str, str],
+        inst_leaf: str,
+    ) -> Optional[InstanceEdge]:
+        """O(1) child-edge lookup by instance leaf name (incl. array indices)."""
+        if not inst_leaf:
+            return None
+        bucket = self._inst_leaf_index.get(self._inst_index_key(parent_module, parent_ctx))
+        if not bucket:
+            return None
+        edge = bucket.get(inst_leaf) or bucket.get(inst_leaf.lower())
+        if edge is not None:
+            return edge
+        base = inst_leaf.split("[", 1)[0]
+        if base != inst_leaf:
+            edge = bucket.get(base) or bucket.get(base.lower())
+            if edge is not None:
+                return edge
+        return None
+
+    @staticmethod
+    def _name_prefix_matches_remainder(remainder: str, inst_name: str) -> bool:
+        if remainder == inst_name:
+            return True
+        prefix = inst_name + "."
+        return (
+            remainder.startswith(prefix)
+            or remainder.lower().startswith(prefix.lower())
+        )
+
+    def longest_inst_prefix_match(
+        self,
+        parent_module: str,
+        parent_ctx: Mapping[str, str],
+        remainder: str,
+    ) -> Tuple[str, Optional[InstanceEdge]]:
+        """Longest instance-name prefix of *remainder* using the inst-leaf index."""
+        bucket = self._inst_leaf_index.get(self._inst_index_key(parent_module, parent_ctx))
+        if not bucket or not remainder:
+            return "", None
+        best_name = ""
+        best_edge: Optional[InstanceEdge] = None
+        seen: Set[int] = set()
+        for name, edge in bucket.items():
+            eid = id(edge)
+            if eid in seen:
+                continue
+            if not self._name_prefix_matches_remainder(remainder, name):
+                continue
+            seen.add(eid)
+            if len(name) > len(best_name):
+                best_name = name
+                best_edge = edge
+        return best_name, best_edge
 
     def _note_regex_modules(self, path: str, names: Iterable[str]) -> None:
         key = str(Path(path).resolve())
@@ -1422,9 +1608,22 @@ class PathWalkModuleDb:
         edges: Sequence[InstanceEdge],
         inst_leaf: str,
         param_map: Mapping[str, str],
+        *,
+        parent_module: str = "",
+        parent_ctx: Optional[Mapping[str, str]] = None,
     ) -> Optional[InstanceEdge]:
         """Match path segment to synthesizable instance names only (not module types)."""
-        if not edges or not inst_leaf:
+        if not inst_leaf:
+            return None
+        if parent_module:
+            indexed = self.lookup_inst_edge(
+                parent_module,
+                parent_ctx or {},
+                inst_leaf,
+            )
+            if indexed is not None:
+                return indexed
+        if not edges:
             return None
         for edge in edges:
             if instance_edge_matches_leaf(edge, inst_leaf, param_map=param_map):
@@ -1433,9 +1632,22 @@ class PathWalkModuleDb:
 
     def _preprocessed_text_for_file(self, fpath: str) -> str:
         key = str(Path(fpath).resolve())
-        cached = self._preprocessed_text_cache.get(key)
+        defines_digest = self._defines_digest
+        include_digest = self._include_closure_digest(key)
+        mem_key = (key, defines_digest, include_digest)
+        cached = self._preprocessed_text_cache.get(mem_key)
         if cached is not None:
             return cached
+        disk = self._load_preprocessed_sidecar(
+            key,
+            defines_digest=defines_digest,
+            include_closure_digest=include_digest,
+        )
+        if disk is not None:
+            self._preprocessed_text_cache[mem_key] = disk
+            self._trace(f"pw-db preprocess cache {Path(key).name}")
+            return disk
+        from hierwalk.lazy_scope import lazy_index_ifdef
         from hierwalk.preprocess import apply_ifdef_filter, preprocess_file_for_index
 
         defs = dict(self._defines)
@@ -1446,8 +1658,15 @@ class PathWalkModuleDb:
             set(),
             skip_path_patterns=self._skip,
         )
-        text = apply_ifdef_filter(text, defs)
-        self._preprocessed_text_cache[key] = text
+        if not lazy_index_ifdef():
+            text = apply_ifdef_filter(text, defs)
+        self._preprocessed_text_cache[mem_key] = text
+        self._save_preprocessed_sidecar(
+            key,
+            text,
+            defines_digest=defines_digest,
+            include_closure_digest=include_digest,
+        )
         return text
 
     def hint_edges_for_type_miss(
@@ -1534,6 +1753,7 @@ class PathWalkModuleDb:
         self._index._rebuild_file_modules()
         self._note_regex_modules(key, [parent_module, child])
         self._prefer_file[parent_module] = key
+        self._register_inst_edges(parent_module, parent_ctx, instances)
         self._snapshot_dirty = True
 
     def _ensure_module_light(self, module_name: str, fpath: str) -> bool:
@@ -1570,6 +1790,7 @@ class PathWalkModuleDb:
         self._index._rebuild_file_modules()
         self._note_regex_modules(key, [module_name])
         self._prefer_file[module_name] = key
+        self._register_inst_edges(module_name, {}, instances)
         self._snapshot_dirty = True
         return True
 
@@ -1610,6 +1831,9 @@ class PathWalkModuleDb:
         self._index.invalidate_instance_cache_for_modules(sorted(affected))
         self._index._rebuild_default_ctx()
         self._invalidate_folded_edges_cache(mod_names=affected, file_path=key)
+        self._invalidate_inst_leaf_index(affected)
+        for name, rec in modules.items():
+            self._register_inst_edges(name, {}, rec.instances)
         self._snapshot_dirty = True
 
     def _index_has_resolved_module(
@@ -1633,6 +1857,8 @@ class PathWalkModuleDb:
                 self._parent_instance_edges(module_name, parent_ctx or {}),
                 inst_leaf,
                 pmap,
+                parent_module=module_name,
+                parent_ctx=parent_ctx or {},
             )
             is not None
         )
@@ -1731,7 +1957,13 @@ class PathWalkModuleDb:
                             fpath=fpath,
                             parent_ctx=parent_ctx or {},
                         )
-                        edge = self._edge_matches(tier_edges, inst_leaf, pmap)
+                        edge = self._edge_matches(
+                            tier_edges,
+                            inst_leaf,
+                            pmap,
+                            parent_module=module_name,
+                            parent_ctx=parent_ctx or {},
+                        )
                         if edge is None:
                             insts = ", ".join(e.inst_name for e in tier_edges[:12])
                             self._trace(
@@ -1821,6 +2053,9 @@ class PathWalkModuleDb:
     ) -> Optional[InstanceEdge]:
         """Tier-1 confirmed child edge, trying alternate decl files on miss."""
         avoid = current_file
+        indexed = self.lookup_inst_edge(parent_module, parent_ctx, inst_leaf)
+        if indexed is not None:
+            return indexed
         if self._index_has_resolved_module(
             parent_module,
             expect_inst=(parent_module, inst_leaf),
@@ -1833,6 +2068,8 @@ class PathWalkModuleDb:
                     self._parent_instance_edges(parent_module, parent_ctx),
                     inst_leaf,
                     pmap,
+                    parent_module=parent_module,
+                    parent_ctx=parent_ctx,
                 )
                 if edge is not None:
                     if rec.file_path:
@@ -1940,7 +2177,13 @@ class PathWalkModuleDb:
                     fpath=fpath,
                     parent_ctx=parent_ctx,
                 )
-                edge = self._edge_matches(tier_edges, inst_leaf, pmap)
+                edge = self._edge_matches(
+                    tier_edges,
+                    inst_leaf,
+                    pmap,
+                    parent_module=parent_module,
+                    parent_ctx=parent_ctx,
+                )
                 if edge is not None:
                     self._apply_file_modules(fpath, modules)
                     self._prefer_file[parent_module] = fpath
