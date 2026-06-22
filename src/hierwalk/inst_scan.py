@@ -297,6 +297,61 @@ def iter_module_blocks(text: str) -> Iterator[ModuleBlock]:
         }
 
 
+def instance_edge_matches_leaf(
+    edge: InstanceEdge,
+    inst_leaf: str,
+    *,
+    param_map: Optional[Mapping[str, str]] = None,
+) -> bool:
+    """True when *inst_leaf* names *edge* (incl. folded array indices)."""
+    if not inst_leaf:
+        return False
+    pmap = dict(param_map or {})
+    if edge.inst_name == inst_leaf:
+        return True
+    if inst_leaf in expand_inst_names(edge.inst_name, "", pmap):
+        return True
+    leaf_lower = inst_leaf.lower()
+    if edge.inst_name.lower() == leaf_lower:
+        return True
+    return any(name.lower() == leaf_lower for name in expand_inst_names(edge.inst_name, "", pmap))
+
+
+def find_instance_by_child_module(
+    body: str,
+    child_module: str,
+    *,
+    param_map: Optional[Mapping[str, str]] = None,
+) -> Optional[InstanceEdge]:
+    """Return the first instance of *child_module* (for type-not-inst miss hints)."""
+    if not body or not child_module:
+        return None
+    want = child_module.lower()
+    for edge in _iter_hierarchy_instance_edges(body, param_map=param_map):
+        if edge.child_module.lower() == want:
+            return edge
+    return None
+
+
+def find_hierarchy_instance(
+    body: str,
+    inst_leaf: str,
+    *,
+    param_map: Optional[Mapping[str, str]] = None,
+) -> Optional[InstanceEdge]:
+    """
+    Selective instance lookup: scan until *inst_leaf* matches, then stop.
+
+    Avoids building the full parent instance list used by path-walk DB tier1.
+    """
+    if not body or not inst_leaf:
+        return None
+    for edge in _iter_hierarchy_instance_edges(body, param_map=param_map):
+        if instance_edge_matches_leaf(edge, inst_leaf, param_map=param_map):
+            return edge
+    return None
+
+
 def scan_hierarchy_instances(
     body: str,
     *,
@@ -315,6 +370,14 @@ def scan_hierarchy_instances(
       generate / if / for bodies;
       comma-separated: cell u1 (...), u2 (...);
     """
+    return list(_iter_hierarchy_instance_edges(body, param_map=param_map))
+
+
+def _iter_hierarchy_instance_edges(
+    body: str,
+    *,
+    param_map: Optional[Mapping[str, str]] = None,
+) -> Iterator[InstanceEdge]:
     from hierwalk.preprocess import strip_comments_for_instance_scan
 
     pmap = dict(param_map or {})
@@ -324,7 +387,6 @@ def scan_hierarchy_instances(
         clean = _BIND_LINE_RE.sub("", clean)
     else:
         clean = work
-    out: List[InstanceEdge] = []
     seen: Set[Tuple[str, str]] = set()
     n = len(clean)
     i = 0
@@ -334,20 +396,19 @@ def scan_hierarchy_instances(
         inst: str,
         dims: str,
         overrides: Optional[Dict[str, str]] = None,
-    ) -> None:
+    ) -> Iterator[InstanceEdge]:
         if cell.lower() in _KEYWORDS:
             return
         for leaf in expand_inst_names(inst, dims, pmap):
             key = (leaf, cell)
-            if key not in seen:
-                seen.add(key)
-                out.append(
-                    InstanceEdge(
-                        inst_name=leaf,
-                        child_module=cell,
-                        param_overrides=dict(overrides or {}),
-                    )
-                )
+            if key in seen:
+                continue
+            seen.add(key)
+            yield InstanceEdge(
+                inst_name=leaf,
+                child_module=cell,
+                param_overrides=dict(overrides or {}),
+            )
 
     def consume_hash(start: int) -> Tuple[Dict[str, str], int]:
         pos = start
@@ -408,7 +469,7 @@ def scan_hierarchy_instances(
         if k >= n or clean[k] not in "(;":
             i += 1
             continue
-        add(cell, inst, dims, overrides)
+        yield from add(cell, inst, dims, overrides)
         if clean[k] == "(":
             k = _skip_balanced(clean, k, "(", ")")
         while k < n and clean[k].isspace():
@@ -430,13 +491,12 @@ def scan_hierarchy_instances(
                     while k < n and clean[k].isspace():
                         k += 1
                 if k < n and clean[k] in "(;":
-                    add(cell, inst2, dims2, overrides)
+                    yield from add(cell, inst2, dims2, overrides)
                     if clean[k] == "(":
                         k = _skip_balanced(clean, k, "(", ")")
             i = k
             continue
         i = k
-    return out
 
 
 _MODULE_BLOCK_RE = re.compile(

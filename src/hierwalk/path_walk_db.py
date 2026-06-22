@@ -30,7 +30,15 @@ from hierwalk.index import (
     _scan_module_body,
     scan_preprocessed,
 )
-from hierwalk.inst_scan import expand_inst_names
+
+from hierwalk.inst_scan import (
+    expand_inst_names,
+    find_hierarchy_instance,
+    find_instance_by_child_module,
+    instance_edge_matches_leaf,
+    scan_hierarchy_instances,
+)
+from hierwalk.params import parse_param_pairs
 from hierwalk.manifest import PathDigests, path_content_digest
 from hierwalk.models import InstanceEdge, ModuleRecord
 from hierwalk.params import resolve_param_map
@@ -331,6 +339,8 @@ class PathWalkModuleDb:
         self.cache_regex_hits: int = 0
         self.cache_validated_hits: int = 0
         self._folded_edges_cache: Dict[Tuple[str, str, str], List[InstanceEdge]] = {}
+        self._preprocessed_text_cache: Dict[str, str] = {}
+        self._tier1_warm_inflight: Set[str] = set()
         self._snapshot_dirty: bool = False
         self._snapshot_written: bool = False
         self._jobs = jobs
@@ -408,6 +418,37 @@ class PathWalkModuleDb:
             if rec.file_path and not _is_placeholder_module(rec):
                 self._note_regex_modules(rec.file_path, [name])
                 self._prefer_file.setdefault(name, str(Path(rec.file_path).resolve()))
+
+    def seed_top_module(self, top: str, top_file: str) -> None:
+        """Register top file path without a full tier1 validated scan."""
+        key = str(Path(top_file).resolve())
+        self._tier0_scan_file(key)
+        rec = self._index.get_module(top)
+        if rec is None:
+            self._index.modules[top] = ModuleRecord(
+                module_name=top,
+                file_path=key,
+                body="",
+                raw_params={},
+                instances=[],
+                needs_generate_fold=False,
+            )
+            self._index._rebuild_file_modules()
+        elif not rec.file_path:
+            self._index.modules[top] = ModuleRecord(
+                module_name=top,
+                file_path=key,
+                body="",
+                raw_params=dict(rec.raw_params),
+                instances=list(rec.instances),
+                needs_generate_fold=rec.needs_generate_fold,
+                is_blackbox=rec.is_blackbox,
+                is_interface=rec.is_interface,
+                stop_reason=rec.stop_reason,
+            )
+            self._index._rebuild_file_modules()
+        self._prefer_file[top] = key
+        self._note_regex_modules(key, [top])
 
     def _source_digest(self, path: str) -> Optional[str]:
         return path_content_digest(Path(path), path_digests=self._path_digests)
@@ -1385,25 +1426,169 @@ class PathWalkModuleDb:
         """Match path segment to synthesizable instance names only (not module types)."""
         if not edges or not inst_leaf:
             return None
-
-        def _expanded(edge: InstanceEdge) -> List[str]:
-            return expand_inst_names(edge.inst_name, "", param_map)
-
         for edge in edges:
-            if edge.inst_name == inst_leaf:
-                return edge
-        for edge in edges:
-            if inst_leaf in _expanded(edge):
-                return edge
-
-        leaf_lower = inst_leaf.lower()
-        for edge in edges:
-            if edge.inst_name.lower() == leaf_lower:
-                return edge
-        for edge in edges:
-            if any(name.lower() == leaf_lower for name in _expanded(edge)):
+            if instance_edge_matches_leaf(edge, inst_leaf, param_map=param_map):
                 return edge
         return None
+
+    def _preprocessed_text_for_file(self, fpath: str) -> str:
+        key = str(Path(fpath).resolve())
+        cached = self._preprocessed_text_cache.get(key)
+        if cached is not None:
+            return cached
+        from hierwalk.preprocess import apply_ifdef_filter, preprocess_file_for_index
+
+        defs = dict(self._defines)
+        text = preprocess_file_for_index(
+            Path(key),
+            self._include_dirs,
+            defs,
+            set(),
+            skip_path_patterns=self._skip,
+        )
+        text = apply_ifdef_filter(text, defs)
+        self._preprocessed_text_cache[key] = text
+        return text
+
+    def hint_edges_for_type_miss(
+        self,
+        parent_module: str,
+        parent_ctx: Mapping[str, str],
+        miss_leaf: str,
+        fpath: str,
+    ) -> List[InstanceEdge]:
+        """Minimal parent scan to detect module-type-vs-instance miss hints."""
+        try:
+            text = self._preprocessed_text_for_file(fpath)
+        except OSError:
+            return []
+        header, body = _module_header_body(text, parent_module)
+        if not body:
+            return []
+        rec = self._index.get_module(parent_module)
+        raw_params = dict(rec.raw_params) if rec and rec.raw_params else parse_param_pairs(header)
+        pmap = resolve_param_map(raw_params, parent=parent_ctx)
+        edge = find_instance_by_child_module(body, miss_leaf, param_map=pmap)
+        return [edge] if edge is not None else []
+
+    def _selective_child_edge_lookup(
+        self,
+        parent_module: str,
+        parent_ctx: Mapping[str, str],
+        inst_leaf: str,
+        fpath: str,
+    ) -> Optional[InstanceEdge]:
+        """Targeted parent-body scan for one instance (no full tier1 file walk)."""
+        try:
+            text = self._preprocessed_text_for_file(fpath)
+        except OSError:
+            return None
+        header, body = _module_header_body(text, parent_module)
+        if not body and not header:
+            return None
+        rec = self._index.get_module(parent_module)
+        raw_params = dict(rec.raw_params) if rec and rec.raw_params else parse_param_pairs(header)
+        pmap = resolve_param_map(raw_params, parent=parent_ctx)
+        return find_hierarchy_instance(body, inst_leaf, param_map=pmap)
+
+    def _apply_selective_edge_hit(
+        self,
+        fpath: str,
+        parent_module: str,
+        edge: InstanceEdge,
+        *,
+        parent_ctx: Mapping[str, str],
+    ) -> None:
+        key = str(Path(fpath).resolve())
+        rec = self._index.get_module(parent_module)
+        header, _body = _module_header_body(self._preprocessed_text_for_file(fpath), parent_module)
+        raw_params = dict(rec.raw_params) if rec and rec.raw_params else parse_param_pairs(header)
+        pmap = resolve_param_map(raw_params, parent=parent_ctx)
+        instances: List[InstanceEdge] = list(rec.instances) if rec else []
+        if not any(
+            instance_edge_matches_leaf(e, edge.inst_name, param_map=pmap) for e in instances
+        ):
+            instances.append(edge)
+        self._index.modules[parent_module] = ModuleRecord(
+            module_name=parent_module,
+            file_path=key,
+            body="",
+            raw_params=raw_params,
+            instances=instances,
+            needs_generate_fold=rec.needs_generate_fold if rec else False,
+            is_blackbox=rec.is_blackbox if rec else False,
+            is_interface=rec.is_interface if rec else False,
+            stop_reason=rec.stop_reason if rec else "",
+        )
+        child = edge.child_module
+        child_rec = self._index.get_module(child)
+        if child_rec is None or not child_rec.file_path:
+            self._index.modules[child] = ModuleRecord(
+                module_name=child,
+                file_path=key,
+                body="",
+                raw_params={},
+                instances=[],
+                needs_generate_fold=False,
+            )
+        self._index._rebuild_file_modules()
+        self._note_regex_modules(key, [parent_module, child])
+        self._prefer_file[parent_module] = key
+        self._snapshot_dirty = True
+
+    def _ensure_module_light(self, module_name: str, fpath: str) -> bool:
+        """Register one module from a file without tier1 scan of all modules in it."""
+        try:
+            text = self._preprocessed_text_for_file(fpath)
+        except OSError:
+            return False
+        header, body = _module_header_body(text, module_name)
+        if not header and not body:
+            return False
+        key = str(Path(fpath).resolve())
+        prior = self._index.get_module(module_name)
+        raw_params = parse_param_pairs(header)
+        instances: List[InstanceEdge] = []
+        if body:
+            instances = scan_hierarchy_instances(
+                body,
+                param_map=resolve_param_map(raw_params),
+            )
+        elif prior is not None:
+            instances = list(prior.instances)
+        self._index.modules[module_name] = ModuleRecord(
+            module_name=module_name,
+            file_path=key,
+            body="",
+            raw_params=raw_params,
+            instances=instances,
+            needs_generate_fold=prior.needs_generate_fold if prior else False,
+            is_blackbox=prior.is_blackbox if prior else False,
+            is_interface=prior.is_interface if prior else False,
+            stop_reason=prior.stop_reason if prior else "",
+        )
+        self._index._rebuild_file_modules()
+        self._note_regex_modules(key, [module_name])
+        self._prefer_file[module_name] = key
+        self._snapshot_dirty = True
+        return True
+
+    def _warm_tier1_background(self, fpath: str) -> None:
+        """Best-effort full tier1 DB warm in a background thread (not on walk hot path)."""
+        key = str(Path(fpath).resolve())
+        if key in self._validated_memory or key in self._tier1_warm_inflight:
+            return
+        self._tier1_warm_inflight.add(key)
+
+        def _run() -> None:
+            try:
+                self.tier1_scan_file(key)
+            except Exception as exc:  # noqa: BLE001 — background best-effort
+                self._trace(f"pw-db tier1 warm-fail {Path(key).name}: {exc!r}")
+            finally:
+                self._tier1_warm_inflight.discard(key)
+
+        threading.Thread(target=_run, name=f"pw-db-tier1-warm-{Path(key).name}", daemon=True).start()
 
     def _apply_file_modules(self, path: str, modules: Mapping[str, ModuleRecord]) -> None:
         key = str(Path(path).resolve())
@@ -1480,6 +1665,12 @@ class PathWalkModuleDb:
         avoid = ""
         if rec is not None and rec.file_path and not _is_placeholder_module(rec):
             avoid = str(Path(rec.file_path).resolve())
+            if expect_inst is None and self._ensure_module_light(module_name, avoid):
+                self._trace(
+                    f"pw-db   module light hit {module_name!r} via {Path(avoid).name}"
+                )
+                self._warm_tier1_background(avoid)
+                return True
 
         scoped_pool = (
             self._scoped_pool_for_policy(scope_anchor, policy=policy)
@@ -1670,6 +1861,27 @@ class PathWalkModuleDb:
             f"pw-db edge policy={policy} {parent_module}.{inst_leaf} "
             f"candidates={len(candidates)}{scope_note}"
         )
+        if avoid:
+            selective = self._selective_child_edge_lookup(
+                parent_module,
+                parent_ctx,
+                inst_leaf,
+                avoid,
+            )
+            if selective is not None:
+                self._apply_selective_edge_hit(
+                    avoid,
+                    parent_module,
+                    selective,
+                    parent_ctx=parent_ctx,
+                )
+                self._trace(
+                    f"pw-db   edge selective hit {parent_module}.{inst_leaf} "
+                    f"via {Path(avoid).name} -> child {selective.child_module!r}"
+                )
+                self._warm_tier1_background(avoid)
+                return selective
+
         if policy == RESOLVE_CONFIDENT and scope_anchor and not candidates:
             self._enqueue_defer(
                 DeferredResolve(
@@ -1687,12 +1899,33 @@ class PathWalkModuleDb:
             return None
 
         tried: Set[str] = set()
+        if avoid:
+            tried.add(avoid)
         max_pass = 2 if policy == RESOLVE_CONFIDENT else 3
         for pass_idx in range(max_pass):
             for fpath in candidates:
                 if fpath in tried:
                     continue
                 tried.add(fpath)
+                selective = self._selective_child_edge_lookup(
+                    parent_module,
+                    parent_ctx,
+                    inst_leaf,
+                    fpath,
+                )
+                if selective is not None:
+                    self._apply_selective_edge_hit(
+                        fpath,
+                        parent_module,
+                        selective,
+                        parent_ctx=parent_ctx,
+                    )
+                    self._trace(
+                        f"pw-db   edge selective hit {parent_module}.{inst_leaf} "
+                        f"via {Path(fpath).name} -> child {selective.child_module!r}"
+                    )
+                    self._warm_tier1_background(fpath)
+                    return selective
                 modules = self.tier1_scan_file(fpath)
                 hit = modules.get(parent_module)
                 if hit is None:
@@ -1786,10 +2019,6 @@ class PathWalkModuleDb:
         files = self._ensure_regex_candidates(module_name)
         if not files:
             return None
-        for fpath in files:
-            modules = self.tier1_scan_file(fpath)
-            if module_name in modules:
-                return fpath
         preferred = self._prefer_file.get(module_name)
         if preferred and preferred in files:
             return preferred

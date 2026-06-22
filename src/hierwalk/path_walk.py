@@ -1417,6 +1417,13 @@ class PathWalkState:
                     edges = self.index.instances_for_walk(parent_mod, ctx)
                     if not edges and ctx:
                         edges = self.index.instances_for_walk(parent_mod, {})
+                    if not edges and row is not None and row.file:
+                        edges = self.mod_db.hint_edges_for_type_miss(
+                            parent_mod,
+                            ctx,
+                            miss_leaf,
+                            row.file,
+                        )
                 if self._is_folded_inst_prefix_miss(miss_leaf, edges):
                     return False
                 if self._is_signal_or_port_tail_miss(cur, remainder, target_path=path):
@@ -2713,12 +2720,7 @@ def create_path_walk_index(
             raise ValueError(f"top module {top!r} not found in filelist sources")
         if on_progress:
             on_progress(f"path-walk: seed top {top} ({Path(top_file).name})")
-        if not mod_db.ensure_module_in_index(
-            top,
-            scope_anchor=top_file,
-            policy=RESOLVE_RECOVERY,
-        ):
-            raise ValueError(f"top module {top!r} could not be loaded from {top_file}")
+        mod_db.seed_top_module(top, top_file)
     return index, mod_db
 
 
