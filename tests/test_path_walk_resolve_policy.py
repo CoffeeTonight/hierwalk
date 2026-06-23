@@ -8,7 +8,7 @@ from pathlib import Path
 from hierwalk.connect_request import ConnectivityCheck, ConnectivityRequest
 from hierwalk.filelist import parse_filelist
 from hierwalk.path_walk import run_path_walk_connect
-from hierwalk.path_walk_db import RESOLVE_CONFIDENT, RESOLVE_RECOVERY
+from hierwalk.path_walk_db import RESOLVE_CONFIDENT, RESOLVE_RECOVERY, PathWalkModuleDb
 
 
 def _write_nested_child_fl_design(tmp_path: Path) -> Path:
@@ -157,6 +157,73 @@ def _minimal_mod_db_for_recovery_test(fl, tmp_path: Path):
         if src not in mod_db._regex_scanned:
             mod_db._tier0_scan_file(src)
     return mod_db, blk_stub, blk_real
+
+
+def _empty_index():
+    from hierwalk.index import DesignIndex
+
+    return DesignIndex._assemble(
+        {},
+        path_patterns=[],
+        module_patterns=[],
+        filelist_patterns=[],
+        library_files=[],
+        library_dirs=[],
+        libexts=[],
+        preprocess_include_dirs=[],
+        preprocess_defines={},
+    )
+
+
+def test_recovery_global_tier0_scans_past_pw_global_max(tmp_path: Path):
+    """Recovery global expand must not truncate at pw_tier0_global_scan_max (128)."""
+    (tmp_path / "blk_stub.v").write_text("module BLK; endmodule\n", encoding="utf-8")
+    (tmp_path / "blk_real.v").write_text(
+        "module BLK; CORE u_core (); endmodule\n",
+        encoding="utf-8",
+    )
+    for i in range(130):
+        (tmp_path / f"f{i}.v").write_text(f"module m{i}; endmodule\n", encoding="utf-8")
+    sources = [str((tmp_path / "blk_stub.v").resolve())]
+    sources.extend(str((tmp_path / f"f{i}.v").resolve()) for i in range(130))
+    blk_real = str((tmp_path / "blk_real.v").resolve())
+    sources.append(blk_real)
+    mod_db = PathWalkModuleDb(sources, _empty_index(), no_cache=True)
+    mod_db._tier0_scan_file(sources[0])
+    assert blk_real not in mod_db._module_to_files.get("BLK", [])
+
+    mod_db._scan_remaining_sources_tier0(
+        None,
+        target_module="BLK",
+        policy=RESOLVE_RECOVERY,
+    )
+    assert blk_real in mod_db._module_to_files["BLK"]
+
+
+def test_recovery_global_tier0_finds_second_dup_with_tier1_cap_1(
+    tmp_path: Path, monkeypatch
+):
+    """Recovery must not use target_module early-exit (dup decl #2 past tier1 cap)."""
+    import hierwalk.perf as perf_mod
+
+    monkeypatch.setattr(perf_mod, "pw_inst_resolve_tier1_max", lambda _policy: 1)
+    (tmp_path / "blk_stub.v").write_text("module BLK; endmodule\n", encoding="utf-8")
+    (tmp_path / "blk_real.v").write_text(
+        "module BLK; CORE u_core (); endmodule\n",
+        encoding="utf-8",
+    )
+    blk_stub = str((tmp_path / "blk_stub.v").resolve())
+    blk_real = str((tmp_path / "blk_real.v").resolve())
+    mod_db = PathWalkModuleDb([blk_stub, blk_real], _empty_index(), no_cache=True)
+    mod_db._tier0_scan_file(blk_stub)
+    assert blk_real not in mod_db._module_to_files.get("BLK", [])
+
+    mod_db._scan_remaining_sources_tier0(
+        None,
+        target_module="BLK",
+        policy=RESOLVE_RECOVERY,
+    )
+    assert blk_real in mod_db._module_to_files["BLK"]
 
 
 def test_recovery_pass1_retries_mapped_candidates_when_pending_zero(tmp_path: Path):

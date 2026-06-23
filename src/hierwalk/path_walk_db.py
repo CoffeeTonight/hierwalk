@@ -1714,7 +1714,7 @@ class PathWalkModuleDb:
             if sources is not None
             else list(self._sources)
         )
-        if sources is None:
+        if sources is None and policy != RESOLVE_RECOVERY:
             from hierwalk.perf import pw_tier0_global_scan_max
 
             global_max = pw_tier0_global_scan_max()
@@ -1725,9 +1725,11 @@ class PathWalkModuleDb:
                     if s not in self._regex_scanned and s not in self._tier0_inflight
                 ]
                 pool = pending[:global_max]
+        # Recovery must discover every dup-module decl; target_module early-exit stops at 1st hit.
+        scan_target = "" if policy == RESOLVE_RECOVERY else target_module
         return self._tier0_scan_sources(
             pool,
-            target_module=target_module,
+            target_module=scan_target,
             policy=policy,
         )
 
@@ -1847,14 +1849,9 @@ class PathWalkModuleDb:
                 if src not in self._regex_scanned and src not in self._tier0_inflight
             ]
             if remaining:
-                from hierwalk.perf import pw_tier0_global_scan_max
-
-                global_max = pw_tier0_global_scan_max()
-                if global_max > 0:
-                    remaining = remaining[:global_max]
                 self._tier0_scan_sources(
                     remaining,
-                    target_module=module_name,
+                    target_module="",
                     policy=policy,
                 )
 
