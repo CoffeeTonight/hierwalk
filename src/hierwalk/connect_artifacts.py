@@ -22,6 +22,20 @@ class ConnectOutputPaths:
     logical_tsv: Path
 
 
+def default_verification_artifact_name(kind: str) -> str:
+    """Default logical TSV basename per flat-suite verification block (text adds ``.text``)."""
+    key = (kind or "").strip().lower().replace("-", "_")
+    if key == "run_conn_check":
+        return "conn.tsv"
+    if key == "run_io_trace":
+        return "io_trace.tsv"
+    if key == "run_cone_trace":
+        return "cone_trace.tsv"
+    if key in ("run_on_full_index", "run_on_full_db"):
+        return "instances.tsv"
+    return "output.tsv"
+
+
 def artifact_output_basename(output: str, *, default: str = "output.tsv") -> str:
     """Basename for an artifact file stored under the per-top work directory."""
     if not output or output == "-":

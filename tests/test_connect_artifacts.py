@@ -341,6 +341,15 @@ def test_prepare_text_connect_request_is_stable():
     assert prepare_text_connect_request(req) is req
 
 
+def test_default_verification_artifact_names():
+    from hierwalk.connect_artifacts import default_verification_artifact_name
+
+    assert default_verification_artifact_name("run_conn_check") == "conn.tsv"
+    assert default_verification_artifact_name("run_io_trace") == "io_trace.tsv"
+    assert default_verification_artifact_name("run_cone_trace") == "cone_trace.tsv"
+    assert default_verification_artifact_name("run_on_full_index") == "instances.tsv"
+
+
 def test_verification_output_path_text_suffix():
     assert verification_output_path("trace.tsv", "text").name == "trace.text.tsv"
     assert verification_output_path("trace.tsv", "logical").name == "trace.tsv"

@@ -453,10 +453,14 @@ def run_config_for_test(
         full_index_enabled=full_index_enabled,
     )
 
-    from hierwalk.connect_artifacts import artifact_output_basename, connect_output_basename
+    from hierwalk.connect_artifacts import (
+        artifact_output_basename,
+        connect_output_basename,
+        default_verification_artifact_name,
+    )
 
     out_raw = _mapping_get_ci(spec, "output")
-    default_out = "conn.tsv" if entry.kind == RUN_CONN_CHECK else "output.tsv"
+    default_out = default_verification_artifact_name(entry.kind)
     if out_raw is not None and str(out_raw).strip() == "-":
         output = "-"
     elif out_raw is not None and str(out_raw).strip():
