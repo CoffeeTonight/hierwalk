@@ -3379,9 +3379,14 @@ def run_path_walk_connect(
 
         bind_path_walk_phase_emit(state._emit_walk)
         timing_rec = get_active_recorder()
+        resolved_output_dir = connect_output_dir
+        if resolved_output_dir is None:
+            from hierwalk.cache import get_active_work_dir
+
+            resolved_output_dir = get_active_work_dir()
         out_paths = (
-            connect_output_paths(connect_output_dir)
-            if connect_output_dir is not None
+            connect_output_paths(resolved_output_dir)
+            if resolved_output_dir is not None
             else None
         )
         try:
@@ -3420,7 +3425,12 @@ def run_path_walk_connect(
                         rows_by_path=state.rows_by_path,
                     )
                     state._emit_walk(
-                        f"connect-text-conn written {out_paths.text_tsv.name}"
+                        f"connect-text-conn written {out_paths.text_tsv.resolve()}"
+                    )
+                else:
+                    state._emit_walk(
+                        "connect-text-conn skip write: no connect_output_dir "
+                        "(set connect_output_dir or run via hier-walk execute_run)"
                     )
                 if timing_rec is not None:
                     timing_rec.end_step()
@@ -3485,7 +3495,12 @@ def run_path_walk_connect(
                         rows_by_path=state.rows_by_path,
                     )
                     state._emit_walk(
-                        f"connect-logical-conn written {out_paths.logical_tsv.name}"
+                        f"connect-logical-conn written {out_paths.logical_tsv.resolve()}"
+                    )
+                else:
+                    state._emit_walk(
+                        "connect-logical-conn skip write: no connect_output_dir "
+                        "(set connect_output_dir or run via hier-walk execute_run)"
                     )
                 if timing_rec is not None:
                     timing_rec.end_step()

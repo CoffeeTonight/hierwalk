@@ -183,6 +183,28 @@ def test_path_walk_writes_text_and_logical_tsv(tmp_path: Path):
     assert batch.results[0].connected_logical is not None
 
 
+def test_path_walk_connect_writes_tsv_via_active_work_dir(tmp_path: Path):
+    """COI timing can finish without explicit connect_output_dir when work dir is active."""
+    from hierwalk.cache import set_active_work_dir, top_work_dir
+
+    (tmp_path / "top.v").write_text(
+        "module top(input logic clk); child u0(.clk(clk)); endmodule\n"
+        "module child(input logic clk); endmodule\n",
+        encoding="utf-8",
+    )
+    fl = tmp_path / "fl.f"
+    fl.write_text(f"{(tmp_path / 'top.v').resolve()}\n", encoding="utf-8")
+    flr = parse_filelist(str(fl), index_cwd=str(tmp_path))
+    work = top_work_dir("top", base=tmp_path)
+    set_active_work_dir(work)
+    req = ConnectivityRequest(
+        checks=(ConnectivityCheck("top.clk", "top.u0.clk"),),
+        top="top",
+    )
+    run_path_walk_connect(req, flr, top="top", no_cache=True, connect_phase="text")
+    assert (work / "conn.text.tsv").is_file()
+
+
 def test_recovery_runs_after_text_conn(tmp_path: Path):
     """Heavy recovery must not block conn.text.tsv (runs in logical-conn)."""
     import io
