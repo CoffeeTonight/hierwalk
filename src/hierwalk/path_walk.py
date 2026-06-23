@@ -3390,107 +3390,124 @@ def run_path_walk_connect(
         try:
             batch: Optional[ConnectivityBatchResult] = None
             if do_text:
+                from hierwalk.connect_artifacts import require_connect_phase_tsv
+
                 if timing_rec is not None:
                     timing_rec.begin_step("text-conn", "connect-coi")
                 t_coi = time.perf_counter()
                 text_request = prepare_text_connect_request(request)
-                state._emit_walk(
-                    f"connect-coi begin checks={len(text_request.checks)} "
-                    f"rows={len(walk_rows)}"
-                )
-                batch = session.run_request(
-                    text_request,
-                    jobs=1,
-                    on_progress=on_progress,
-                    text_fast=True,
-                )
-                snapshot_connect_text_phase(batch.results)
-                coi_ms = (time.perf_counter() - t_coi) * 1000.0
-                state._emit_walk(
-                    f"connect-coi done checks={len(batch.results)} "
-                    f"modules_cached={session.modules_cached} "
-                    f"ms={coi_ms:.1f}"
-                )
-                state._emit_walk(
-                    f"connect-text-conn done checks={len(batch.results)} ms={coi_ms:.1f}"
-                )
-                write_connect_phase_tsv(
-                    out_paths.text_tsv,
-                    batch.results,
-                    phase="text",
-                    modules_cached=batch.modules_cached,
-                    rows_by_path=state.rows_by_path,
-                )
-                state._emit_walk(
-                    f"connect-text-conn written {out_paths.text_tsv.resolve()}"
-                )
-                if timing_rec is not None:
-                    timing_rec.end_step()
-                state.stats.checks_run = len(batch.results)
+                text_results: list = []
+                text_modules_cached: Optional[int] = None
+                try:
+                    state._emit_walk(
+                        f"connect-coi begin checks={len(text_request.checks)} "
+                        f"rows={len(walk_rows)}"
+                    )
+                    batch = session.run_request(
+                        text_request,
+                        jobs=1,
+                        on_progress=on_progress,
+                        text_fast=True,
+                    )
+                    text_results = list(batch.results)
+                    text_modules_cached = batch.modules_cached
+                    snapshot_connect_text_phase(batch.results)
+                    coi_ms = (time.perf_counter() - t_coi) * 1000.0
+                    state._emit_walk(
+                        f"connect-coi done checks={len(batch.results)} "
+                        f"modules_cached={session.modules_cached} "
+                        f"ms={coi_ms:.1f}"
+                    )
+                    state._emit_walk(
+                        f"connect-text-conn done checks={len(batch.results)} "
+                        f"ms={coi_ms:.1f}"
+                    )
+                finally:
+                    written = require_connect_phase_tsv(
+                        out_paths.text_tsv,
+                        text_results,
+                        phase="text",
+                        modules_cached=text_modules_cached,
+                        rows_by_path=state.rows_by_path,
+                    )
+                    state._emit_walk(
+                        f"connect-text-conn written {written.resolve()}"
+                    )
+                    if timing_rec is not None:
+                        timing_rec.end_step()
+                state.stats.checks_run = len(text_results)
 
             if do_logical:
+                from hierwalk.connect_artifacts import require_connect_phase_tsv
+
                 if timing_rec is not None:
                     timing_rec.begin_step("logical-conn", "activation-audit")
                 t_act = time.perf_counter()
                 t_refine = time.perf_counter()
-                finalize_logical_walk_before_connect(state, request)
-                walk_rows = state.rows()
-                session.rows = walk_rows
-                session.elab_index = ElabIndex.from_rows_by_path(
-                    state.rows_by_path,
-                    rows=walk_rows,
-                )
-                session.clear_cache()
-                t_recoi = time.perf_counter()
-                refined_batch = session.run_request(
-                    request,
-                    jobs=1,
-                    on_progress=on_progress,
-                )
-                if batch is not None:
-                    merge_refined_connect_results(
-                        batch.results,
-                        refined_batch.results,
+                logical_results: list = []
+                logical_modules_cached: Optional[int] = None
+                try:
+                    finalize_logical_walk_before_connect(state, request)
+                    walk_rows = state.rows()
+                    session.rows = walk_rows
+                    session.elab_index = ElabIndex.from_rows_by_path(
+                        state.rows_by_path,
+                        rows=walk_rows,
                     )
-                else:
-                    batch = refined_batch
-                state._emit_walk(
-                    f"connect-logical-walk done rows={len(state.rows_by_path)} "
-                    f"recoi_ms={(time.perf_counter() - t_recoi) * 1000.0:.1f} "
-                    f"ms={(time.perf_counter() - t_refine) * 1000.0:.1f}"
-                )
-                state.mod_db.drain_activation_audit(wait=True)
-                state.mod_db.emit_activation_audit_report()
-                if state.mod_db._mapped_inst_records:
+                    session.clear_cache()
+                    t_recoi = time.perf_counter()
+                    refined_batch = session.run_request(
+                        request,
+                        jobs=1,
+                        on_progress=on_progress,
+                    )
+                    if batch is not None:
+                        merge_refined_connect_results(
+                            batch.results,
+                            refined_batch.results,
+                        )
+                    else:
+                        batch = refined_batch
                     state._emit_walk(
-                        f"pw-db activation-audit done "
-                        f"maps={len(state.mod_db._mapped_inst_records)} "
-                        f"ms={(time.perf_counter() - t_act) * 1000.0:.1f}"
+                        f"connect-logical-walk done rows={len(state.rows_by_path)} "
+                        f"recoi_ms={(time.perf_counter() - t_recoi) * 1000.0:.1f} "
+                        f"ms={(time.perf_counter() - t_refine) * 1000.0:.1f}"
                     )
-                sync_activation_to_walk_rows(state.mod_db, state)
-                apply_connect_logical_phase(
-                    batch.results,
-                    state.rows_by_path,
-                    run_activation=True,
-                )
-                logical_ms = (time.perf_counter() - t_act) * 1000.0
-                state._emit_walk(
-                    f"connect-logical-conn done checks={len(batch.results)} "
-                    f"ms={logical_ms:.1f}"
-                )
-                write_connect_phase_tsv(
-                    out_paths.logical_tsv,
-                    batch.results,
-                    phase="logical",
-                    modules_cached=batch.modules_cached,
-                    rows_by_path=state.rows_by_path,
-                )
-                state._emit_walk(
-                    f"connect-logical-conn written {out_paths.logical_tsv.resolve()}"
-                )
-                if timing_rec is not None:
-                    timing_rec.end_step()
-                state.stats.checks_run = len(batch.results)
+                    state.mod_db.drain_activation_audit(wait=True)
+                    state.mod_db.emit_activation_audit_report()
+                    if state.mod_db._mapped_inst_records:
+                        state._emit_walk(
+                            f"pw-db activation-audit done "
+                            f"maps={len(state.mod_db._mapped_inst_records)} "
+                            f"ms={(time.perf_counter() - t_act) * 1000.0:.1f}"
+                        )
+                    sync_activation_to_walk_rows(state.mod_db, state)
+                    apply_connect_logical_phase(
+                        batch.results,
+                        state.rows_by_path,
+                        run_activation=True,
+                    )
+                    logical_results = list(batch.results)
+                    logical_modules_cached = batch.modules_cached
+                    logical_ms = (time.perf_counter() - t_act) * 1000.0
+                    state._emit_walk(
+                        f"connect-logical-conn done checks={len(batch.results)} "
+                        f"ms={logical_ms:.1f}"
+                    )
+                finally:
+                    written = require_connect_phase_tsv(
+                        out_paths.logical_tsv,
+                        logical_results,
+                        phase="logical",
+                        modules_cached=logical_modules_cached,
+                        rows_by_path=state.rows_by_path,
+                    )
+                    state._emit_walk(
+                        f"connect-logical-conn written {written.resolve()}"
+                    )
+                    if timing_rec is not None:
+                        timing_rec.end_step()
+                state.stats.checks_run = len(logical_results)
             assert batch is not None
         finally:
             bind_path_walk_phase_emit(None)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 from dataclasses import replace
@@ -49,6 +50,7 @@ from hierwalk.path_walk import (
     run_path_walk_index,
 )
 from hierwalk.connect_artifacts import (
+    missing_verification_artifacts,
     verification_output_path,
     work_dir_artifact_path,
     work_dir_sidecar_path,
@@ -108,13 +110,44 @@ def _write_run_output(
         return
     out = work_dir_artifact_path(work_dir, cfg.output, phase=phase)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(body, encoding="utf-8")
+    tmp = out.with_name(f"{out.name}.tmp.{os.getpid()}")
+    try:
+        tmp.write_text(body, encoding="utf-8")
+        tmp.replace(out)
+    finally:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
+    if not out.is_file() or out.stat().st_size == 0:
+        print(
+            f"run: ERROR {label} missing or empty: {out.resolve()}",
+            file=sys.stderr,
+            flush=True,
+        )
+        raise OSError(f"{label} not created: {out}")
     if not cfg.quiet:
         print(
             f"run: {label} written: {out.resolve()}",
             file=sys.stderr,
             flush=True,
         )
+
+
+def _fail_if_missing_verification_artifacts(
+    cfg: RunConfig,
+    work_dir: Path,
+    *,
+    label: str,
+) -> int:
+    missing = missing_verification_artifacts(cfg, work_dir)
+    if not missing:
+        return 0
+    for path in missing:
+        print(
+            f"run: ERROR {label} artifact missing: {path.resolve()}",
+            file=sys.stderr,
+            flush=True,
+        )
+    return 2
 
 
 def _write_verification_output(
@@ -417,6 +450,13 @@ def execute_run(cfg: RunConfig, ap) -> int:
                     phase="logical",
                     label="inst-trace logical results",
                 )
+            artifact_rc = _fail_if_missing_verification_artifacts(
+                cfg,
+                work_dir,
+                label="inst-trace",
+            )
+            if artifact_rc:
+                return artifact_rc
             if on_progress and not cfg.quiet:
                 on_progress(
                     f"path-walk: done inst-trace phase={phase}, "
@@ -560,6 +600,13 @@ def execute_run(cfg: RunConfig, ap) -> int:
                     phase="logical",
                     label="cone logical results",
                 )
+            artifact_rc = _fail_if_missing_verification_artifacts(
+                cfg,
+                work_dir,
+                label="cone",
+            )
+            if artifact_rc:
+                return artifact_rc
             if on_progress and not cfg.quiet:
                 on_progress(
                     f"path-walk: done cone phase={phase}, "
@@ -651,6 +698,13 @@ def execute_run(cfg: RunConfig, ap) -> int:
                     modules_cached=batch.modules_cached,
                     rows_by_path=endpoint_rows,
                 )
+            artifact_rc = _fail_if_missing_verification_artifacts(
+                cfg,
+                work_dir,
+                label="connect",
+            )
+            if artifact_rc:
+                return artifact_rc
             if not cfg.quiet:
                 from hierwalk.connect_artifacts import format_connect_artifact_help
 
@@ -666,25 +720,11 @@ def execute_run(cfg: RunConfig, ap) -> int:
                         file=sys.stderr,
                         flush=True,
                     )
-                elif do_text:
-                    print(
-                        f"run: WARNING connect text TSV missing: "
-                        f"{conn_paths.text_tsv.resolve()}",
-                        file=sys.stderr,
-                        flush=True,
-                    )
                 if do_logical and conn_paths.logical_tsv.is_file():
                     print(
                         f"run: connect logical results written: "
                         f"{conn_paths.logical_tsv.resolve()} "
                         f"(logical phase; not conn.logical.tsv)",
-                        file=sys.stderr,
-                        flush=True,
-                    )
-                elif do_logical:
-                    print(
-                        f"run: WARNING connect logical TSV missing: "
-                        f"{conn_paths.logical_tsv.resolve()}",
                         file=sys.stderr,
                         flush=True,
                     )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -164,18 +165,17 @@ def resolve_connect_output_dir(
         return root
     from hierwalk.cache import ensure_top_work_dir, get_active_work_dir, work_base_dir
 
-    active = get_active_work_dir()
-    if active is not None:
-        return active
+    resolved_base = base
     if cache_dir is not None:
         cache_root = cache_dir.expanduser().resolve()
         if cache_root.name.startswith(".db_"):
             cache_root.mkdir(parents=True, exist_ok=True)
             return cache_root
         resolved_base = cache_root
-    else:
-        resolved_base = base
     if resolved_base is None:
+        active = get_active_work_dir()
+        if active is not None:
+            return active
         resolved_base = work_base_dir()
     return ensure_top_work_dir(top or "top", base=resolved_base)
 
@@ -189,16 +189,60 @@ def ensure_connect_phase_tsv(
     modules_cached: Optional[int] = None,
     rows_by_path: Optional[Mapping[str, FlatRow]] = None,
 ) -> Path:
-    """Write phase TSV if missing; always overwrites with *results* when invoked."""
+    """Write phase TSV; always overwrites with *results* when invoked."""
     paths = connect_output_paths(work_dir, output)
     target = paths.text_tsv if phase == "text" else paths.logical_tsv
-    return write_connect_phase_tsv(
+    return require_connect_phase_tsv(
         target,
         results,
         phase=phase,
         modules_cached=modules_cached,
         rows_by_path=rows_by_path,
     )
+
+
+def expected_verification_artifact_paths(
+    cfg: RunConfig,
+    work_dir: Path,
+) -> List[Path]:
+    """Artifact files that must exist after a verification step completes."""
+    from hierwalk.run_request import RUN_CONN_CHECK, RUN_IO_TRACE, RUN_CONE_TRACE
+    from hierwalk.run_request import normalize_run_mode
+
+    phase = (cfg.verification_phase or "both").strip().lower()
+    paths: List[Path] = []
+    is_connect = (
+        cfg.verification_step_kind == RUN_CONN_CHECK
+        or normalize_run_mode(cfg.mode or "") in (
+            "check-connect",
+            "check-connect-batch",
+            "path-walk",
+        )
+    )
+    if is_connect:
+        conn_paths = connect_output_paths(work_dir, cfg.output)
+        if phase in ("text", "both"):
+            paths.append(conn_paths.text_tsv)
+        if phase in ("logical", "both"):
+            paths.append(conn_paths.logical_tsv)
+        return paths
+    if cfg.verification_step_kind in (RUN_IO_TRACE, RUN_CONE_TRACE):
+        if phase in ("text", "both"):
+            paths.append(work_dir_artifact_path(work_dir, cfg.output, phase="text"))
+        if phase in ("logical", "both"):
+            paths.append(work_dir_artifact_path(work_dir, cfg.output, phase="logical"))
+    return paths
+
+
+def missing_verification_artifacts(
+    cfg: RunConfig,
+    work_dir: Path,
+) -> List[Path]:
+    return [
+        path
+        for path in expected_verification_artifact_paths(cfg, work_dir)
+        if not path.is_file()
+    ]
 
 
 def reorder_connect_checks_by_b_endpoint(
@@ -425,5 +469,34 @@ def write_connect_phase_tsv(
     )
     out = path.expanduser().resolve()
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(body, encoding="utf-8")
+    tmp = out.with_name(f"{out.name}.tmp.{os.getpid()}")
+    try:
+        tmp.write_text(body, encoding="utf-8")
+        tmp.replace(out)
+    finally:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
+    return out
+
+
+def require_connect_phase_tsv(
+    path: Path,
+    results: Sequence[ConnectResult],
+    *,
+    phase: str,
+    modules_cached: Optional[int] = None,
+    rows_by_path: Optional[Mapping[str, FlatRow]] = None,
+) -> Path:
+    """Write connect phase TSV and fail if the file is not on disk afterward."""
+    out = write_connect_phase_tsv(
+        path,
+        results,
+        phase=phase,
+        modules_cached=modules_cached,
+        rows_by_path=rows_by_path,
+    )
+    if not out.is_file():
+        raise OSError(f"connect phase TSV not created: {out}")
+    if out.stat().st_size == 0:
+        raise OSError(f"connect phase TSV is empty: {out}")
     return out
