@@ -226,6 +226,81 @@ def test_recovery_global_tier0_finds_second_dup_with_tier1_cap_1(
     assert blk_real in mod_db._module_to_files["BLK"]
 
 
+def test_ensure_regex_candidates_recovery_scans_past_stub_map(tmp_path: Path):
+    """Recovery must not early-return when stub alone is already in _module_to_files."""
+    stub = tmp_path / "blk_stub.v"
+    stub.write_text("module BLK; endmodule\n", encoding="utf-8")
+    real = tmp_path / "blk_real.v"
+    real.write_text("module BLK; CORE u_core (); endmodule\n", encoding="utf-8")
+    sources = [str(stub.resolve())]
+    for i in range(10):
+        p = tmp_path / f"f{i}.v"
+        p.write_text(f"module m{i}; endmodule\n", encoding="utf-8")
+        sources.append(str(p.resolve()))
+    sources.append(str(real.resolve()))
+    mod_db = PathWalkModuleDb(sources, _empty_index(), no_cache=True)
+    mod_db._tier0_scan_file(str(stub.resolve()))
+    assert "BLK" in mod_db._module_to_files
+    assert str(real.resolve()) not in mod_db._module_to_files["BLK"]
+
+    candidates = mod_db._ensure_regex_candidates(
+        "BLK",
+        scope_anchor=str(stub.resolve()),
+        policy=RESOLVE_RECOVERY,
+    )
+    assert str(real.resolve()) in candidates
+    edge = mod_db.resolve_child_edge(
+        "BLK",
+        {},
+        "u_core",
+        current_file=str(stub.resolve()),
+        policy=RESOLVE_RECOVERY,
+    )
+    assert edge is not None
+    assert edge.child_module == "CORE"
+
+
+def test_recovery_finds_real_blk_after_many_dup_stubs_module_cap(tmp_path: Path):
+    """Per-module file cap must not permanently drop late dup-module decls."""
+    from hierwalk.index import DesignIndex
+
+    sources = []
+    for i in range(35):
+        p = tmp_path / f"blk_stub_{i}.v"
+        p.write_text("module BLK; endmodule\n", encoding="utf-8")
+        sources.append(str(p.resolve()))
+    real = tmp_path / "blk_real.v"
+    real.write_text("module BLK; CORE u_core (); endmodule\n", encoding="utf-8")
+    sources.append(str(real.resolve()))
+    mod_db = PathWalkModuleDb(
+        sources,
+        DesignIndex._assemble(
+            {},
+            path_patterns=[],
+            module_patterns=[],
+            filelist_patterns=[],
+            library_files=[],
+            library_dirs=[],
+            libexts=[],
+            preprocess_include_dirs=[],
+            preprocess_defines={},
+        ),
+        no_cache=True,
+    )
+    for src in sources:
+        mod_db._tier0_scan_file(src)
+    assert str(real.resolve()) in mod_db._module_to_files.get("BLK", [])
+    edge = mod_db.resolve_child_edge(
+        "BLK",
+        {},
+        "u_core",
+        current_file=str(sources[0]),
+        policy=RESOLVE_RECOVERY,
+    )
+    assert edge is not None
+    assert edge.child_module == "CORE"
+
+
 def test_recovery_pass1_retries_mapped_candidates_when_pending_zero(tmp_path: Path):
     """Global tier0 done (pending==0) must still retry _module_to_files entries."""
     fl_path, _leaf = _write_stub_child_recovery_design(tmp_path)

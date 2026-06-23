@@ -898,16 +898,21 @@ class PathWalkModuleDb:
             if key in files:
                 continue
             preferred = self._prefer_file.get(name)
-            if cap > 0 and len(files) >= cap:
-                if preferred == key:
-                    files.insert(0, key)
-                    if len(files) > cap:
-                        files.pop()
-                continue
             if preferred == key:
                 files.insert(0, key)
-            else:
-                files.append(key)
+                if cap > 0 and len(files) > cap:
+                    files.pop()
+                continue
+            files.append(key)
+            if cap > 0:
+                while len(files) > cap:
+                    drop_idx = 0
+                    if preferred and files[0] == preferred:
+                        drop_idx = 1 if len(files) > 1 else 0
+                    if drop_idx < len(files):
+                        files.pop(drop_idx)
+                    else:
+                        break
 
     def _tier0_target_satisfied(
         self,
@@ -937,7 +942,7 @@ class PathWalkModuleDb:
         from hierwalk.perf import pw_inst_resolve_tier1_max
 
         ordered = list(candidates)
-        max_n = pw_inst_resolve_tier1_max(policy)
+        max_n = 0 if policy == RESOLVE_RECOVERY else pw_inst_resolve_tier1_max(policy)
         if max_n > 0 and len(ordered) > max_n:
             self._trace(
                 f"pw-db inst-resolve candidate-cap "
@@ -1766,7 +1771,13 @@ class PathWalkModuleDb:
         if scope_anchor:
             scope_pool = self._scoped_pool_for_policy(scope_anchor, policy=policy)
 
-        if module_name in self._module_to_files:
+        scan_target = "" if policy == RESOLVE_RECOVERY else module_name
+
+        if policy == RESOLVE_RECOVERY:
+            self._reconcile_regex_candidates_for_module(module_name)
+
+        # Confident: stub already mapped is enough to return. Recovery must keep scanning.
+        if module_name in self._module_to_files and policy != RESOLVE_RECOVERY:
             files = list(self._module_to_files.get(module_name, []))
             return self._sort_module_files(
                 module_name,
@@ -1783,10 +1794,10 @@ class PathWalkModuleDb:
             )
             self._tier0_scan_sources(
                 ordered_pool,
-                target_module=module_name,
+                target_module=scan_target,
                 policy=policy,
             )
-            if module_name in self._module_to_files:
+            if module_name in self._module_to_files and policy == RESOLVE_CONFIDENT:
                 files = list(self._module_to_files.get(module_name, []))
                 return self._sort_module_files(
                     module_name,
@@ -1815,10 +1826,12 @@ class PathWalkModuleDb:
 
         workers = _resolve_pw_db_jobs(self._jobs, len(self._sources))
         batch_size = max(workers * 4, _PARALLEL_MIN_TIER0)
-        while (
-            not self._tier0_target_satisfied(module_name, policy=policy)
-            and self._regex_queue
-        ):
+        while self._regex_queue:
+            if (
+                policy != RESOLVE_RECOVERY
+                and self._tier0_target_satisfied(module_name, policy=policy)
+            ):
+                break
             batch: List[str] = []
             while self._regex_queue and len(batch) < batch_size:
                 nxt = self._regex_queue.pop(0)
@@ -1833,16 +1846,16 @@ class PathWalkModuleDb:
                 continue
             self._tier0_scan_sources(
                 batch,
-                target_module=module_name,
+                target_module=scan_target,
                 policy=policy,
             )
-            if self._tier0_target_satisfied(module_name, policy=policy):
+            if (
+                policy != RESOLVE_RECOVERY
+                and self._tier0_target_satisfied(module_name, policy=policy)
+            ):
                 break
 
-        if (
-            policy == RESOLVE_RECOVERY
-            and not self._tier0_target_satisfied(module_name, policy=policy)
-        ):
+        if policy == RESOLVE_RECOVERY:
             remaining = [
                 src
                 for src in self._sources
@@ -1854,6 +1867,7 @@ class PathWalkModuleDb:
                     target_module="",
                     policy=policy,
                 )
+            self._reconcile_regex_candidates_for_module(module_name)
 
         files = list(self._module_to_files.get(module_name, []))
         scope_pool = (
@@ -1942,6 +1956,14 @@ class PathWalkModuleDb:
             return rest
         return candidates
 
+    def _reconcile_regex_candidates_for_module(self, module_name: str) -> None:
+        """Re-map tier0 hits already scanned but dropped by per-module file cap."""
+        if not module_name:
+            return
+        for key, mods in self._file_to_modules.items():
+            if module_name in mods:
+                self._note_regex_modules(key, [module_name])
+
     def _recovery_pass1_candidates(
         self,
         module_name: str,
@@ -1959,6 +1981,7 @@ class PathWalkModuleDb:
         may already list candidates when ``pending == 0``. Returns untried paths
         to retry, or None to stop the outer pass loop.
         """
+        self._reconcile_regex_candidates_for_module(module_name)
         if pending <= 0 and module_name not in self._module_to_files:
             return None
         if pending > 0:
