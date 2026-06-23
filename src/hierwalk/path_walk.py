@@ -2553,8 +2553,7 @@ def _walk_specs_with_recovery(
     """
     spec_targets = state._spec_targets
     _walk_endpoint_specs(state, specs, jobs=jobs, spec_targets=spec_targets)
-    if state.mod_db.text_conn_fast:
-        return
+    # text_conn_fast still skips tier1 prefetch/activation; selective recovery is cheap.
     _drain_deferred_recovery_passes(state, jobs=jobs)
 
 
@@ -2871,6 +2870,8 @@ def run_path_walk_index(
                 f"cache={state.stats.cache_regex_hits}+{state.stats.cache_validated_hits}"
             )
         if do_text and not do_logical:
+            if state.mod_db.defer_count() and not state.stats.recovery_stalled:
+                _drain_deferred_recovery_passes(state)
             _drain_path_walk_workers(state.mod_db, text_fast=True)
         elif do_logical and not do_text and not reuse_suite_session:
             pass
