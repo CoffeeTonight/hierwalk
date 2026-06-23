@@ -17,6 +17,7 @@ from hierwalk.connect_scan import (
 from hierwalk.connectivity import resolve_endpoint
 from hierwalk.index import DesignIndex
 from hierwalk.models import FlatRow
+from hierwalk.trace_stop import TraceStopPolicy, trace_stop_boundary_kind
 from hierwalk.params import resolve_param_map
 from hierwalk.path_refine import refine_param_ctx_for_path
 from hierwalk.port_scan import scan_ports_detail_from_module_text
@@ -92,6 +93,7 @@ class _ConeCtx:
     direction: str
     path_kind: str = "comb"
     comb_cache: Optional[Dict[Tuple[str, "ModuleConnectIndex"]]] = None
+    trace_stop: TraceStopPolicy = field(default_factory=TraceStopPolicy)
 
 
 def _net_label(scope: str, net: str) -> str:
@@ -276,6 +278,16 @@ def _boundary_at_state(
         return None
     mod_idx = _cached_cone_mod(ctx, row)
     mod_name = row.module
+    stop = trace_stop_boundary_kind(
+        scope,
+        top=ctx.top,
+        row=row,
+        policy=ctx.trace_stop,
+        is_origin=is_origin,
+    )
+    if stop is not None:
+        kind, detail = stop
+        return ConeBoundary(kind, scope, rep, mod_name, detail)
     if _is_blackbox_instance(ctx, row) and not is_origin:
         return ConeBoundary(
             "blackbox",
@@ -587,7 +599,14 @@ def _run_cone(
     defines: Mapping[str, str] | None = None,
     over_approximate_if: bool = True,
     path_kind: str = "comb",
+    trace_stop: Optional[TraceStopPolicy] = None,
+    ignore_hierarchy: Sequence[str] = (),
+    trace_max_depth: Optional[int] = None,
 ) -> ConeResult:
+    stop_policy = trace_stop or TraceStopPolicy(
+        ignore_hierarchy=tuple(ignore_hierarchy),
+        trace_max_depth=trace_max_depth,
+    )
     ep, errs = resolve_endpoint(endpoint, rows, index, top=top, require_port=False)
     if errs:
         return ConeResult(
@@ -613,6 +632,7 @@ def _run_cone(
         over_approximate_if=over_approximate_if,
         direction=direction,
         path_kind=path_kind,
+        trace_stop=stop_policy,
     )
     row = rows_by_path.get(ep.inst_path)
     if row is None:
@@ -690,6 +710,9 @@ def fanout_cone(
     defines: Mapping[str, str] | None = None,
     over_approximate_if: bool = True,
     path_kind: str = "comb",
+    trace_stop: Optional[TraceStopPolicy] = None,
+    ignore_hierarchy: Sequence[str] = (),
+    trace_max_depth: Optional[int] = None,
 ) -> ConeResult:
     return _run_cone(
         endpoint,
@@ -700,6 +723,9 @@ def fanout_cone(
         defines=defines,
         over_approximate_if=over_approximate_if,
         path_kind=path_kind,
+        trace_stop=trace_stop,
+        ignore_hierarchy=ignore_hierarchy,
+        trace_max_depth=trace_max_depth,
     )
 
 
@@ -712,6 +738,9 @@ def fanin_cone(
     defines: Mapping[str, str] | None = None,
     over_approximate_if: bool = True,
     path_kind: str = "comb",
+    trace_stop: Optional[TraceStopPolicy] = None,
+    ignore_hierarchy: Sequence[str] = (),
+    trace_max_depth: Optional[int] = None,
 ) -> ConeResult:
     return _run_cone(
         endpoint,
@@ -722,6 +751,9 @@ def fanin_cone(
         defines=defines,
         over_approximate_if=over_approximate_if,
         path_kind=path_kind,
+        trace_stop=trace_stop,
+        ignore_hierarchy=ignore_hierarchy,
+        trace_max_depth=trace_max_depth,
     )
 
 

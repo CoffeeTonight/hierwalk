@@ -13,6 +13,7 @@ from hierwalk.connectivity import (
     flatten_connect_results,
     format_connect_results_tsv,
 )
+from hierwalk.hierarchy_log import path_spine_prefixes
 from hierwalk.models import ConnectEndpoint, ConnectResult, FlatRow
 from hierwalk.run_request import RunConfig
 
@@ -21,6 +22,8 @@ from hierwalk.run_request import RunConfig
 class ConnectOutputPaths:
     text_tsv: Path
     logical_tsv: Path
+    hierarchy_text_tsv: Path
+    hierarchy_logical_tsv: Path
 
 
 def default_verification_artifact_name(kind: str) -> str:
@@ -47,6 +50,20 @@ def artifact_output_basename(output: str, *, default: str = "output.tsv") -> str
 def connect_output_basename(output: str = "conn.tsv") -> str:
     """Filename for logical connect TSV (text phase uses ``.text`` suffix)."""
     return artifact_output_basename(output, default="conn.tsv")
+
+
+def hierarchy_output_basename(output: str = "conn.tsv") -> str:
+    """Hierarchy TSV basename paired with a connect output name."""
+    logical_name = connect_output_basename(output)
+    stem = Path(logical_name).stem
+    suffix = Path(logical_name).suffix or ".tsv"
+    if stem.endswith("_conn"):
+        hier_stem = f"{stem[:-5]}_hierarchy"
+    elif stem == "conn":
+        hier_stem = "hierarchy"
+    else:
+        hier_stem = f"{stem}_hierarchy"
+    return f"{hier_stem}{suffix}"
 
 
 def work_dir_artifact_path(
@@ -80,9 +97,13 @@ def connect_output_paths(
     root = work_dir.expanduser().resolve()
     logical_name = connect_output_basename(output)
     text_name = verification_output_path(logical_name, "text").name
+    hier_logical = hierarchy_output_basename(output)
+    hier_text = verification_output_path(hier_logical, "text").name
     return ConnectOutputPaths(
         text_tsv=root / text_name,
         logical_tsv=root / logical_name,
+        hierarchy_text_tsv=root / hier_text,
+        hierarchy_logical_tsv=root / hier_logical,
     )
 
 
@@ -95,7 +116,7 @@ def resolve_connect_work_dir(
 
     return resolve_run_work_dir(
         top or cfg.top or "top",
-        base=work_base_dir(),
+        base=work_base_dir(cfg.index_cwd),
         explicit_cache_dir=cfg.cache_dir,
     )
 
@@ -392,10 +413,13 @@ def merge_refined_connect_results(
     refined: Sequence[ConnectResult],
 ) -> None:
     """Copy post-recovery structural COI into *results*, keeping ``connected_text``."""
-    for orig, ref in zip(
-        flatten_connect_results(results),
-        flatten_connect_results(refined),
-    ):
+    orig_flat = flatten_connect_results(results)
+    ref_flat = flatten_connect_results(refined)
+    if len(orig_flat) != len(ref_flat):
+        raise ValueError(
+            f"connect result length mismatch: {len(orig_flat)} vs {len(ref_flat)}"
+        )
+    for orig, ref in zip(orig_flat, ref_flat):
         orig.connected = ref.connected
         orig.mode = ref.mode
         orig.note = ref.note
@@ -453,6 +477,62 @@ def apply_connect_logical_phase(
                 )
 
 
+def _endpoint_inst_spine(ep: ConnectEndpoint) -> List[str]:
+    base = (ep.inst_path or "").strip()
+    if ep.port_name and not ep.port_found:
+        full = f"{base}.{ep.port_name}" if base else ep.port_name
+        return path_spine_prefixes(full)
+    if base:
+        return path_spine_prefixes(base)
+    return path_spine_prefixes(ep.spec)
+
+
+def format_connect_hierarchy_tsv(
+    results: Sequence[ConnectResult],
+    rows_by_path: Mapping[str, FlatRow],
+    *,
+    phase: str = "text",
+) -> str:
+    phase_label = str(phase).strip().lower() or "text"
+    headers = ["check_id", "side", "kind", "path", "status", "module", "phase"]
+    lines = ["\t".join(headers)]
+    for result in flatten_connect_results(results):
+        check_id = result.check_id or ""
+        for side, ep in (("a", result.endpoint_a), ("b", result.endpoint_b)):
+            for path in _endpoint_inst_spine(ep):
+                row = rows_by_path.get(path)
+                status = "hit" if row is not None else "miss"
+                module = row.module if row is not None else ep.module
+                lines.append(
+                    "\t".join(
+                        (
+                            check_id,
+                            side,
+                            "inst",
+                            path,
+                            status,
+                            module,
+                            phase_label,
+                        )
+                    )
+                )
+            if ep.port_name and ep.port_found:
+                lines.append(
+                    "\t".join(
+                        (
+                            check_id,
+                            side,
+                            "port",
+                            ep.spec,
+                            "hit" if ep.port_found else "miss",
+                            ep.module,
+                            phase_label,
+                        )
+                    )
+                )
+    return "\n".join(lines) + "\n"
+
+
 def write_connect_phase_tsv(
     path: Path,
     results: Sequence[ConnectResult],
@@ -465,7 +545,6 @@ def write_connect_phase_tsv(
         results,
         modules_cached=modules_cached,
         rows_by_path=rows_by_path,
-        phase=phase,
     )
     out = path.expanduser().resolve()
     out.parent.mkdir(parents=True, exist_ok=True)

@@ -30,16 +30,6 @@ def _manifest_digest(value: Union[str, object]) -> str:
     raise TypeError(f"unsupported manifest entry: {type(value)!r}")
 
 
-def path_stat_fingerprint(path: Union[str, Path]) -> str:
-    """Cheap cache-invalidation token (size + mtime); no byte read."""
-    try:
-        st = os.stat(os.fspath(path))
-        mtime_ns = getattr(st, "st_mtime_ns", int(st.st_mtime * 1_000_000_000))
-        return f"{st.st_size}:{mtime_ns}"
-    except OSError:
-        return "missing"
-
-
 def _read_file_digest(path: Path) -> Optional[str]:
     try:
         hasher = hashlib.sha256()
@@ -58,9 +48,7 @@ def _lookup_digest(
     path: Path,
     path_digests: Optional[Mapping[str, str]] = None,
 ) -> Optional[str]:
-    from hierwalk.ignore_path import resolved_path_str
-
-    key = resolved_path_str(path)
+    key = str(path.resolve())
     if path_digests is not None:
         hit = path_digests.get(key)
         if hit is not None:

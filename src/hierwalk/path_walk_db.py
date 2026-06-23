@@ -4,7 +4,7 @@ Path-walk module DB: Tier-0 regex decl index + Tier-1 validated instance scan.
 Built incrementally during path-walk; disk cache per RTL file (regex + validated).
 Does not participate in full DesignIndex build / load_or_build_index.
 
-Disk layout (default *cache_dir* = ``.db_{TOP}/`` under shell cwd)::
+Disk layout (default *cache_dir* = ``.db_{TOP}/`` beside ``--index-cwd`` or cwd)::
 
     .db_{TOP}/path-walk-db/{cache_key}/regex/{file_token}.pkl
     .db_{TOP}/path-walk-db/{cache_key}/validated/{file_token}_{defines}.pkl
@@ -18,13 +18,12 @@ import os
 import pickle
 import re
 import threading
-import time
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple, Union
 
-from hierwalk.ignore_path import resolved_path_str, source_path_matches
+from hierwalk.ignore_path import source_path_matches
 from hierwalk.index import (
     DesignIndex,
     _ctx_key,
@@ -91,7 +90,7 @@ def _defines_digest(defines: Mapping[str, str]) -> str:
 
 
 def _file_cache_token(path: str) -> str:
-    return hashlib.sha256(resolved_path_str(path).encode("utf-8")).hexdigest()[:20]
+    return hashlib.sha256(str(Path(path).resolve()).encode("utf-8")).hexdigest()[:20]
 
 
 def path_walk_db_cache_key(
@@ -101,29 +100,17 @@ def path_walk_db_cache_key(
     include_dirs: Sequence[str | Path] = (),
     skip_path_patterns: Sequence[str] = (),
     path_digests: Optional[Mapping[str, str]] = None,
-    lazy_source_digests: bool = False,
 ) -> str:
     """Stable namespace for path-walk DB sidecars (independent of full-index cache)."""
-    from hierwalk.manifest import path_stat_fingerprint
-
     hasher = hashlib.sha256()
     hasher.update(f"pw-db-v={PATH_WALK_DB_VERSION}".encode())
-    if lazy_source_digests:
-        hasher.update(b"lazy-stat-v1\0")
-    digest_map = dict(path_digests) if path_digests is not None else None
-    for raw in sorted({resolved_path_str(s) for s in sources}):
+    for raw in sorted({str(Path(s).resolve()) for s in sources}):
         hasher.update(raw.encode())
         hasher.update(b"\0")
-        if lazy_source_digests:
-            hasher.update(path_stat_fingerprint(raw).encode())
-            hasher.update(b"\0")
-            continue
-        digest = digest_map.get(raw) if digest_map is not None else None
-        if digest is None:
-            digest = path_content_digest(Path(raw), path_digests=path_digests)
+        digest = path_content_digest(Path(raw), path_digests=path_digests)
         if digest is not None:
             hasher.update(digest.encode())
-    for raw in sorted({resolved_path_str(p) for p in include_dirs}):
+    for raw in sorted({str(Path(p).resolve()) for p in include_dirs}):
         hasher.update(b"inc:")
         hasher.update(raw.encode())
         hasher.update(b"\0")
@@ -279,28 +266,6 @@ class DeferredResolve:
     reason: str = ""
 
 
-MappedInstKey = Tuple[str, str, Tuple[Tuple[str, str], ...]]
-
-
-@dataclass
-class MappedInstRecord:
-    """
-    Provisional instance map: RTL text match first, activation resolved later.
-
-    Hierarchy walk uses the provisional map immediately. A background audit compares
-    raw (comment-stripped) vs ifdef-filtered bodies under current defines.
-    """
-
-    parent_module: str
-    inst_leaf: str
-    child_module: str
-    file_path: str
-    parent_ctx: Tuple[Tuple[str, str], ...] = ()
-    map_source: str = "selective"
-    activation: str = "pending"
-    activation_detail: str = ""
-
-
 def _parent_ctx_key(ctx: Optional[Mapping[str, str]]) -> Tuple[Tuple[str, str], ...]:
     if not ctx:
         return ()
@@ -311,9 +276,8 @@ class PathWalkModuleDb:
     """
     Incremental module→files map (Tier 0) and per-file validated scan (Tier 1).
 
-    Instance/module mapping on the walk hot path is **provisional**: comment-stripped
-    RTL is scanned, edges are registered immediately, and ``ifdef``/``ifndef``
-    activation is resolved asynchronously (see :meth:`drain_activation_audit`).
+    Tier 1 uses light preprocess + instance scan; Tier 0 hits are always confirmed
+    before use.
     """
 
     def __init__(
@@ -329,14 +293,13 @@ class PathWalkModuleDb:
         no_cache: bool = False,
         on_trace: Optional[Callable[[str], None]] = None,
         on_progress: Optional[Callable[[str], None]] = None,
-        diagnostic_inst_trace: bool = False,
         file_via_filelist: Optional[Mapping[str, str]] = None,
         filelist_children: Optional[Mapping[str, Sequence[str]]] = None,
         path_digests: Optional[Mapping[str, str]] = None,
         jobs: int = 0,
         tier1_prefetch: Optional[bool] = None,
     ) -> None:
-        self._sources = [resolved_path_str(s) for s in sources]
+        self._sources = [str(Path(s).resolve()) for s in sources]
         self._path_digests: Optional[PathDigests] = (
             dict(path_digests) if path_digests is not None else None
         )
@@ -348,20 +311,15 @@ class PathWalkModuleDb:
         self._defines_digest = _defines_digest(self._defines)
         self._on_trace = on_trace
         self._on_progress = on_progress
-        self._diagnostic_inst_trace = diagnostic_inst_trace
-        self._raw_text_for_inst_cache: Dict[str, str] = {}
-        self._include_digest_cache: Dict[str, str] = {}
         self._file_via_filelist: Dict[str, str] = dict(file_via_filelist or {})
         self._filelist_children: Dict[str, List[str]] = {
-            resolved_path_str(k): [resolved_path_str(c) for c in v]
+            str(Path(k).resolve()): [str(Path(c).resolve()) for c in v]
             for k, v in (filelist_children or {}).items()
         }
         self._listing_siblings: Dict[str, Tuple[str, ...]] = (
             self._build_listing_siblings()
         )
-        self._sources_by_listing, self._sources_by_listing_ordered = (
-            self._build_sources_by_listing_maps()
-        )
+        self._sources_by_listing: Dict[str, Set[str]] = self._build_sources_by_listing()
         self._listing_ancestors: Dict[str, Tuple[str, ...]] = (
             self._build_listing_ancestors()
         )
@@ -410,43 +368,14 @@ class PathWalkModuleDb:
         self._tier1_scan_lock = threading.Lock()
         self._defer_queue: List[DeferredResolve] = []
         self._defer_seen: Set[Tuple[str, str, str, str, Optional[Tuple[str, str]]]] = set()
-        self._mapped_inst_records: Dict[MappedInstKey, MappedInstRecord] = {}
-        self._activation_pending: List[MappedInstKey] = []
-        self._activation_lock = threading.Lock()
-        self._activation_thread: Optional[threading.Thread] = None
-        self._text_conn_fast: bool = False
-
-    @property
-    def text_conn_fast(self) -> bool:
-        """When true, defer tier1/recovery/activation work to logical-conn."""
-        return self._text_conn_fast
-
-    def set_text_conn_fast(self, enabled: bool) -> None:
-        self._text_conn_fast = bool(enabled)
 
     @property
     def cache_root(self) -> Optional[Path]:
         return self._cache_root
 
     def _trace(self, message: str) -> None:
-        if not message:
-            return
-        if self._on_trace is not None:
+        if self._on_trace is not None and message:
             self._on_trace(message)
-            return
-        if self._diagnostic_inst_trace and (
-            message.startswith("pw-db preprocess")
-            or message.startswith("pw-db inst-")
-        ):
-            import sys
-
-            from hierwalk.hierarchy_log import emit_path_walk_log
-
-            emit_path_walk_log(message, stream=sys.stderr)
-
-    @staticmethod
-    def _elapsed_ms(t0: float) -> float:
-        return (time.perf_counter() - t0) * 1000.0
 
     def _set_phase(self, phase: str, *, detail: str = "") -> None:
         if not phase or phase == self._phase:
@@ -479,10 +408,10 @@ class PathWalkModuleDb:
         if self._cache_root is None:
             return None
         out = self._cache_root / "module_index.tsv"
-        if not force:
+        if not force and self._on_trace is None:
             self._snapshot_dirty = True
             return out
-        if self._snapshot_written and not self._snapshot_dirty:
+        if not force and self._snapshot_written and not self._snapshot_dirty:
             return out
         lines = ["module\tfiles"]
         for name in sorted(self._module_to_files):
@@ -572,20 +501,6 @@ class PathWalkModuleDb:
         )
 
     def _include_closure_digest(self, path: str) -> str:
-        key = str(Path(path).resolve())
-        cached = self._include_digest_cache.get(key)
-        if cached is not None:
-            return cached
-        try:
-            sample = Path(key).read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            digest = "readfail"
-            self._include_digest_cache[key] = digest
-            return digest
-        if "`include" not in sample and "`INCLUDE" not in sample:
-            digest = "noinc"
-            self._include_digest_cache[key] = digest
-            return digest
         from hierwalk.preprocess import _collect_include_closure
 
         closure, _ = _collect_include_closure(
@@ -601,44 +516,7 @@ class PathWalkModuleDb:
             if digest is not None:
                 hasher.update(digest.encode())
             hasher.update(b"\0")
-        digest = hasher.hexdigest()[:16]
-        self._include_digest_cache[key] = digest
-        return digest
-
-    def _raw_text_for_inst_find(self, fpath: str) -> str:
-        """
-        Comment-stripped RTL for selective instance lookup.
-
-        Skips include/macro/ifdef preprocess on the hot path; ``inst_scan`` strips
-        directive lines and ifdef-gated validity is resolved later at connect/elab.
-        """
-        key = str(Path(fpath).resolve())
-        fname = Path(key).name
-        cached = self._raw_text_for_inst_cache.get(key)
-        if cached is not None:
-            self._trace(
-                f"pw-db preprocess done {fname} source=raw-mem chars={len(cached)}"
-            )
-            return cached
-        t0 = time.perf_counter()
-        self._trace(f"pw-db preprocess enter {fname} source=raw")
-        try:
-            raw = Path(key).read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            self._trace(
-                f"pw-db preprocess done {fname} source=raw miss reason=read-fail "
-                f"ms={self._elapsed_ms(t0):.1f}"
-            )
-            raise
-        from hierwalk.preprocess import strip_comments_for_instance_scan
-
-        text = strip_comments_for_instance_scan(raw)
-        self._raw_text_for_inst_cache[key] = text
-        self._trace(
-            f"pw-db preprocess done {fname} source=raw "
-            f"ms={self._elapsed_ms(t0):.1f} chars={len(text)}"
-        )
-        return text
+        return hasher.hexdigest()[:16]
 
     def _load_regex_sidecar(self, path: str) -> Optional[_FileRegexCacheEntry]:
         sidecar = self._regex_sidecar(path)
@@ -884,9 +762,6 @@ class PathWalkModuleDb:
         return best_name, best_edge
 
     def _note_regex_modules(self, path: str, names: Iterable[str]) -> None:
-        from hierwalk.perf import pw_module_file_cap
-
-        cap = pw_module_file_cap()
         key = str(Path(path).resolve())
         file_names = self._file_to_modules.setdefault(key, [])
         for name in names:
@@ -895,66 +770,13 @@ class PathWalkModuleDb:
             if name not in file_names:
                 file_names.append(name)
             files = self._module_to_files.setdefault(name, [])
-            if key in files:
-                continue
-            preferred = self._prefer_file.get(name)
-            if preferred == key:
-                files.insert(0, key)
-                if cap > 0 and len(files) > cap:
-                    files.pop()
-                continue
-            files.append(key)
-            if cap > 0:
-                while len(files) > cap:
-                    drop_idx = 0
-                    if preferred and files[0] == preferred:
-                        drop_idx = 1 if len(files) > 1 else 0
-                    if drop_idx < len(files):
-                        files.pop(drop_idx)
-                    else:
-                        break
-
-    def _tier0_target_satisfied(
-        self,
-        target_module: str,
-        *,
-        policy: ResolvePolicy = RESOLVE_CONFIDENT,
-    ) -> bool:
-        """Enough tier0 regex candidates collected for one inst-resolve."""
-        if not target_module or target_module not in self._module_to_files:
-            return False
-        from hierwalk.perf import pw_inst_resolve_tier1_max, pw_module_file_cap
-
-        tier1_need = pw_inst_resolve_tier1_max(policy)
-        file_cap = pw_module_file_cap()
-        limits = [n for n in (tier1_need, file_cap) if n > 0]
-        if not limits:
-            return True
-        return len(self._module_to_files.get(target_module, [])) >= min(limits)
-
-    def _limit_resolve_candidates(
-        self,
-        candidates: Sequence[str],
-        *,
-        policy: ResolvePolicy,
-        label: str = "",
-    ) -> List[str]:
-        from hierwalk.perf import pw_inst_resolve_tier1_max
-
-        ordered = list(candidates)
-        max_n = 0 if policy == RESOLVE_RECOVERY else pw_inst_resolve_tier1_max(policy)
-        if max_n > 0 and len(ordered) > max_n:
-            self._trace(
-                f"pw-db inst-resolve candidate-cap "
-                f"{label}{len(ordered)} -> {max_n} policy={policy}"
-            )
-            return ordered[:max_n]
-        return ordered
+            if key not in files:
+                files.append(key)
 
     def _listing_for_rtl(self, rtl_file: str) -> str:
         if not rtl_file:
             return ""
-        anchor = resolved_path_str(rtl_file)
+        anchor = str(Path(rtl_file).resolve())
         listing = self._file_via_filelist.get(anchor, "")
         if not listing:
             listing = self._index.filelist_for(anchor) or ""
@@ -966,19 +788,16 @@ class PathWalkModuleDb:
         *,
         include_anchor_rtl: str = "",
     ) -> List[str]:
+        reachable = {str(Path(fl).resolve()) for fl in listings if fl}
         scoped: List[str] = []
-        seen: Set[str] = set()
-        for listing in listings:
-            if not listing:
-                continue
-            for key in self._sources_by_listing_ordered.get(listing, ()):
-                if key in seen:
-                    continue
-                seen.add(key)
+        for src in self._sources:
+            key = str(Path(src).resolve())
+            via = self._file_via_filelist.get(key, "") or self._index.filelist_for(key)
+            if via in reachable:
                 scoped.append(key)
         if include_anchor_rtl:
-            anchor = resolved_path_str(include_anchor_rtl)
-            if anchor not in seen and anchor in self._sources:
+            anchor = str(Path(include_anchor_rtl).resolve())
+            if anchor not in scoped and anchor in self._sources:
                 scoped.insert(0, anchor)
         return scoped
 
@@ -990,9 +809,12 @@ class PathWalkModuleDb:
         """
         listing = self._listing_for_rtl(rtl_file)
         if not listing:
-            anchor = resolved_path_str(rtl_file) if rtl_file else ""
+            anchor = str(Path(rtl_file).resolve()) if rtl_file else ""
             return [anchor] if anchor in self._sources else []
-        child_listings = list(self._filelist_children.get(listing, ()))
+        child_listings = [
+            str(Path(fl).resolve())
+            for fl in self._filelist_children.get(listing, ())
+        ]
         if not child_listings:
             return self._scoped_sources_for_listings([listing], include_anchor_rtl=rtl_file)
         return self._scoped_sources_for_listings(child_listings)
@@ -1005,7 +827,7 @@ class PathWalkModuleDb:
     ) -> Tuple[str, ...]:
         if not rtl_file:
             return tuple(self._sources)
-        anchor_key = resolved_path_str(rtl_file)
+        anchor_key = str(Path(rtl_file).resolve())
         cache_key = (anchor_key, policy)
         cached = self._scoped_pool_cache.get(cache_key)
         if cached is not None:
@@ -1029,7 +851,7 @@ class PathWalkModuleDb:
             return list(self._sources)
         listing = self._listing_for_rtl(rtl_file)
         if not listing:
-            anchor = resolved_path_str(rtl_file)
+            anchor = str(Path(rtl_file).resolve())
             return [anchor] if anchor in self._sources else list(self._sources)
 
         reachable: Set[str] = {listing}
@@ -1056,44 +878,46 @@ class PathWalkModuleDb:
             item.expect_inst,
         )
 
-    def _build_sources_by_listing_maps(
-        self,
-    ) -> Tuple[Dict[str, Set[str]], Dict[str, List[str]]]:
-        sets: Dict[str, Set[str]] = {}
-        ordered: Dict[str, List[str]] = {}
-        for key in self._sources:
+    def _build_sources_by_listing(self) -> Dict[str, Set[str]]:
+        out: Dict[str, Set[str]] = {}
+        for src in self._sources:
+            key = str(Path(src).resolve())
             via = self._file_via_filelist.get(key, "") or self._index.filelist_for(key)
             if not via:
                 continue
-            sets.setdefault(via, set()).add(key)
-            ordered.setdefault(via, []).append(key)
-        return sets, ordered
+            listing_key = str(Path(via).resolve())
+            out.setdefault(listing_key, set()).add(key)
+        return out
 
     def _build_listing_ancestors(self) -> Dict[str, Tuple[str, ...]]:
         parents: Dict[str, List[str]] = {}
         all_listings: Set[str] = set()
-        for parent_key, kids in self._filelist_children.items():
+        for parent, kids in self._filelist_children.items():
+            parent_key = str(Path(parent).resolve())
             all_listings.add(parent_key)
-            for child_key in kids:
+            for kid in kids:
+                child_key = str(Path(kid).resolve())
                 all_listings.add(child_key)
                 parents.setdefault(child_key, []).append(parent_key)
         all_listings.update(self._sources_by_listing.keys())
         out: Dict[str, Tuple[str, ...]] = {}
         for listing in all_listings:
-            ancestors: Set[str] = {listing}
-            queue = [listing]
+            resolved = str(Path(listing).resolve())
+            ancestors: Set[str] = {resolved}
+            queue = [resolved]
             while queue:
                 fl = queue.pop()
                 for parent in parents.get(fl, ()):
                     if parent not in ancestors:
                         ancestors.add(parent)
                         queue.append(parent)
-            out[listing] = tuple(sorted(ancestors))
+            out[resolved] = tuple(sorted(ancestors))
         return out
 
     def _build_listing_siblings(self) -> Dict[str, Tuple[str, ...]]:
         siblings: Dict[str, Set[str]] = {}
-        for kid_keys in self._filelist_children.values():
+        for kids in self._filelist_children.values():
+            kid_keys = [str(Path(k).resolve()) for k in kids]
             for key in kid_keys:
                 siblings.setdefault(key, set()).update(
                     s for s in kid_keys if s != key
@@ -1130,76 +954,6 @@ class PathWalkModuleDb:
         listing_key = str(Path(listing).resolve())
         hit = self._sources_by_listing.get(listing_key)
         return set(hit) if hit is not None else set()
-
-    def _filelist_root_listings(self) -> List[str]:
-        child_of: Set[str] = set()
-        for kids in self._filelist_children.values():
-            child_of.update(str(Path(k).resolve()) for k in kids)
-        roots: List[str] = []
-        seen: Set[str] = set()
-        for parent in self._filelist_children:
-            pk = str(Path(parent).resolve())
-            if pk not in child_of and pk not in seen:
-                roots.append(pk)
-                seen.add(pk)
-        for listing in self._sources_by_listing:
-            if listing not in child_of and listing not in seen:
-                roots.append(listing)
-                seen.add(listing)
-        return roots
-
-    def _sources_for_listing_in_order(self, listing: str) -> List[str]:
-        listing_key = str(Path(listing).resolve())
-        return list(self._sources_by_listing_ordered.get(listing_key, ()))
-
-    def _walk_listing_subtree_sources(
-        self,
-        listing: str,
-        *,
-        seen: Set[str],
-    ) -> List[str]:
-        listing_key = str(Path(listing).resolve())
-        ordered: List[str] = []
-        for src in self._sources_for_listing_in_order(listing_key):
-            if src not in seen:
-                ordered.append(src)
-                seen.add(src)
-        for child in self._filelist_children.get(listing_key, ()):
-            ordered.extend(self._walk_listing_subtree_sources(child, seen=seen))
-        return ordered
-
-    def _order_sources_by_filelist_hierarchy(
-        self,
-        sources: Sequence[str],
-        *,
-        anchor_rtl: str = "",
-    ) -> List[str]:
-        """Order RTL paths depth-first through filelist listings (anchor subtree first)."""
-        allowed = {resolved_path_str(s) for s in sources}
-        seen: Set[str] = set()
-        ordered: List[str] = []
-
-        if anchor_rtl:
-            anchor = resolved_path_str(anchor_rtl)
-            if anchor in allowed:
-                ordered.append(anchor)
-                seen.add(anchor)
-            listing = self._listing_for_rtl(anchor_rtl)
-            if listing:
-                for src in self._walk_listing_subtree_sources(listing, seen=seen):
-                    if src in allowed:
-                        ordered.append(src)
-
-        for root in self._filelist_root_listings():
-            for src in self._walk_listing_subtree_sources(root, seen=seen):
-                if src in allowed:
-                    ordered.append(src)
-
-        for key in self._sources:
-            if key in allowed and key not in seen:
-                ordered.append(key)
-                seen.add(key)
-        return ordered
 
     def should_retry_deferred_recovery(self, scope_anchor: str) -> bool:
         """
@@ -1439,13 +1193,7 @@ class PathWalkModuleDb:
         self._trace(f"pw-db tier1 prefetch start ({len(work)} file(s))")
         return len(work)
 
-    def drain_background_workers(
-        self,
-        *,
-        wait_all: bool = True,
-        skip_activation: bool = False,
-        skip_snapshot: bool = False,
-    ) -> None:
+    def drain_background_workers(self, *, wait_all: bool = True) -> None:
         """Ingest completed tier-0 workers; optionally wait for stragglers (no cancel)."""
         if wait_all:
             while self._tier0_inflight:
@@ -1455,154 +1203,8 @@ class PathWalkModuleDb:
         if wait_all and self._tier1_prefetch_thread is not None:
             self._tier1_prefetch_thread.join()
             self._tier1_prefetch_thread = None
-        if wait_all and not skip_activation and not self._text_conn_fast:
-            self.drain_activation_audit(wait=True)
-        if self._snapshot_dirty and not skip_snapshot and not self._text_conn_fast:
+        if self._snapshot_dirty:
             self.write_module_index_snapshot()
-
-    def _mapped_inst_key(
-        self,
-        parent_module: str,
-        inst_leaf: str,
-        parent_ctx: Mapping[str, str],
-    ) -> MappedInstKey:
-        return (parent_module, inst_leaf, _parent_ctx_key(parent_ctx))
-
-    def _register_provisional_inst_map(
-        self,
-        parent_module: str,
-        inst_leaf: str,
-        edge: InstanceEdge,
-        fpath: str,
-        *,
-        parent_ctx: Mapping[str, str],
-        map_source: str,
-    ) -> None:
-        key = self._mapped_inst_key(parent_module, inst_leaf, parent_ctx)
-        if key in self._mapped_inst_records:
-            return
-        self._mapped_inst_records[key] = MappedInstRecord(
-            parent_module=parent_module,
-            inst_leaf=inst_leaf,
-            child_module=edge.child_module,
-            file_path=str(Path(fpath).resolve()),
-            parent_ctx=_parent_ctx_key(parent_ctx),
-            map_source=map_source,
-        )
-        with self._activation_lock:
-            self._activation_pending.append(key)
-
-    def _kick_activation_worker(self) -> None:
-        if self._activation_thread is not None and self._activation_thread.is_alive():
-            return
-
-        def _run() -> None:
-            while True:
-                with self._activation_lock:
-                    if not self._activation_pending:
-                        break
-                    key = self._activation_pending.pop(0)
-                self._resolve_activation_record(key)
-
-        self._activation_thread = threading.Thread(
-            target=_run,
-            name="pw-db-activation-audit",
-            daemon=True,
-        )
-        self._activation_thread.start()
-
-    def _resolve_activation_record(self, key: MappedInstKey) -> None:
-        rec = self._mapped_inst_records.get(key)
-        if rec is None:
-            return
-        parent_ctx = dict(rec.parent_ctx)
-        try:
-            raw_text = self._raw_text_for_inst_find(rec.file_path)
-            full_text = self._preprocessed_text_for_file(rec.file_path)
-        except OSError:
-            rec.activation = "unknown"
-            rec.activation_detail = "read or preprocess failed"
-            self._trace(
-                f"pw-db activation {rec.parent_module}.{rec.inst_leaf} "
-                f"unknown ({rec.activation_detail})"
-            )
-            return
-
-        mod_rec = self._index.get_module(rec.parent_module)
-        _raw_header, raw_body = _module_header_body(raw_text, rec.parent_module)
-        full_header, full_body = _module_header_body(full_text, rec.parent_module)
-        raw_params = (
-            dict(mod_rec.raw_params)
-            if mod_rec and mod_rec.raw_params
-            else parse_param_pairs(full_header or _raw_header)
-        )
-        pmap = resolve_param_map(raw_params, parent=parent_ctx)
-        raw_edge = find_hierarchy_instance(raw_body, rec.inst_leaf, param_map=pmap)
-        ifdef_edge = find_hierarchy_instance(full_body, rec.inst_leaf, param_map=pmap)
-        if ifdef_edge is not None:
-            rec.activation = "active"
-            rec.activation_detail = (
-                f"visible under current defines ({rec.map_source} map)"
-            )
-        elif raw_edge is not None:
-            rec.activation = "inactive"
-            rec.activation_detail = (
-                "mapped from raw RTL; gated by `ifdef`/`ifndef` under current defines"
-            )
-        else:
-            rec.activation = "unknown"
-            rec.activation_detail = "not found after ifdef-filtered rescan"
-        self._trace(
-            f"pw-db activation {rec.parent_module}.{rec.inst_leaf} "
-            f"->{rec.child_module} {rec.activation} ({rec.activation_detail})"
-        )
-
-    def drain_activation_audit(self, *, wait: bool = True) -> int:
-        """Resolve queued activation audits (deferred until report/end of walk)."""
-        if not wait:
-            return sum(
-                1
-                for rec in self._mapped_inst_records.values()
-                if rec.activation != "pending"
-            )
-        self._kick_activation_worker()
-        if self._activation_thread is not None:
-            self._activation_thread.join()
-            self._activation_thread = None
-        with self._activation_lock:
-            while self._activation_pending:
-                key = self._activation_pending.pop(0)
-                self._resolve_activation_record(key)
-        return sum(
-            1 for rec in self._mapped_inst_records.values() if rec.activation != "pending"
-        )
-
-    def format_activation_audit_lines(self) -> List[str]:
-        """Human-readable activation summary for run reports / trace."""
-        if not self._mapped_inst_records:
-            return []
-        lines = ["pw-db activation-report begin"]
-        pending = 0
-        for rec in sorted(
-            self._mapped_inst_records.values(),
-            key=lambda r: (r.parent_module, r.inst_leaf),
-        ):
-            if rec.activation == "pending":
-                pending += 1
-            lines.append(
-                f"pw-db activation map {rec.parent_module}.{rec.inst_leaf} "
-                f"->{rec.child_module} [{rec.activation}] "
-                f"src={rec.map_source} rtl={Path(rec.file_path).name} "
-                f"{rec.activation_detail}".rstrip()
-            )
-        if pending:
-            lines.append(f"pw-db activation-report pending={pending}")
-        lines.append("pw-db activation-report end")
-        return lines
-
-    def emit_activation_audit_report(self) -> None:
-        for line in self.format_activation_audit_lines():
-            self._trace(line)
 
     def shutdown_workers(self, *, wait: bool = True) -> None:
         self.drain_background_workers(wait_all=wait)
@@ -1615,7 +1217,6 @@ class PathWalkModuleDb:
         paths: Sequence[str],
         *,
         target_module: str = "",
-        policy: ResolvePolicy = RESOLVE_CONFIDENT,
     ) -> int:
         pending = [
             str(Path(p).resolve())
@@ -1630,10 +1231,7 @@ class PathWalkModuleDb:
         submitted = self._tier0_submit(pending)
         while self._tier0_inflight:
             self._tier0_drain_completed(block=True, timeout=0.1)
-            if target_module and self._tier0_target_satisfied(
-                target_module,
-                policy=policy,
-            ):
+            if target_module and target_module in self._module_to_files:
                 return submitted
         return submitted
 
@@ -1642,7 +1240,6 @@ class PathWalkModuleDb:
         sources: Sequence[str],
         *,
         target_module: str = "",
-        policy: ResolvePolicy = RESOLVE_CONFIDENT,
     ) -> int:
         keys = [str(Path(src).resolve()) for src in sources]
         pending = [k for k in keys if k not in self._regex_scanned and k not in self._tier0_inflight]
@@ -1656,18 +1253,11 @@ class PathWalkModuleDb:
             for key in pending:
                 self._tier0_scan_file(key)
                 added += 1
-                if target_module and self._tier0_target_satisfied(
-                    target_module,
-                    policy=policy,
-                ):
+                if target_module and target_module in self._module_to_files:
                     return added
             return added
 
-        return self._tier0_scan_sources_parallel(
-            pending,
-            target_module=target_module,
-            policy=policy,
-        )
+        return self._tier0_scan_sources_parallel(pending, target_module=target_module)
 
     def _tier0_scan_file(self, path: str) -> List[str]:
         key = str(Path(path).resolve())
@@ -1711,7 +1301,6 @@ class PathWalkModuleDb:
         sources: Optional[Sequence[str]] = None,
         *,
         target_module: str = "",
-        policy: ResolvePolicy = RESOLVE_CONFIDENT,
     ) -> int:
         """Tier-0 scan sources not yet regex-indexed (scoped pool or full design)."""
         pool = (
@@ -1719,24 +1308,7 @@ class PathWalkModuleDb:
             if sources is not None
             else list(self._sources)
         )
-        if sources is None and policy != RESOLVE_RECOVERY:
-            from hierwalk.perf import pw_tier0_global_scan_max
-
-            global_max = pw_tier0_global_scan_max()
-            if global_max > 0:
-                pending = [
-                    s
-                    for s in pool
-                    if s not in self._regex_scanned and s not in self._tier0_inflight
-                ]
-                pool = pending[:global_max]
-        # Recovery must discover every dup-module decl; target_module early-exit stops at 1st hit.
-        scan_target = "" if policy == RESOLVE_RECOVERY else target_module
-        return self._tier0_scan_sources(
-            pool,
-            target_module=scan_target,
-            policy=policy,
-        )
+        return self._tier0_scan_sources(pool, target_module=target_module)
 
     def _sort_module_files(
         self,
@@ -1767,71 +1339,32 @@ class PathWalkModuleDb:
         scope_anchor: str = "",
         policy: ResolvePolicy = RESOLVE_CONFIDENT,
     ) -> List[str]:
-        scope_pool: Optional[Sequence[str]] = None
         if scope_anchor:
-            scope_pool = self._scoped_pool_for_policy(scope_anchor, policy=policy)
-
-        scan_target = "" if policy == RESOLVE_RECOVERY else module_name
-
-        if policy == RESOLVE_RECOVERY:
-            self._reconcile_regex_candidates_for_module(module_name)
-
-        # Confident: stub already mapped is enough to return. Recovery must keep scanning.
-        if module_name in self._module_to_files and policy != RESOLVE_RECOVERY:
-            files = list(self._module_to_files.get(module_name, []))
-            return self._sort_module_files(
-                module_name,
-                files,
-                scope_anchor=scope_anchor,
-                policy=policy,
-                scope_pool=scope_pool,
-            )
-
-        if scope_anchor and scope_pool:
-            ordered_pool = self._order_sources_by_filelist_hierarchy(
-                scope_pool,
-                anchor_rtl=scope_anchor,
-            )
-            self._tier0_scan_sources(
-                ordered_pool,
-                target_module=scan_target,
-                policy=policy,
-            )
-            if module_name in self._module_to_files and policy == RESOLVE_CONFIDENT:
-                files = list(self._module_to_files.get(module_name, []))
-                return self._sort_module_files(
-                    module_name,
-                    files,
-                    scope_anchor=scope_anchor,
-                    policy=policy,
-                    scope_pool=scope_pool,
-                )
+            scoped_pool = self._scoped_pool_for_policy(scope_anchor, policy=policy)
+            if scoped_pool:
+                self._tier0_scan_sources(scoped_pool, target_module=module_name)
+                if module_name in self._module_to_files:
+                    files = list(self._module_to_files.get(module_name, []))
+                    return self._sort_module_files(
+                        module_name,
+                        files,
+                        scope_anchor=scope_anchor,
+                        policy=policy,
+                        scope_pool=scoped_pool,
+                    )
             if policy == RESOLVE_CONFIDENT:
                 return []
 
         if not self._regex_queue:
-            pending = [
+            self._regex_queue = [
                 s
                 for s in self._sources
                 if s not in self._regex_scanned and s not in self._tier0_inflight
             ]
-            if scope_anchor:
-                self._regex_queue = self._order_sources_by_filelist_hierarchy(
-                    pending,
-                    anchor_rtl=scope_anchor,
-                )
-            else:
-                # Filelist expansion order: top/allinst RTL is usually near the front.
-                self._regex_queue = list(pending)
 
         workers = _resolve_pw_db_jobs(self._jobs, len(self._sources))
         batch_size = max(workers * 4, _PARALLEL_MIN_TIER0)
-        while self._regex_queue:
-            if (
-                policy != RESOLVE_RECOVERY
-                and self._tier0_target_satisfied(module_name, policy=policy)
-            ):
-                break
+        while module_name not in self._module_to_files and self._regex_queue:
             batch: List[str] = []
             while self._regex_queue and len(batch) < batch_size:
                 nxt = self._regex_queue.pop(0)
@@ -1844,30 +1377,18 @@ class PathWalkModuleDb:
                 if not self._tier0_inflight:
                     break
                 continue
-            self._tier0_scan_sources(
-                batch,
-                target_module=scan_target,
-                policy=policy,
-            )
-            if (
-                policy != RESOLVE_RECOVERY
-                and self._tier0_target_satisfied(module_name, policy=policy)
-            ):
+            self._tier0_scan_sources(batch, target_module=module_name)
+            if module_name in self._module_to_files:
                 break
 
-        if policy == RESOLVE_RECOVERY:
+        if module_name not in self._module_to_files:
             remaining = [
                 src
                 for src in self._sources
                 if src not in self._regex_scanned and src not in self._tier0_inflight
             ]
             if remaining:
-                self._tier0_scan_sources(
-                    remaining,
-                    target_module="",
-                    policy=policy,
-                )
-            self._reconcile_regex_candidates_for_module(module_name)
+                self._tier0_scan_sources(remaining, target_module=module_name)
 
         files = list(self._module_to_files.get(module_name, []))
         scope_pool = (
@@ -1882,48 +1403,6 @@ class PathWalkModuleDb:
             policy=policy,
             scope_pool=scope_pool,
         )
-
-    def _parent_body_file(self, parent_module: str, current_file: str) -> str:
-        """RTL file containing *parent_module*'s declaration (not merely an instance site)."""
-        preferred = self._prefer_file.get(parent_module)
-        if preferred:
-            key = str(Path(preferred).resolve())
-            try:
-                text = self._raw_text_for_inst_find(key)
-                header, body = _module_header_body(text, parent_module)
-                if header or body:
-                    return key
-            except OSError:
-                pass
-        seen: Set[str] = set()
-        candidates: List[str] = []
-        if current_file:
-            candidates.append(current_file)
-        candidates.extend(self._module_to_files.get(parent_module, ()))
-        for candidate in candidates:
-            key = str(Path(candidate).resolve())
-            if key in seen:
-                continue
-            seen.add(key)
-            try:
-                text = self._raw_text_for_inst_find(key)
-                header, body = _module_header_body(text, parent_module)
-                if header or body:
-                    return key
-            except OSError:
-                continue
-        hit = self.find_module_decl_file(parent_module)
-        return hit or (str(Path(current_file).resolve()) if current_file else "")
-
-    def _parent_instance_edges_fast(
-        self,
-        module_name: str,
-    ) -> List[InstanceEdge]:
-        """Tier-1 prescanned edges only (no generate-fold rescan)."""
-        rec = self._index.get_module(module_name)
-        if rec is None or rec.stop_reason or rec.is_blackbox:
-            return list(rec.instances) if rec else []
-        return list(rec.instances)
 
     def _parent_instance_edges(
         self,
@@ -1956,14 +1435,6 @@ class PathWalkModuleDb:
             return rest
         return candidates
 
-    def _reconcile_regex_candidates_for_module(self, module_name: str) -> None:
-        """Re-map tier0 hits already scanned but dropped by per-module file cap."""
-        if not module_name:
-            return
-        for key, mods in self._file_to_modules.items():
-            if module_name in mods:
-                self._note_regex_modules(key, [module_name])
-
     def _recovery_pass1_candidates(
         self,
         module_name: str,
@@ -1981,7 +1452,6 @@ class PathWalkModuleDb:
         may already list candidates when ``pending == 0``. Returns untried paths
         to retry, or None to stop the outer pass loop.
         """
-        self._reconcile_regex_candidates_for_module(module_name)
         if pending <= 0 and module_name not in self._module_to_files:
             return None
         if pending > 0:
@@ -2003,7 +1473,6 @@ class PathWalkModuleDb:
 
     def tier1_scan_file(self, path: str) -> Dict[str, ModuleRecord]:
         """Light preprocess + instance scan for one translation unit."""
-        t0 = time.perf_counter()
         key = str(Path(path).resolve())
         with self._tier1_scan_lock:
             mem = self._validated_memory.get(key)
@@ -2037,10 +1506,7 @@ class PathWalkModuleDb:
                 summary = ",".join(
                     f"{n}({len(r.instances)}inst)" for n, r in sorted(disk.items())
                 )
-                self._trace(
-                    f"pw-db tier1-scan done {Path(key).name} source=cache "
-                    f"ms={self._elapsed_ms(t0):.1f} -> {summary or '(none)'}"
-                )
+                self._trace(f"pw-db tier1 cache {Path(key).name} -> {summary or '(none)'}")
                 return disk
 
             # Tier-1 must honour filelist + in-file defines (ifdef instance names, gated modules).
@@ -2060,11 +1526,7 @@ class PathWalkModuleDb:
             summary = ",".join(
                 f"{n}({len(r.instances)}inst)" for n, r in sorted(out.items())
             )
-            self._trace(
-                f"pw-db tier1-scan done {Path(key).name} source=cold "
-                f"ms={self._elapsed_ms(t0):.1f} chars={len(text)} "
-                f"-> {summary or '(none)'}"
-            )
+            self._trace(f"pw-db tier1 scan {Path(key).name} -> {summary or '(none)'}")
             return out
 
     def _invalidate_folded_edges_cache(
@@ -2170,19 +1632,12 @@ class PathWalkModuleDb:
 
     def _preprocessed_text_for_file(self, fpath: str) -> str:
         key = str(Path(fpath).resolve())
-        fname = Path(key).name
         defines_digest = self._defines_digest
         include_digest = self._include_closure_digest(key)
         mem_key = (key, defines_digest, include_digest)
-        t0 = time.perf_counter()
         cached = self._preprocessed_text_cache.get(mem_key)
         if cached is not None:
-            self._trace(
-                f"pw-db preprocess done {fname} source=mem "
-                f"ms={self._elapsed_ms(t0):.1f} chars={len(cached)}"
-            )
             return cached
-        self._trace(f"pw-db preprocess enter {fname}")
         disk = self._load_preprocessed_sidecar(
             key,
             defines_digest=defines_digest,
@@ -2190,13 +1645,11 @@ class PathWalkModuleDb:
         )
         if disk is not None:
             self._preprocessed_text_cache[mem_key] = disk
-            self._trace(
-                f"pw-db preprocess done {fname} source=disk "
-                f"ms={self._elapsed_ms(t0):.1f} chars={len(disk)}"
-            )
+            self._trace(f"pw-db preprocess cache {Path(key).name}")
             return disk
         from hierwalk.lazy_scope import lazy_index_ifdef
         from hierwalk.preprocess import apply_ifdef_filter, preprocess_file_for_index
+
         defs = dict(self._defines)
         text = preprocess_file_for_index(
             Path(key),
@@ -2213,10 +1666,6 @@ class PathWalkModuleDb:
             text,
             defines_digest=defines_digest,
             include_closure_digest=include_digest,
-        )
-        self._trace(
-            f"pw-db preprocess done {fname} source=cold "
-            f"ms={self._elapsed_ms(t0):.1f} chars={len(text)}"
         )
         return text
 
@@ -2247,55 +1696,19 @@ class PathWalkModuleDb:
         parent_ctx: Mapping[str, str],
         inst_leaf: str,
         fpath: str,
-        *,
-        pre_resolve_ms: Optional[float] = None,
     ) -> Optional[InstanceEdge]:
         """Targeted parent-body scan for one instance (no full tier1 file walk)."""
-        fname = Path(fpath).name
-        t0 = time.perf_counter()
-        pre_note = (
-            f" pre_ms={pre_resolve_ms:.1f}"
-            if pre_resolve_ms is not None
-            else ""
-        )
-        self._trace(
-            f"pw-db inst-find enter {parent_module}.{inst_leaf} file={fname}{pre_note}"
-        )
         try:
-            t_pre = time.perf_counter()
-            text = self._raw_text_for_inst_find(fpath)
-            pre_ms = self._elapsed_ms(t_pre)
+            text = self._preprocessed_text_for_file(fpath)
         except OSError:
-            self._trace(
-                f"pw-db inst-find done {parent_module}.{inst_leaf} file={fname} "
-                f"miss reason=read-fail ms={self._elapsed_ms(t0):.1f}"
-            )
             return None
-        t_body = time.perf_counter()
         header, body = _module_header_body(text, parent_module)
-        body_ms = self._elapsed_ms(t_body)
         if not body and not header:
-            self._trace(
-                f"pw-db inst-find done {parent_module}.{inst_leaf} file={fname} "
-                f"miss reason=no-module-body ms={self._elapsed_ms(t0):.1f} "
-                f"preprocess={pre_ms:.1f}"
-            )
             return None
         rec = self._index.get_module(parent_module)
         raw_params = dict(rec.raw_params) if rec and rec.raw_params else parse_param_pairs(header)
         pmap = resolve_param_map(raw_params, parent=parent_ctx)
-        t_scan = time.perf_counter()
-        edge = find_hierarchy_instance(body, inst_leaf, param_map=pmap)
-        scan_ms = self._elapsed_ms(t_scan)
-        status = "hit" if edge is not None else "miss"
-        child = f" child={edge.child_module!r}" if edge is not None else ""
-        self._trace(
-            f"pw-db inst-find done {parent_module}.{inst_leaf} file={fname} "
-            f"{status}{child} ms={self._elapsed_ms(t0):.1f} "
-            f"preprocess={pre_ms:.1f} module_body={body_ms:.1f} "
-            f"inst_scan={scan_ms:.1f} body_chars={len(body)}"
-        )
-        return edge
+        return find_hierarchy_instance(body, inst_leaf, param_map=pmap)
 
     def _apply_selective_edge_hit(
         self,
@@ -2303,12 +1716,11 @@ class PathWalkModuleDb:
         parent_module: str,
         edge: InstanceEdge,
         *,
-        inst_leaf: str,
         parent_ctx: Mapping[str, str],
     ) -> None:
         key = str(Path(fpath).resolve())
         rec = self._index.get_module(parent_module)
-        header, _body = _module_header_body(self._raw_text_for_inst_find(fpath), parent_module)
+        header, _body = _module_header_body(self._preprocessed_text_for_file(fpath), parent_module)
         raw_params = dict(rec.raw_params) if rec and rec.raw_params else parse_param_pairs(header)
         pmap = resolve_param_map(raw_params, parent=parent_ctx)
         instances: List[InstanceEdge] = list(rec.instances) if rec else []
@@ -2332,7 +1744,7 @@ class PathWalkModuleDb:
         if child_rec is None or not child_rec.file_path:
             self._index.modules[child] = ModuleRecord(
                 module_name=child,
-                file_path="",
+                file_path=key,
                 body="",
                 raw_params={},
                 instances=[],
@@ -2342,14 +1754,6 @@ class PathWalkModuleDb:
         self._note_regex_modules(key, [parent_module, child])
         self._prefer_file[parent_module] = key
         self._register_inst_edges(parent_module, parent_ctx, instances)
-        self._register_provisional_inst_map(
-            parent_module,
-            inst_leaf=inst_leaf or edge.inst_name,
-            edge=edge,
-            fpath=fpath,
-            parent_ctx=parent_ctx,
-            map_source="selective",
-        )
         self._snapshot_dirty = True
 
     def _ensure_module_light(self, module_name: str, fpath: str) -> bool:
@@ -2379,9 +1783,9 @@ class PathWalkModuleDb:
             raw_params=raw_params,
             instances=instances,
             needs_generate_fold=prior.needs_generate_fold if prior else False,
-            is_blackbox=False if instances else (prior.is_blackbox if prior else False),
+            is_blackbox=prior.is_blackbox if prior else False,
             is_interface=prior.is_interface if prior else False,
-            stop_reason="" if instances else (prior.stop_reason if prior else ""),
+            stop_reason=prior.stop_reason if prior else "",
         )
         self._index._rebuild_file_modules()
         self._note_regex_modules(key, [module_name])
@@ -2392,8 +1796,6 @@ class PathWalkModuleDb:
 
     def _warm_tier1_background(self, fpath: str) -> None:
         """Best-effort full tier1 DB warm in a background thread (not on walk hot path)."""
-        if self._text_conn_fast:
-            return
         key = str(Path(fpath).resolve())
         if key in self._validated_memory or key in self._tier1_warm_inflight:
             return
@@ -2445,10 +1847,7 @@ class PathWalkModuleDb:
         if _is_placeholder_module(rec):
             return False
         if expect_inst is None:
-            if rec is None or not rec.file_path:
-                return False
-            body_file = self._parent_body_file(module_name, rec.file_path)
-            return resolved_path_str(rec.file_path) == resolved_path_str(body_file)
+            return True
         parent_mod, inst_leaf = expect_inst
         if parent_mod != module_name or rec is None:
             return False
@@ -2538,42 +1937,10 @@ class PathWalkModuleDb:
         tried: Set[str] = set()
         max_pass = 2 if policy == RESOLVE_CONFIDENT else 3
         for pass_idx in range(max_pass):
-            trial_files = self._limit_resolve_candidates(
-                candidates,
-                policy=policy,
-                label=f"module={module_name} ",
-            )
-            for fpath in trial_files:
+            for fpath in candidates:
                 if fpath in tried:
                     continue
                 tried.add(fpath)
-                if self._text_conn_fast:
-                    if self._ensure_module_light(module_name, fpath):
-                        rec = self._index.get_module(module_name)
-                        more_candidates = any(
-                            candidate not in tried for candidate in trial_files
-                        )
-                        if (
-                            more_candidates
-                            and rec is not None
-                            and not _is_placeholder_module(rec)
-                            and not rec.instances
-                        ):
-                            self._trace(
-                                f"pw-db   module light stub {module_name!r} "
-                                f"via {Path(fpath).name} (text-conn-fast, try next)"
-                            )
-                            continue
-                        self._prefer_file[module_name] = fpath
-                        self._trace(
-                            f"pw-db   module light hit {module_name!r} "
-                            f"via {Path(fpath).name} (text-conn-fast)"
-                        )
-                        return True
-                    self._trace(
-                        f"pw-db   skip tier1 {Path(fpath).name}: text-conn-fast"
-                    )
-                    continue
                 modules = self.tier1_scan_file(fpath)
                 hit = modules.get(module_name)
                 if hit is None:
@@ -2615,7 +1982,6 @@ class PathWalkModuleDb:
                     pending = self._scan_remaining_sources_tier0(
                         scoped_pool,
                         target_module=module_name,
-                        policy=policy,
                     )
                     if pending > 0:
                         expand_label = (
@@ -2638,7 +2004,6 @@ class PathWalkModuleDb:
                 pending = self._scan_remaining_sources_tier0(
                     None,
                     target_module=module_name,
-                    policy=policy,
                 )
                 refreshed = self._recovery_pass1_candidates(
                     module_name,
@@ -2687,186 +2052,43 @@ class PathWalkModuleDb:
         reset_path: str = "",
     ) -> Optional[InstanceEdge]:
         """Tier-1 confirmed child edge, trying alternate decl files on miss."""
-        scope_anchor = current_file
-        avoid = self._parent_body_file(parent_module, current_file)
-        t_resolve = time.perf_counter()
-        avoid_name = Path(avoid).name if avoid else "-"
-        self._trace(
-            f"pw-db inst-resolve enter {parent_module}.{inst_leaf} "
-            f"file={avoid_name} policy={policy}"
-        )
+        avoid = current_file
         indexed = self.lookup_inst_edge(parent_module, parent_ctx, inst_leaf)
         if indexed is not None:
-            self._trace(
-                f"pw-db inst-resolve done {parent_module}.{inst_leaf} "
-                f"path=inst_index ms={self._elapsed_ms(t_resolve):.1f}"
-            )
             return indexed
-
-        rec = self._index.get_module(parent_module)
-        pmap = (
-            resolve_param_map(rec.raw_params, parent=parent_ctx)
-            if rec is not None and not _is_placeholder_module(rec)
-            else {}
-        )
-
-        t_tier1_fast = time.perf_counter()
-        tier1_fast_edges = 0
-        tier1_fast_edge: Optional[InstanceEdge] = None
-        if rec is not None and not _is_placeholder_module(rec):
-            tier1_fast_list = self._parent_instance_edges_fast(parent_module)
-            tier1_fast_edges = len(tier1_fast_list)
-            tier1_fast_edge = self._edge_matches(
-                tier1_fast_list,
-                inst_leaf,
-                pmap,
-                parent_module=parent_module,
-                parent_ctx=parent_ctx,
-            )
-        tier1_fast_ms = self._elapsed_ms(t_tier1_fast)
-        if tier1_fast_edge is not None:
-            if rec is not None and rec.file_path:
-                self._prefer_file[parent_module] = resolved_path_str(rec.file_path)
-            self._register_inst_edges(parent_module, parent_ctx, [tier1_fast_edge])
-            self._trace(
-                f"pw-db inst-resolve done {parent_module}.{inst_leaf} "
-                f"path=tier1-fast edges={tier1_fast_edges} tier1_fast_ms={tier1_fast_ms:.1f} "
-                f"ms={self._elapsed_ms(t_resolve):.1f}"
-            )
-            return tier1_fast_edge
-        if tier1_fast_edges:
-            self._trace(
-                f"pw-db inst-resolve tier1-fast miss {parent_module}.{inst_leaf} "
-                f"edges={tier1_fast_edges} tier1_fast_ms={tier1_fast_ms:.1f} "
-                f"since_enter_ms={self._elapsed_ms(t_resolve):.1f}"
-            )
-
-        if avoid:
-            t_sel = time.perf_counter()
-            selective = self._selective_child_edge_lookup(
-                parent_module,
-                parent_ctx,
-                inst_leaf,
-                avoid,
-                pre_resolve_ms=self._elapsed_ms(t_resolve),
-            )
-            sel_ms = self._elapsed_ms(t_sel)
-            if selective is not None:
-                self._apply_selective_edge_hit(
-                    avoid,
-                    parent_module,
-                    selective,
-                    inst_leaf=inst_leaf,
+        if self._index_has_resolved_module(
+            parent_module,
+            expect_inst=(parent_module, inst_leaf),
+            parent_ctx=parent_ctx,
+        ):
+            rec = self._index.get_module(parent_module)
+            if rec is not None:
+                pmap = resolve_param_map(rec.raw_params, parent=parent_ctx)
+                edge = self._edge_matches(
+                    self._parent_instance_edges(parent_module, parent_ctx),
+                    inst_leaf,
+                    pmap,
+                    parent_module=parent_module,
                     parent_ctx=parent_ctx,
                 )
-                self._trace(
-                    f"pw-db   edge selective hit {parent_module}.{inst_leaf} "
-                    f"via {Path(avoid).name} -> child {selective.child_module!r}"
-                )
-                self._warm_tier1_background(avoid)
-                self._trace(
-                    f"pw-db inst-resolve done {parent_module}.{inst_leaf} "
-                    f"path=selective sel_ms={sel_ms:.1f} "
-                    f"ms={self._elapsed_ms(t_resolve):.1f}"
-                )
-                return selective
-            self._trace(
-                f"pw-db inst-resolve selective miss {parent_module}.{inst_leaf} "
-                f"file={avoid_name} sel_ms={sel_ms:.1f} "
-                f"since_enter_ms={self._elapsed_ms(t_resolve):.1f}"
-            )
+                if edge is not None:
+                    if rec.file_path:
+                        self._prefer_file[parent_module] = str(
+                            Path(rec.file_path).resolve()
+                        )
+                    return edge
 
-        tier1_edge: Optional[InstanceEdge] = None
-        tier1_edges = 0
-        tier1_ms = 0.0
-        redundant_fold = bool(
-            rec is not None
-            and not _is_placeholder_module(rec)
-            and not rec.needs_generate_fold
-            and tier1_fast_edges > 0
-        )
-        if (
-            rec is not None
-            and not _is_placeholder_module(rec)
-            and not redundant_fold
-            and not self._text_conn_fast
-        ):
-            body_needs_fold = rec.needs_generate_fold
-            if not body_needs_fold and avoid:
-                try:
-                    from hierwalk.generate_fold import needs_generate_fold as _body_has_generate
-
-                    text = self._raw_text_for_inst_find(avoid)
-                    _hdr, body = _module_header_body(text, parent_module)
-                    body_needs_fold = _body_has_generate(body)
-                except OSError:
-                    body_needs_fold = False
-            if body_needs_fold and avoid:
-                key = str(Path(avoid).resolve())
-                if key not in self._validated_memory:
-                    scanned = self.tier1_scan_file(key)
-                    if parent_module in scanned:
-                        self._apply_file_modules(key, scanned)
-                        rec = self._index.get_module(parent_module)
-                        pmap = resolve_param_map(rec.raw_params, parent=parent_ctx)
-            t_tier1_fold = time.perf_counter()
-            tier1_edge_list = self._parent_instance_edges(parent_module, parent_ctx)
-            tier1_edges = len(tier1_edge_list)
-            tier1_edge = self._edge_matches(
-                tier1_edge_list,
-                inst_leaf,
-                pmap,
-                parent_module=parent_module,
-                parent_ctx=parent_ctx,
-            )
-            tier1_ms = self._elapsed_ms(t_tier1_fold)
-            if tier1_edge is not None:
-                if rec is not None and rec.file_path:
-                    self._prefer_file[parent_module] = resolved_path_str(rec.file_path)
-                self._register_inst_edges(parent_module, parent_ctx, [tier1_edge])
-                self._trace(
-                    f"pw-db inst-resolve done {parent_module}.{inst_leaf} "
-                    f"path=tier1-fold edges={tier1_edges} tier1_fold_ms={tier1_ms:.1f} "
-                    f"ms={self._elapsed_ms(t_resolve):.1f}"
-                )
-                return tier1_edge
-            self._trace(
-                f"pw-db inst-resolve tier1-fold miss {parent_module}.{inst_leaf} "
-                f"edges={tier1_edges} tier1_fold_ms={tier1_ms:.1f} "
-                f"since_enter_ms={self._elapsed_ms(t_resolve):.1f}"
-            )
-        elif redundant_fold or self._text_conn_fast:
-            reason = "text-conn-fast" if self._text_conn_fast else "redundant-fast"
-            self._trace(
-                f"pw-db inst-resolve tier1-fold skip {parent_module}.{inst_leaf} "
-                f"reason={reason} edges={tier1_fast_edges} "
-                f"since_enter_ms={self._elapsed_ms(t_resolve):.1f}"
-            )
-
-        t_scope = time.perf_counter()
+        scope_anchor = avoid
         scoped_pool = (
             self._scoped_pool_for_policy(scope_anchor, policy=policy)
             if scope_anchor
             else None
         )
-        scope_ms = self._elapsed_ms(t_scope)
-        self._trace(
-            f"pw-db inst-resolve tier0-candidates {parent_module}.{inst_leaf} "
-            f"file={avoid_name} scope_ms={scope_ms:.1f} "
-            f"since_enter_ms={self._elapsed_ms(t_resolve):.1f}"
-        )
-        t_tier0 = time.perf_counter()
         candidates = self._order_candidate_files(
             parent_module,
             avoid_file=avoid,
             scope_anchor=scope_anchor,
             policy=policy,
-        )
-        tier0_ms = self._elapsed_ms(t_tier0)
-        self._trace(
-            f"pw-db inst-resolve tier0-done {parent_module}.{inst_leaf} "
-            f"candidates={len(candidates)} tier0_ms={tier0_ms:.1f} "
-            f"since_enter_ms={self._elapsed_ms(t_resolve):.1f}"
         )
         scope_note = ""
         if scope_anchor and scoped_pool is not None:
@@ -2876,6 +2098,26 @@ class PathWalkModuleDb:
             f"pw-db edge policy={policy} {parent_module}.{inst_leaf} "
             f"candidates={len(candidates)}{scope_note}"
         )
+        if avoid:
+            selective = self._selective_child_edge_lookup(
+                parent_module,
+                parent_ctx,
+                inst_leaf,
+                avoid,
+            )
+            if selective is not None:
+                self._apply_selective_edge_hit(
+                    avoid,
+                    parent_module,
+                    selective,
+                    parent_ctx=parent_ctx,
+                )
+                self._trace(
+                    f"pw-db   edge selective hit {parent_module}.{inst_leaf} "
+                    f"via {Path(avoid).name} -> child {selective.child_module!r}"
+                )
+                self._warm_tier1_background(avoid)
+                return selective
 
         if policy == RESOLVE_CONFIDENT and scope_anchor and not candidates:
             self._enqueue_defer(
@@ -2898,12 +2140,7 @@ class PathWalkModuleDb:
             tried.add(avoid)
         max_pass = 2 if policy == RESOLVE_CONFIDENT else 3
         for pass_idx in range(max_pass):
-            trial_files = self._limit_resolve_candidates(
-                candidates,
-                policy=policy,
-                label=f"{parent_module}.{inst_leaf} ",
-            )
-            for fpath in trial_files:
+            for fpath in candidates:
                 if fpath in tried:
                     continue
                 tried.add(fpath)
@@ -2918,7 +2155,6 @@ class PathWalkModuleDb:
                         fpath,
                         parent_module,
                         selective,
-                        inst_leaf=inst_leaf,
                         parent_ctx=parent_ctx,
                     )
                     self._trace(
@@ -2926,27 +2162,8 @@ class PathWalkModuleDb:
                         f"via {Path(fpath).name} -> child {selective.child_module!r}"
                     )
                     self._warm_tier1_background(fpath)
-                    self._trace(
-                        f"pw-db inst-resolve done {parent_module}.{inst_leaf} "
-                        f"path=selective-candidate ms={self._elapsed_ms(t_resolve):.1f}"
-                    )
                     return selective
-                if self._text_conn_fast:
-                    self._trace(
-                        f"pw-db inst-resolve tier1 skip {parent_module}.{inst_leaf} "
-                        f"file={Path(fpath).name} reason=text-conn-fast"
-                    )
-                    continue
-                self._trace(
-                    f"pw-db inst-resolve tier1 enter {parent_module}.{inst_leaf} "
-                    f"file={Path(fpath).name}"
-                )
-                t_t1 = time.perf_counter()
                 modules = self.tier1_scan_file(fpath)
-                self._trace(
-                    f"pw-db inst-resolve tier1 done {parent_module}.{inst_leaf} "
-                    f"file={Path(fpath).name} ms={self._elapsed_ms(t_t1):.1f}"
-                )
                 hit = modules.get(parent_module)
                 if hit is None:
                     self._trace(
@@ -2970,23 +2187,11 @@ class PathWalkModuleDb:
                 if edge is not None:
                     self._apply_file_modules(fpath, modules)
                     self._prefer_file[parent_module] = fpath
-                    self._register_provisional_inst_map(
-                        parent_module,
-                        inst_leaf,
-                        edge,
-                        fpath,
-                        parent_ctx=parent_ctx,
-                        map_source="tier1",
-                    )
                     self._trace(
                         f"pw-db   edge hit {parent_module}.{inst_leaf} "
                         f"via {Path(fpath).name} -> child {edge.child_module!r}"
                     )
                     self.write_module_index_snapshot()
-                    self._trace(
-                        f"pw-db inst-resolve done {parent_module}.{inst_leaf} "
-                        f"path=tier1 ms={self._elapsed_ms(t_resolve):.1f}"
-                    )
                     return edge
                 insts = ", ".join(
                     f"{e.inst_name}->{e.child_module}" for e in tier_edges[:12]
@@ -3000,7 +2205,6 @@ class PathWalkModuleDb:
                     pending = self._scan_remaining_sources_tier0(
                         scoped_pool,
                         target_module=parent_module,
-                        policy=policy,
                     )
                     if pending > 0:
                         expand_label = (
@@ -3023,7 +2227,6 @@ class PathWalkModuleDb:
                 pending = self._scan_remaining_sources_tier0(
                     None,
                     target_module=parent_module,
-                    policy=policy,
                 )
                 refreshed = self._recovery_pass1_candidates(
                     parent_module,
@@ -3053,38 +2256,13 @@ class PathWalkModuleDb:
                     reason="no-edge-in-child-fl",
                 )
             )
-        self._trace(
-            f"pw-db inst-resolve done {parent_module}.{inst_leaf} "
-            f"miss ms={self._elapsed_ms(t_resolve):.1f}"
-        )
         return None
 
     def find_module_decl_file(self, module_name: str) -> Optional[str]:
-        """
-        Locate a module declaration via tier-0 regex only.
-
-        Scans ``_sources`` in filelist expansion order one file at a time and
-        stops on first hit (e.g. ``allinst.v`` at the root of the top .f).
-        Does not batch-scan the whole design or build a global regex queue.
-        """
-        if module_name in self._module_to_files:
-            files = list(self._module_to_files.get(module_name, []))
-            preferred = self._prefer_file.get(module_name)
-            if preferred and preferred in files:
-                return preferred
-            return files[0] if files else None
-
-        self._set_phase("mapping", detail=f"top {module_name}")
-        for src in self._sources:
-            key = str(Path(src).resolve())
-            if key in self._regex_scanned:
-                continue
-            self._tier0_scan_file(key)
-            if module_name not in self._module_to_files:
-                continue
-            files = list(self._module_to_files.get(module_name, []))
-            preferred = self._prefer_file.get(module_name)
-            if preferred and preferred in files:
-                return preferred
-            return files[0] if files else None
-        return None
+        files = self._ensure_regex_candidates(module_name)
+        if not files:
+            return None
+        preferred = self._prefer_file.get(module_name)
+        if preferred and preferred in files:
+            return preferred
+        return files[0]

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 
 @dataclass
@@ -86,7 +86,6 @@ class FlatRow:
     param_ctx: Dict[str, str] = field(default_factory=dict)
     refine_status: str = ""
     activation: str = ""
-    walk_note: str = ""
 
 
 @dataclass

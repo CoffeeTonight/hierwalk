@@ -18,8 +18,6 @@ from typing import Callable, Dict, List, Mapping, Optional, Sequence, Set, TextI
 
 from hierwalk.connect_endpoints import (
     DeclNetCache,
-    _cache_note_decl_net_hit,
-    _decl_net_cache_key,
     _lca,
     _module_body_for_row,
     _net_exists_in_module,
@@ -28,17 +26,13 @@ from hierwalk.connect_endpoints import (
     net_exists_in_module_fast,
     wire_tail_exists_fast,
 )
-from hierwalk.connect_scan import net_base_in_assign_probe, net_base_in_port_map_probe
+from hierwalk.connect_expand import expand_check_to_pairs
 from hierwalk.connect_request import ConnectivityRequest
 from hierwalk.connectivity import ConnectivityBatchResult, ConnectivitySession
 from hierwalk.filelist import FilelistResult
-from hierwalk.ignore_path import (
-    resolve_ignore_path_patterns,
-    resolved_path_str,
-    source_path_matches,
-)
+from hierwalk.ignore_path import resolve_ignore_path_patterns, source_path_matches
 from hierwalk.index import DesignIndex, _ctx_key
-from hierwalk.inst_scan import expand_inst_names
+from hierwalk.inst_scan import expand_inst_names, probe_inst_in_module_text
 from hierwalk.lazy_scope import endpoint_specs_from_request, hierarchy_prefixes
 from hierwalk.library_scan import scan_library_modules
 from hierwalk.models import FlatRow, InstanceEdge
@@ -47,7 +41,6 @@ from hierwalk.hierarchy_log import (
     emit_path_walk_log,
     emit_path_walk_spine_log,
     format_path_walk_miss_line,
-    format_rtl_token,
     format_signal_tail_line,
     open_path_walk_trace_log,
     path_walk_child_miss_reason,
@@ -254,7 +247,6 @@ class PathWalkState:
     _module_body_cache: Dict[str, str] = field(default_factory=dict, repr=False)
     _param_ctx_cache: Dict[str, Mapping[str, str]] = field(default_factory=dict, repr=False)
     _walk_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
-    _last_raw_inst_probe_t: Optional[float] = field(default=None, repr=False)
 
     def _trace_streams(self) -> List[TextIO]:
         out: List[TextIO] = []
@@ -295,17 +287,11 @@ class PathWalkState:
             return
         message = f"{action} {path}  module={row.module}"
         if row.file:
-            message += f"  {format_rtl_token(row.file)}"
+            message += f"  rtl={row.file}"
         if row.via_filelist:
             message += f"  via_filelist={row.via_filelist}"
         if row.filelist_chain:
             message += f"  filelist_chain={row.filelist_chain}"
-        if row.refine_status:
-            message += f"  refine={row.refine_status}"
-        if row.activation:
-            message += f"  activation={row.activation}"
-        if row.walk_note:
-            message += f"  note={row.walk_note}"
         if row.stop_reason:
             message += f"  stop={row.stop_reason}"
         self._emit_walk(message)
@@ -473,9 +459,6 @@ class PathWalkState:
         file_path: str,
         stop_reason: str,
         param_ctx: Mapping[str, str],
-        refine_status: str = "",
-        activation: str = "",
-        walk_note: str = "",
     ) -> None:
         if path in self.rows_by_path:
             return
@@ -490,9 +473,6 @@ class PathWalkState:
             via_filelist=self.index.filelist_for(file_path),
             filelist_chain=self.index.filelist_chain_for(file_path),
             param_ctx=dict(param_ctx),
-            refine_status=refine_status,
-            activation=activation,
-            walk_note=walk_note,
         )
         if parent:
             self._children_by_parent.setdefault(parent, set()).add(path)
@@ -751,10 +731,6 @@ class PathWalkState:
         rec = self.index.get_module(edge.child_module)
         if rec is None:
             return None
-        row_file = self.mod_db._parent_body_file(
-            edge.child_module,
-            rec.file_path or parent.file or "",
-        )
         pmap = resolve_param_map(
             rec.raw_params,
             overrides=edge.param_overrides,
@@ -767,7 +743,7 @@ class PathWalkState:
             parent.depth + 1,
             parent_path,
             inst_leaf=inst_leaf,
-            file_path=row_file,
+            file_path=rec.file_path,
             stop_reason=stop,
             param_ctx=pmap,
         )
@@ -779,57 +755,6 @@ class PathWalkState:
         if not remainder:
             return ""
         return remainder.split(".", 1)[0]
-
-    @staticmethod
-    def _looks_like_deferred_inst_segment(miss_leaf: str) -> bool:
-        """Generate block or array index segment — defer precise fold to refine pass."""
-        if not miss_leaf:
-            return False
-        return "[" in miss_leaf or "]" in miss_leaf
-
-    def _try_provisional_scope_step(
-        self,
-        parent_path: str,
-        miss_leaf: str,
-        *,
-        row: Optional[FlatRow],
-    ) -> bool:
-        """
-        Pass through generate/array path segments without blocking the walk.
-
-        Only hierarchy segments with explicit indices (``[``/``]`` in *miss_leaf*)
-        are provisionally admitted; bare instance prefixes stay hard misses until
-        refine. Pass/fail and ``ifdef`` activation are resolved later.
-        """
-        if not row or not miss_leaf:
-            return False
-        if not self._looks_like_deferred_inst_segment(miss_leaf):
-            return False
-        child_path = f"{parent_path}.{miss_leaf}"
-        if child_path in self.rows_by_path:
-            return True
-        body_file = self.mod_db._parent_body_file(row.module, row.file or "")
-        note = (
-            "provisional generate/array scope; structural pass-through — "
-            "refine pass + ifdef activation audit pending"
-        )
-        self._add_row(
-            row.module,
-            child_path,
-            row.depth + 1,
-            parent_path,
-            inst_leaf=miss_leaf,
-            file_path=body_file or row.file,
-            stop_reason="",
-            param_ctx=dict(row.param_ctx),
-            refine_status="provisional",
-            walk_note=note,
-        )
-        self._emit_walk(
-            f"walk provisional-pass scope={parent_path} leaf={miss_leaf!r} "
-            f"target={child_path}"
-        )
-        return True
 
     @staticmethod
     def _is_folded_inst_prefix_miss(
@@ -891,97 +816,32 @@ class PathWalkState:
             return (time.perf_counter() - t0) * 1000.0
 
         body = self._cached_module_body(row)
-        ctx = self._cached_param_ctx(row)
         if not is_module_local_signal_name(signal_name):
             return None, _elapsed()
-        base = signal_name.split("[", 1)[0].split(".", 1)[0]
-
-        # Fork-join cheap probes: first wire hit returns immediately.
-        with ThreadPoolExecutor(max_workers=3) as ex:
-            f_wire0 = ex.submit(
-                wire_tail_exists_fast,
-                body,
-                signal_name,
-                param_ctx=row.param_ctx or None,
-            )
-            f_wire1 = ex.submit(
-                wire_tail_exists_fast,
-                body,
-                signal_name,
-                param_ctx=ctx,
-            )
-            f_port = ex.submit(
-                _port_exists,
-                self.index,
-                row,
-                signal_name,
-                top=self.top,
-                param_ctx=ctx,
-            )
-            port_hit = False
-            for fut in as_completed((f_wire0, f_wire1, f_port)):
-                if fut in (f_wire0, f_wire1):
-                    try:
-                        if fut.result():
-                            return "wire", _elapsed()
-                    except Exception:
-                        pass
-                elif fut is f_port:
-                    try:
-                        port_hit = bool(fut.result())
-                    except Exception:
-                        port_hit = False
-        if port_hit:
+        if wire_tail_exists_fast(body, signal_name, param_ctx=row.param_ctx or None):
+            return "wire", _elapsed()
+        ctx = self._cached_param_ctx(row)
+        if wire_tail_exists_fast(body, signal_name, param_ctx=ctx):
+            return "wire", _elapsed()
+        if _port_exists(
+            self.index,
+            row,
+            signal_name,
+            top=self.top,
+            param_ctx=ctx,
+        ):
             return "port", _elapsed()
-
-        if self.mod_db.text_conn_fast:
-            return None, _elapsed()
-
-        cache = self._decl_net_cache
-        key = _decl_net_cache_key(row, ctx)
-        if cache is not None and key in cache:
-            names = cache[key]
-            if signal_name in names or base in names:
-                return "wire", _elapsed()
-
-        # Targeted deep probes in parallel before full decl scan.
-        with ThreadPoolExecutor(max_workers=2) as ex:
-            f_assign = ex.submit(net_base_in_assign_probe, body, base, param_map=ctx)
-            f_pmap = ex.submit(net_base_in_port_map_probe, body, base, param_map=ctx)
-            for fut in as_completed((f_assign, f_pmap)):
-                try:
-                    if fut.result():
-                        _cache_note_decl_net_hit(cache, key, signal_name, base)
-                        return "wire", _elapsed()
-                except Exception:
-                    pass
-
         if net_exists_in_module_fast(
             self.index,
             row,
             signal_name,
             top=self.top,
-            cache=cache,
+            cache=self._decl_net_cache,
             param_ctx=ctx,
             body=body,
-            prechecked=True,
         ):
             return "wire", _elapsed()
         return None, _elapsed()
-
-    @staticmethod
-    def _probe_raw_inst_in_source(miss_leaf: str, probe_rtl: str) -> Tuple[bool, float]:
-        if not probe_rtl or not miss_leaf:
-            return False, 0.0
-        from hierwalk.inst_scan import probe_inst_in_module_text
-
-        t0 = time.perf_counter()
-        try:
-            text = Path(probe_rtl).read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            return False, (time.perf_counter() - t0) * 1000.0
-        hit = probe_inst_in_module_text(text, miss_leaf)
-        return hit, (time.perf_counter() - t0) * 1000.0
 
     def _emit_signal_tail(
         self,
@@ -1433,13 +1293,7 @@ class PathWalkState:
         items = self.mod_db.take_defer_queue()
         if not items:
             return 0, 0, []
-        since_probe = ""
-        if self._last_raw_inst_probe_t is not None:
-            since_probe = (
-                f" since_probe_ms="
-                f"{(time.perf_counter() - self._last_raw_inst_probe_t) * 1000.0:.1f}"
-            )
-        self._emit_walk(f"recovery-pass start defer={len(items)}{since_probe}")
+        self._emit_walk(f"recovery-pass start defer={len(items)}")
         recovered, skipped_blocked, missed = self._partition_recovery_batch(items)
         skip_targets = _recovery_skip_ensure_targets(
             recovered,
@@ -1575,8 +1429,6 @@ class PathWalkState:
                 snap = self.mod_db.module_to_files_snapshot().get(parent_mod, [])
                 parent_rec = self.index.get_module(parent_mod) if parent_mod else None
                 edges: List[InstanceEdge] = []
-                hint_edges = 0
-                t_prep = time.perf_counter()
                 if parent_rec is not None:
                     ctx = row.param_ctx if row else {}
                     edges = self.index.instances_for_walk(parent_mod, ctx)
@@ -1589,64 +1441,23 @@ class PathWalkState:
                             miss_leaf,
                             row.file,
                         )
-                        hint_edges = len(edges)
-                prep_ms = (time.perf_counter() - t_prep) * 1000.0
-                self._emit_walk(
-                    f"walk miss-prep scope={cur} leaf={miss_leaf!r} "
-                    f"edges={len(edges)} hint={hint_edges} ms={prep_ms:.1f}"
-                )
                 if self._is_folded_inst_prefix_miss(miss_leaf, edges):
-                    if self._try_provisional_scope_step(cur, miss_leaf, row=row):
-                        cur = f"{cur}.{miss_leaf}"
-                        remainder = remainder[len(miss_leaf) :].lstrip(".")
-                        continue
                     return False
-                probe_rtl = ""
-                if parent_rec is not None and miss_leaf:
-                    probe_rtl = self.mod_db._parent_body_file(
-                        parent_mod,
-                        row.file if row else "",
-                    )
+                if self._is_signal_or_port_tail_miss(cur, remainder, target_path=path):
+                    return False
                 raw_source_has_inst = False
-                raw_probe_done = False
-                probe_ms = 0.0
-                fork_workers = 2 if probe_rtl and miss_leaf else 1
-                with ThreadPoolExecutor(max_workers=fork_workers) as ex:
-                    fut_signal = ex.submit(
-                        self._resolve_signal_tail,
-                        cur,
-                        remainder,
-                        target_path=path,
-                    )
-                    fut_raw = (
-                        ex.submit(
-                            self._probe_raw_inst_in_source,
-                            miss_leaf,
-                            probe_rtl,
+                if parent_rec is not None and parent_rec.file_path and miss_leaf:
+                    try:
+                        body = Path(parent_rec.file_path).read_text(
+                            encoding="utf-8", errors="ignore"
                         )
-                        if probe_rtl and miss_leaf
-                        else None
-                    )
-                    pending = [f for f in (fut_signal, fut_raw) if f is not None]
-                    for fut in as_completed(pending):
-                        if fut is fut_signal and fut.result():
-                            return False
-                    if fut_signal.result():
-                        return False
-                    if fut_raw is not None:
-                        raw_source_has_inst, probe_ms = fut_raw.result()
-                        raw_probe_done = True
-                        self._last_raw_inst_probe_t = time.perf_counter()
-                        self._emit_walk(
-                            f"walk raw-inst-probe scope={cur} leaf={miss_leaf!r} "
-                            f"hit={raw_source_has_inst} rtl={Path(probe_rtl).name} "
-                            f"ms={probe_ms:.1f}"
+                        parent_row = self.rows_by_path.get(cur)
+                        param_map = parent_row.param_ctx if parent_row else {}
+                        raw_source_has_inst = probe_inst_in_module_text(
+                            body, miss_leaf, param_map=param_map
                         )
-                if self._try_provisional_scope_step(cur, miss_leaf, row=row):
-                    cur = f"{cur}.{miss_leaf}"
-                    remainder = remainder[len(miss_leaf) :].lstrip(".")
-                    continue
-                t_tail = time.perf_counter()
+                    except OSError:
+                        raw_source_has_inst = False
                 self._queue_walk_miss(
                     cur,
                     miss_leaf,
@@ -1660,13 +1471,7 @@ class PathWalkState:
                     ),
                     target_path=path,
                 )
-                if not self.mod_db.text_conn_fast:
-                    self.mod_db.write_module_index_snapshot()
-                tail_ms = (time.perf_counter() - t_tail) * 1000.0
-                self._emit_walk(
-                    f"walk miss-tail scope={cur} leaf={miss_leaf!r} "
-                    f"defer={self.mod_db.defer_count()} ms={tail_ms:.1f}"
-                )
+                self.mod_db.write_module_index_snapshot()
                 return False
             attached = self._attach_child(cur, inst_name, edge, policy=policy)
             if attached is None:
@@ -1759,8 +1564,6 @@ def _walk_target_from_spec(spec: str, state: PathWalkState) -> str:
         if row is None:
             continue
         port = ".".join(parts[i:])
-        if not is_module_local_signal_name(port):
-            continue
         if _port_exists(state.index, row, port, top=state.top):
             return hier
         if net_exists_in_module_fast(
@@ -1827,7 +1630,7 @@ def _inst_path_from_spec(
         nxt = f"{cur}.{seg}"
         if nxt not in lookup:
             row = lookup.get(cur)
-            if row is not None and is_module_local_signal_name(remainder):
+            if row is not None:
                 if _port_exists(state.index, row, remainder, top=state.top):
                     return cur
                 if net_exists_in_module_fast(
@@ -2209,7 +2012,6 @@ def _walk_endpoint_specs(
     if not unique:
         return
 
-    t_specs = time.perf_counter()
     walked_targets: Set[str] = set()
     root = _path_trie_from_specs(unique, top=state.top)
     fanout = _path_trie_max_fanout(root)
@@ -2235,19 +2037,6 @@ def _walk_endpoint_specs(
         spec_targets=spec_targets,
         policy=policy,
     )
-    defer_n = state.mod_db.defer_count()
-    if defer_n or state._last_raw_inst_probe_t is not None:
-        since_probe = ""
-        if state._last_raw_inst_probe_t is not None:
-            since_probe = (
-                f" since_probe_ms="
-                f"{(time.perf_counter() - state._last_raw_inst_probe_t) * 1000.0:.1f}"
-            )
-        state._emit_walk(
-            f"walk endpoint-specs done unique={len(unique)} policy={policy} "
-            f"defer={defer_n} ms={(time.perf_counter() - t_specs) * 1000.0:.1f}"
-            f"{since_probe}"
-        )
 
 
 def _sorted_prefixes(specs: Sequence[str]) -> List[str]:
@@ -2332,14 +2121,13 @@ def acquire_path_walk_session(
     trace_stream: Optional[TextIO] = None,
     trace_log_fh: Optional[TextIO] = None,
     jobs: int = 0,
-    diagnostic_inst_trace: bool = False,
 ) -> PathWalkSuiteSession:
     global _suite_session
     from hierwalk.manifest import hash_paths_parallel, set_digest_scope
 
     defines = dict(fl.defines)
     defines.update(extra_defines or {})
-    sources = [resolved_path_str(p) for p in fl.source_files]
+    sources = [str(Path(p).resolve()) for p in fl.source_files]
     path_digests = hash_paths_parallel(sources, jobs=jobs)
     session_key = path_walk_session_key(
         fl,
@@ -2361,7 +2149,6 @@ def acquire_path_walk_session(
             state._trace_log = trace_log_fh
         _wire_db_trace_to_state(_suite_session.mod_db, state)
         _suite_session.mod_db._on_progress = on_progress
-        _suite_session.mod_db._diagnostic_inst_trace = diagnostic_inst_trace
         return _suite_session
 
     if _suite_session is not None:
@@ -2383,7 +2170,6 @@ def acquire_path_walk_session(
         trace_log_fh=trace_log_fh,
         path_digests=path_digests,
         jobs=jobs,
-        diagnostic_inst_trace=diagnostic_inst_trace,
     )
     tops = resolve_top_modules(index, top=top, filelist_tops=fl.top_modules)
     top_name = tops[0]
@@ -2492,15 +2278,24 @@ def _filter_specs_for_recovery_rewalk(
     return sorted({item.target_path for item in recovered if item.target_path})
 
 
-def _drain_deferred_recovery_passes(
+def _walk_specs_with_recovery(
     state: PathWalkState,
+    specs: Sequence[str],
     *,
     jobs: int = 0,
 ) -> None:
-    """Run recovery passes + targeted endpoint re-walk until defer queue stalls."""
+    """Walk endpoint specs; best-effort defer drain via recovery passes.
+
+    Re-walks only endpoint specs touching recovered hierarchy prefixes when a pass
+    recovers defer items (``recovered > 0``), not on requeue-only passes. Exits when
+    a pass makes no progress or the defer queue depth does not shrink. Remaining
+    defers are logged via ``recovery drain stalled``; path-walk/connect may proceed
+    with partial hierarchy.
+    """
     from hierwalk.perf import path_walk_recovery_pass_cap
 
     spec_targets = state._spec_targets
+    _walk_endpoint_specs(state, specs, jobs=jobs, spec_targets=spec_targets)
     pass_cap = path_walk_recovery_pass_cap()
     while state.mod_db.defer_count() and state.stats.recovery_passes < pass_cap:
         defer_before = state.mod_db.defer_count()
@@ -2535,26 +2330,6 @@ def _drain_deferred_recovery_passes(
             f"recovery drain stalled defer_remaining={state.mod_db.defer_count()} "
             f"passes={state.stats.recovery_passes}/{pass_cap}"
         )
-
-
-def _walk_specs_with_recovery(
-    state: PathWalkState,
-    specs: Sequence[str],
-    *,
-    jobs: int = 0,
-) -> None:
-    """Walk endpoint specs; best-effort defer drain via recovery passes.
-
-    Re-walks only endpoint specs touching recovered hierarchy prefixes when a pass
-    recovers defer items (``recovered > 0``), not on requeue-only passes. Exits when
-    a pass makes no progress or the defer queue depth does not shrink. Remaining
-    defers are logged via ``recovery drain stalled``; path-walk/connect may proceed
-    with partial hierarchy.
-    """
-    spec_targets = state._spec_targets
-    _walk_endpoint_specs(state, specs, jobs=jobs, spec_targets=spec_targets)
-    # text_conn_fast still skips tier1 prefetch/activation; selective recovery is cheap.
-    _drain_deferred_recovery_passes(state, jobs=jobs)
 
 
 def _extend_path_walk_for_specs(
@@ -2601,31 +2376,24 @@ def _extend_path_walk_connect(
         )
     _walk_specs_with_recovery(state, specs, jobs=jobs)
     seen_lca: Set[Tuple[str, str]] = set()
-    t_lca = time.perf_counter()
-    lca_n = 0
     for chk in request.checks:
-        a = _cached_walk_target_from_spec(chk.endpoint_a, state)
-        b = _cached_walk_target_from_spec(chk.endpoint_b, state)
-        key = (a, b)
-        if key in seen_lca:
-            continue
-        seen_lca.add(key)
-        if state._is_walk_blocked(a) and state._is_walk_blocked(b):
-            continue
-        state.ensure_lca_subtree(a, b)
-        lca_n += 1
-    if lca_n:
-        state._emit_walk(
-            f"walk lca-done pairs={lca_n} ms={(time.perf_counter() - t_lca) * 1000.0:.1f}"
+        pairs = expand_check_to_pairs(
+            chk.endpoint_a,
+            chk.endpoint_b,
+            check_id=chk.check_id,
+            expand=chk.expand,
         )
-    t_flush = time.perf_counter()
-    pending_n = len(state._pending_misses)
+        for pair in pairs:
+            a = _cached_walk_target_from_spec(pair.endpoint_a, state)
+            b = _cached_walk_target_from_spec(pair.endpoint_b, state)
+            key = (a, b)
+            if key in seen_lca:
+                continue
+            seen_lca.add(key)
+            if state._is_walk_blocked(a) and state._is_walk_blocked(b):
+                continue
+            state.ensure_lca_subtree(a, b)
     state.flush_pending_misses()
-    if pending_n:
-        state._emit_walk(
-            f"walk flush-misses pending={pending_n} "
-            f"ms={(time.perf_counter() - t_flush) * 1000.0:.1f}"
-        )
 
 
 def _path_walk_trace_emit(
@@ -2634,9 +2402,8 @@ def _path_walk_trace_emit(
     trace_stream: Optional[TextIO] = None,
     trace_log_fh: Optional[TextIO] = None,
     on_progress: Optional[Callable[[str], None]] = None,
-    force: bool = False,
 ) -> None:
-    if not message or (not force and not path_walk_trace_show_message(message)):
+    if not message or not path_walk_trace_show_message(message):
         return
     streams: List[TextIO] = []
     if trace_stream is not None:
@@ -2652,22 +2419,6 @@ def _path_walk_trace_emit(
 
 def _wire_db_trace_to_state(mod_db: PathWalkModuleDb, state: PathWalkState) -> None:
     mod_db._on_trace = state._emit_walk
-
-
-_path_walk_phase_emit: Optional[Callable[[str], None]] = None
-
-
-def bind_path_walk_phase_emit(
-    emit: Optional[Callable[[str], None]],
-) -> None:
-    """Register walk trace sink for connect-COI / comb-build phases."""
-    global _path_walk_phase_emit
-    _path_walk_phase_emit = emit
-
-
-def emit_path_walk_phase(message: str) -> None:
-    if _path_walk_phase_emit is not None:
-        _path_walk_phase_emit(message)
 
 
 def build_path_walk_state_from_specs(
@@ -2766,13 +2517,8 @@ def run_path_walk_index(
     trace_log_path: Optional[Path] = None,
     reuse_suite_session: bool = False,
     jobs: int = 0,
-    walk_phase: str = "both",
 ) -> Tuple[DesignIndex, PathWalkState, str]:
     """On-demand index + hierarchy rows for arbitrary endpoint specs."""
-    phase = walk_phase if walk_phase in ("text", "logical", "both") else "both"
-    do_text = phase in ("text", "both")
-    do_logical = phase in ("logical", "both")
-    spec_list = [str(s).strip() for s in specs if str(s).strip()]
     trace_log_fh: Optional[TextIO] = None
     opened_log = False
     if trace_log_path is not None:
@@ -2796,20 +2542,15 @@ def run_path_walk_index(
                 jobs=jobs,
             )
             state = session.state
+            _extend_path_walk_for_specs(
+                state,
+                specs,
+                expand_subtrees=expand_subtrees,
+                on_progress=on_progress,
+                jobs=jobs,
+            )
             index = session.index
             top_name = session.top_name
-            if do_text:
-                if not do_logical:
-                    state.mod_db.set_text_conn_fast(True)
-                _extend_path_walk_for_specs(
-                    state,
-                    spec_list,
-                    expand_subtrees=expand_subtrees,
-                    on_progress=on_progress,
-                    jobs=jobs,
-                )
-            elif do_logical:
-                finalize_logical_walk_for_specs(state, spec_list, jobs=jobs)
         else:
             defines = dict(fl.defines)
             defines.update(extra_defines or {})
@@ -2830,14 +2571,10 @@ def run_path_walk_index(
             )
             tops = resolve_top_modules(index, top=top, filelist_tops=fl.top_modules)
             top_name = tops[0]
-            if do_text and not do_logical:
-                mod_db.set_text_conn_fast(True)
-            elif do_logical and not do_text:
-                mod_db.set_text_conn_fast(False)
             state = build_path_walk_state_from_specs(
                 index,
                 top_name,
-                spec_list,
+                specs,
                 mod_db,
                 on_progress=on_progress,
                 trace_stream=trace_stream,
@@ -2845,21 +2582,18 @@ def run_path_walk_index(
                 close_trace_log=False,
                 jobs=jobs,
             )
-            if do_logical and not do_text:
-                finalize_logical_walk_for_specs(state, spec_list, jobs=jobs)
-        if do_text:
-            extra_roots = list(expand_subtrees)
-            for spec in spec_list:
-                inst = _cached_walk_target_from_spec(spec, state)
-                if inst and inst != top_name and inst not in extra_roots:
-                    extra_roots.append(inst)
-            for subtree_root in extra_roots:
-                root = str(subtree_root).strip()
-                if not root:
-                    continue
-                if state.ensure_path(root):
-                    state._expand_subtree(root)
-                    state.stats.subtrees_expanded += 1
+        extra_roots = list(expand_subtrees)
+        for spec in specs:
+            inst = _cached_walk_target_from_spec(spec, state)
+            if inst and inst != top_name and inst not in extra_roots:
+                extra_roots.append(inst)
+        for subtree_root in extra_roots:
+            root = str(subtree_root).strip()
+            if not root:
+                continue
+            if state.ensure_path(root):
+                state._expand_subtree(root)
+                state.stats.subtrees_expanded += 1
 
         state._sync_db_stats()
         if on_progress:
@@ -2869,143 +2603,18 @@ def run_path_walk_index(
                 f"tier0={state.stats.files_regex_scanned} tier1={state.stats.files_validated} "
                 f"cache={state.stats.cache_regex_hits}+{state.stats.cache_validated_hits}"
             )
-        if do_text and not do_logical:
-            if state.mod_db.defer_count() and not state.stats.recovery_stalled:
-                _drain_deferred_recovery_passes(state)
-            _drain_path_walk_workers(state.mod_db, text_fast=True)
-        elif do_logical and not do_text and not reuse_suite_session:
-            pass
-        else:
-            if state.mod_db.defer_count() and not state.stats.recovery_stalled:
-                state.run_recovery_pass()
-            _drain_path_walk_workers(state.mod_db)
+        if state.mod_db.defer_count() and not state.stats.recovery_stalled:
+            state.run_recovery_pass()
+        _drain_path_walk_workers(state.mod_db)
         return index, state, top_name
     finally:
         if opened_log and trace_log_fh is not None:
             trace_log_fh.close()
 
 
-def _reset_specs_for_logical_rewalk(
-    state: PathWalkState,
-    specs: Sequence[str],
-) -> None:
-    """Drop cached text-phase walk targets so logical pass re-walks with recovery."""
-    for spec in specs:
-        text = str(spec).strip()
-        if not text:
-            continue
-        state._spec_targets.pop(text, None)
-        inst = _walk_target_from_spec(text, state)
-        if not inst:
-            continue
-        state._unblock_walk_prefix(inst)
-        for prefix in hierarchy_prefixes([inst]):
-            state._unblock_walk_prefix(prefix)
-
-
-def _finalize_walk_endpoint_targets(
-    state: PathWalkState,
-    specs: Sequence[str],
-    *,
-    log_label: str = "connect",
-) -> None:
-    """Last-chance hierarchy walk so verification sees recovery-resolved paths."""
-    from hierwalk.path_walk_db import RESOLVE_RECOVERY
-
-    targets: List[str] = []
-    seen: Set[str] = set()
-    for spec in specs:
-        text = str(spec).strip()
-        if not text:
-            continue
-        state._spec_targets.pop(text, None)
-        inst = _walk_target_from_spec(text, state)
-        if inst and inst not in seen:
-            seen.add(inst)
-            targets.append(inst)
-    if not targets:
-        return
-    for target in sorted(targets, key=len):
-        state._unblock_walk_prefix(target)
-        for prefix in hierarchy_prefixes([target]):
-            state._unblock_walk_prefix(prefix)
-        if target in state.rows_by_path:
-            continue
-        state.ensure_path(target, policy=RESOLVE_RECOVERY)
-    still_missing = [t for t in targets if t not in state.rows_by_path]
-    if still_missing:
-        state._emit_walk(
-            f"walk finalize-before-{log_label} "
-            f"missing={len(still_missing)} "
-            f"sample={still_missing[0]!r}"
-        )
-
-
-def finalize_logical_walk_for_specs(
-    state: PathWalkState,
-    specs: Sequence[str],
-    *,
-    jobs: int = 0,
-) -> None:
-    """
-    Deferred walk refinement for logical verification: recovery, activation audit.
-    """
-    state.mod_db.set_text_conn_fast(False)
-    spec_list = [str(s).strip() for s in specs if str(s).strip()]
-    if spec_list:
-        _reset_specs_for_logical_rewalk(state, spec_list)
-        _extend_path_walk_for_specs(state, spec_list, jobs=jobs)
-    if state.mod_db.defer_count() and not state.stats.recovery_stalled:
-        _drain_deferred_recovery_passes(state)
-    _drain_path_walk_workers(state.mod_db)
-    _finalize_walk_endpoint_targets(state, spec_list, log_label="verify")
-    state.mod_db.drain_activation_audit(wait=True)
-    state.mod_db.emit_activation_audit_report()
-    sync_activation_to_walk_rows(state.mod_db, state)
-
-
-def finalize_logical_walk_before_connect(
-    state: PathWalkState,
-    request: ConnectivityRequest,
-) -> None:
-    """
-    Deferred walk refinement for logical-conn: recovery, worker drain, endpoint re-walk.
-    """
-    state.mod_db.set_text_conn_fast(False)
-    if state.mod_db.defer_count() and not state.stats.recovery_stalled:
-        _drain_deferred_recovery_passes(state)
-    _drain_path_walk_workers(state.mod_db)
-    finalize_walk_before_connect(state, request)
-
-
-def finalize_walk_before_connect(
-    state: PathWalkState,
-    request: ConnectivityRequest,
-) -> None:
-    """
-    Last-chance hierarchy walk so connect sees the same paths recovery resolved.
-
-    Recovery may update the module index (e.g. hit ``B.v`` for ``u_b``) while
-    endpoint rows still stop at a parent prefix; unblock and re-walk targets.
-    """
-    _finalize_walk_endpoint_targets(
-        state,
-        endpoint_specs_from_request(request),
-        log_label="connect",
-    )
-
-
-def _drain_path_walk_workers(
-    mod_db: PathWalkModuleDb,
-    *,
-    text_fast: bool = False,
-) -> None:
+def _drain_path_walk_workers(mod_db: PathWalkModuleDb) -> None:
     """Ingest tier-0 background work needed during verification (no full DB build)."""
-    mod_db.drain_background_workers(
-        wait_all=True,
-        skip_activation=text_fast,
-        skip_snapshot=text_fast,
-    )
+    mod_db.drain_background_workers(wait_all=True)
 
 
 def build_path_walk_db_full(mod_db: PathWalkModuleDb) -> int:
@@ -3046,7 +2655,6 @@ def create_path_walk_index(
     trace_log_fh: Optional[TextIO] = None,
     path_digests: Mapping[str, str] | None = None,
     jobs: int = 0,
-    diagnostic_inst_trace: bool = False,
 ) -> Tuple[DesignIndex, PathWalkModuleDb]:
     from hierwalk.manifest import hash_paths_parallel, set_digest_scope
     path_patterns, module_patterns, filelist_patterns = resolve_ignore_path_patterns(
@@ -3072,65 +2680,28 @@ def create_path_walk_index(
         library_dirs=[str(p) for p in fl.library_dirs],
         libexts=list(fl.libexts),
         file_via_filelist={
-            resolved_path_str(k): resolved_path_str(v)
+            str(Path(k).resolve()): v
             for k, v in (fl.source_via_filelist or {}).items()
         },
         file_filelist_chain={
-            resolved_path_str(k): v
+            str(Path(k).resolve()): v
             for k, v in (fl.source_filelist_chain or {}).items()
         },
         preprocess_include_dirs=[str(p) for p in fl.include_dirs],
         preprocess_defines=dict(defines),
     )
-    sources = [resolved_path_str(p) for p in fl.source_files]
-    from hierwalk.perf import pw_lazy_startup_digest
-
-    lazy_digest = pw_lazy_startup_digest()
+    sources = [str(Path(p).resolve()) for p in fl.source_files]
     if path_digests is None:
-        t_hash = time.perf_counter()
-        if lazy_digest:
-            path_digests = {}
-            set_digest_scope(path_digests)
-            if diagnostic_inst_trace:
-                _path_walk_trace_emit(
-                    f"pw-db startup digest lazy (skip hash of {len(sources)} source(s))",
-                    trace_stream=trace_stream,
-                    trace_log_fh=trace_log_fh,
-                    on_progress=on_progress,
-                    force=True,
-                )
-            elif on_progress:
-                on_progress(
-                    f"path-walk: lazy digest ({len(sources)} sources; hash on first touch)"
-                )
-        else:
-            if on_progress:
-                on_progress(f"path-walk: hashing {len(sources)} sources")
-            if diagnostic_inst_trace:
-                _path_walk_trace_emit(
-                    f"pw-db startup hashing {len(sources)} source(s)",
-                    trace_stream=trace_stream,
-                    trace_log_fh=trace_log_fh,
-                    on_progress=on_progress,
-                    force=True,
-                )
-            path_digests = hash_paths_parallel(sources, jobs=jobs)
-            set_digest_scope(path_digests)
-            if diagnostic_inst_trace:
-                _path_walk_trace_emit(
-                    f"pw-db startup hashing done ms={(time.perf_counter() - t_hash) * 1000.0:.1f}",
-                    trace_stream=trace_stream,
-                    trace_log_fh=trace_log_fh,
-                    on_progress=on_progress,
-                    force=True,
-                )
+        if on_progress:
+            on_progress(f"path-walk: hashing {len(sources)} sources")
+        path_digests = hash_paths_parallel(sources, jobs=jobs)
+        set_digest_scope(path_digests)
     cache_key = path_walk_db_cache_key(
         sources,
         defines=defines,
         include_dirs=[str(p) for p in fl.include_dirs],
         skip_path_patterns=path_patterns,
         path_digests=path_digests,
-        lazy_source_digests=lazy_digest,
     )
     def _db_trace(msg: str) -> None:
         _path_walk_trace_emit(
@@ -3155,10 +2726,11 @@ def create_path_walk_index(
         on_trace=_db_trace,
         on_progress=on_progress,
         file_via_filelist=via_map,
-        filelist_children=dict(fl.filelist_children or {}),
+        filelist_children={
+            str(k): list(v) for k, v in (fl.filelist_children or {}).items()
+        },
         path_digests=path_digests,
         jobs=jobs,
-        diagnostic_inst_trace=diagnostic_inst_trace,
     )
     from hierwalk.progress import ProgressHeartbeat
 
@@ -3181,40 +2753,6 @@ def create_path_walk_index(
     return index, mod_db
 
 
-def sync_activation_to_walk_rows(
-    mod_db: PathWalkModuleDb,
-    state: PathWalkState,
-) -> None:
-    """Copy ifdef activation audit results onto walked hierarchy rows."""
-    for rec in mod_db._mapped_inst_records.values():
-        for path, row in state.rows_by_path.items():
-            if row.inst_leaf != rec.inst_leaf:
-                continue
-            parent = state.rows_by_path.get(row.parent_path or "")
-            if parent is None or parent.module != rec.parent_module:
-                continue
-            row.activation = rec.activation
-            if rec.activation_detail:
-                if row.walk_note:
-                    row.walk_note = f"{row.walk_note}; {rec.activation_detail}"
-                else:
-                    row.walk_note = rec.activation_detail
-            if rec.activation == "active" and row.refine_status == "provisional":
-                row.refine_status = "confirmed"
-            elif rec.activation == "inactive":
-                row.refine_status = "inactive_ifdef"
-
-
-def annotate_connect_results_with_walk_notes(
-    batch: ConnectivityBatchResult,
-    rows_by_path: Mapping[str, FlatRow],
-) -> None:
-    """Backward-compatible wrapper around logical-conn post-processing."""
-    from hierwalk.connect_artifacts import apply_connect_logical_phase
-
-    apply_connect_logical_phase(batch.results, rows_by_path)
-
-
 def run_path_walk_connect(
     request: ConnectivityRequest,
     fl: FilelistResult,
@@ -3232,7 +2770,6 @@ def run_path_walk_connect(
     trace_log_path: Optional[Path] = None,
     reuse_suite_session: bool = False,
     jobs: int = 0,
-    diagnostic_inst_trace: bool = False,
     connect_output_dir: Optional[Path] = None,
     connect_output_name: str = "conn.tsv",
     connect_phase: str = "both",
@@ -3246,10 +2783,6 @@ def run_path_walk_connect(
     defines = dict(fl.defines)
     defines.update(extra_defines or {})
     defines.update(request.defines)
-    diag_trace = diagnostic_inst_trace or request.trace or request.connect_log
-    phase = connect_phase if connect_phase in ("text", "logical", "both") else "both"
-    do_text = phase in ("text", "both")
-    do_logical = phase in ("logical", "both")
 
     trace_log_fh: Optional[TextIO] = None
     opened_log = False
@@ -3274,31 +2807,16 @@ def run_path_walk_connect(
                 trace_stream=trace_stream,
                 trace_log_fh=trace_log_fh,
                 jobs=jobs,
-                diagnostic_inst_trace=diag_trace,
             )
             index = session.index
             top_name = session.top_name
             state = session.state
-            if do_text:
-                state.mod_db.set_text_conn_fast(True)
-                _extend_path_walk_connect(
-                    state,
-                    request,
-                    on_progress=on_progress,
-                    jobs=jobs,
-                )
-            elif do_logical:
-                state.mod_db.set_text_conn_fast(False)
-                _reset_specs_for_logical_rewalk(
-                    state,
-                    endpoint_specs_from_request(request),
-                )
-                _extend_path_walk_connect(
-                    state,
-                    request,
-                    on_progress=on_progress,
-                    jobs=jobs,
-                )
+            _extend_path_walk_connect(
+                state,
+                request,
+                on_progress=on_progress,
+                jobs=jobs,
+            )
         else:
             index, mod_db = create_path_walk_index(
                 fl,
@@ -3314,14 +2832,9 @@ def run_path_walk_connect(
                 trace_stream=trace_stream,
                 trace_log_fh=trace_log_fh,
                 jobs=jobs,
-                diagnostic_inst_trace=diag_trace,
             )
             tops = resolve_top_modules(index, top=top, filelist_tops=fl.top_modules)
             top_name = tops[0]
-            if do_text:
-                mod_db.set_text_conn_fast(True)
-            elif do_logical and not do_text:
-                mod_db.set_text_conn_fast(False)
 
             state = build_path_walk_state(
                 index,
@@ -3343,14 +2856,9 @@ def run_path_walk_connect(
                 f"cache={state.stats.cache_regex_hits}+{state.stats.cache_validated_hits}"
             )
 
-        if do_text and not do_logical:
-            _drain_path_walk_workers(state.mod_db, text_fast=True)
-        elif do_logical and not do_text and reuse_suite_session:
-            pass
-        elif do_text:
-            _drain_path_walk_workers(state.mod_db, text_fast=True)
-        else:
-            _drain_path_walk_workers(state.mod_db)
+        if state.mod_db.defer_count() and not state.stats.recovery_stalled:
+            state.run_recovery_pass()
+        _drain_path_walk_workers(state.mod_db)
 
         from hierwalk.models import ElabIndex
 
@@ -3368,149 +2876,58 @@ def run_path_walk_connect(
                 rows=walk_rows,
             ),
         )
-        from hierwalk.connect_artifacts import (
-            apply_connect_logical_phase,
-            connect_output_paths,
-            merge_refined_connect_results,
-            prepare_text_connect_request,
-            resolve_connect_output_dir,
-            snapshot_connect_text_phase,
-            write_connect_phase_tsv,
-        )
-        from hierwalk.verification_timing import get_active_recorder
+        batch = session.run_request(request, jobs=1, on_progress=on_progress)
+        state.stats.checks_run = len(batch.results)
+        if connect_output_dir is not None:
+            from hierwalk.connect_artifacts import (
+                connect_output_paths,
+                format_connect_hierarchy_tsv,
+                resolve_connect_output_dir,
+                write_connect_phase_tsv,
+            )
 
-        bind_path_walk_phase_emit(state._emit_walk)
-        timing_rec = get_active_recorder()
-        resolved_output_dir = resolve_connect_output_dir(
-            connect_output_dir,
-            top=top_name,
-            cache_dir=cache_dir,
-        )
-        out_paths = connect_output_paths(resolved_output_dir, connect_output_name)
-        try:
-            batch: Optional[ConnectivityBatchResult] = None
-            if do_text:
-                from hierwalk.connect_artifacts import require_connect_phase_tsv
+            phase = connect_phase if connect_phase in ("text", "logical", "both") else "both"
+            out_dir = resolve_connect_output_dir(
+                connect_output_dir,
+                top=top_name,
+                cache_dir=cache_dir,
+            )
+            paths = connect_output_paths(out_dir, connect_output_name)
+            rows = state.rows_by_path
+            if phase in ("text", "both"):
+                from hierwalk.connect_artifacts import snapshot_connect_text_phase
 
-                if timing_rec is not None:
-                    timing_rec.begin_step("text-conn", "connect-coi")
-                t_coi = time.perf_counter()
-                text_request = prepare_text_connect_request(request)
-                text_results: list = []
-                text_modules_cached: Optional[int] = None
-                try:
-                    state._emit_walk(
-                        f"connect-coi begin checks={len(text_request.checks)} "
-                        f"rows={len(walk_rows)}"
-                    )
-                    batch = session.run_request(
-                        text_request,
-                        jobs=1,
-                        on_progress=on_progress,
-                        text_fast=True,
-                    )
-                    text_results = list(batch.results)
-                    text_modules_cached = batch.modules_cached
-                    snapshot_connect_text_phase(batch.results)
-                    coi_ms = (time.perf_counter() - t_coi) * 1000.0
-                    state._emit_walk(
-                        f"connect-coi done checks={len(batch.results)} "
-                        f"modules_cached={session.modules_cached} "
-                        f"ms={coi_ms:.1f}"
-                    )
-                    state._emit_walk(
-                        f"connect-text-conn done checks={len(batch.results)} "
-                        f"ms={coi_ms:.1f}"
-                    )
-                finally:
-                    written = require_connect_phase_tsv(
-                        out_paths.text_tsv,
-                        text_results,
-                        phase="text",
-                        modules_cached=text_modules_cached,
-                        rows_by_path=state.rows_by_path,
-                    )
-                    state._emit_walk(
-                        f"connect-text-conn written {written.resolve()}"
-                    )
-                    if timing_rec is not None:
-                        timing_rec.end_step()
-                state.stats.checks_run = len(text_results)
+                snapshot_connect_text_phase(batch.results)
+                write_connect_phase_tsv(
+                    paths.text_tsv,
+                    batch.results,
+                    phase="text",
+                    rows_by_path=rows,
+                )
+                paths.hierarchy_text_tsv.write_text(
+                    format_connect_hierarchy_tsv(batch.results, rows, phase="text"),
+                    encoding="utf-8",
+                )
+                state._emit_walk(f"connect-text-conn written {paths.text_tsv.resolve()}")
+            if phase in ("logical", "both"):
+                from hierwalk.connect_artifacts import (
+                    apply_connect_logical_phase,
+                    snapshot_connect_text_phase,
+                )
 
-            if do_logical:
-                from hierwalk.connect_artifacts import require_connect_phase_tsv
-
-                if timing_rec is not None:
-                    timing_rec.begin_step("logical-conn", "activation-audit")
-                t_act = time.perf_counter()
-                t_refine = time.perf_counter()
-                logical_results: list = []
-                logical_modules_cached: Optional[int] = None
-                try:
-                    finalize_logical_walk_before_connect(state, request)
-                    walk_rows = state.rows()
-                    session.rows = walk_rows
-                    session.elab_index = ElabIndex.from_rows_by_path(
-                        state.rows_by_path,
-                        rows=walk_rows,
-                    )
-                    session.clear_cache()
-                    t_recoi = time.perf_counter()
-                    refined_batch = session.run_request(
-                        request,
-                        jobs=1,
-                        on_progress=on_progress,
-                    )
-                    if batch is not None:
-                        merge_refined_connect_results(
-                            batch.results,
-                            refined_batch.results,
-                        )
-                    else:
-                        batch = refined_batch
-                    state._emit_walk(
-                        f"connect-logical-walk done rows={len(state.rows_by_path)} "
-                        f"recoi_ms={(time.perf_counter() - t_recoi) * 1000.0:.1f} "
-                        f"ms={(time.perf_counter() - t_refine) * 1000.0:.1f}"
-                    )
-                    state.mod_db.drain_activation_audit(wait=True)
-                    state.mod_db.emit_activation_audit_report()
-                    if state.mod_db._mapped_inst_records:
-                        state._emit_walk(
-                            f"pw-db activation-audit done "
-                            f"maps={len(state.mod_db._mapped_inst_records)} "
-                            f"ms={(time.perf_counter() - t_act) * 1000.0:.1f}"
-                        )
-                    sync_activation_to_walk_rows(state.mod_db, state)
-                    apply_connect_logical_phase(
-                        batch.results,
-                        state.rows_by_path,
-                        run_activation=True,
-                    )
-                    logical_results = list(batch.results)
-                    logical_modules_cached = batch.modules_cached
-                    logical_ms = (time.perf_counter() - t_act) * 1000.0
-                    state._emit_walk(
-                        f"connect-logical-conn done checks={len(batch.results)} "
-                        f"ms={logical_ms:.1f}"
-                    )
-                finally:
-                    written = require_connect_phase_tsv(
-                        out_paths.logical_tsv,
-                        logical_results,
-                        phase="logical",
-                        modules_cached=logical_modules_cached,
-                        rows_by_path=state.rows_by_path,
-                    )
-                    state._emit_walk(
-                        f"connect-logical-conn written {written.resolve()}"
-                    )
-                    if timing_rec is not None:
-                        timing_rec.end_step()
-                state.stats.checks_run = len(logical_results)
-            assert batch is not None
-        finally:
-            bind_path_walk_phase_emit(None)
+                snapshot_connect_text_phase(batch.results)
+                apply_connect_logical_phase(batch.results, rows, run_activation=True)
+                write_connect_phase_tsv(
+                    paths.logical_tsv,
+                    batch.results,
+                    phase="logical",
+                    rows_by_path=rows,
+                )
+                paths.hierarchy_logical_tsv.write_text(
+                    format_connect_hierarchy_tsv(batch.results, rows, phase="logical"),
+                    encoding="utf-8",
+                )
+                state._emit_walk(f"connect-logical-conn written {paths.logical_tsv.resolve()}")
         return batch, index, state
     finally:
         if opened_log and trace_log_fh is not None:

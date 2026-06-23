@@ -13,28 +13,6 @@ _MODULE_NAME_RE = re.compile(
     re.IGNORECASE,
 )
 
-_RESOLVED_PATH_CACHE: dict[str, str] = {}
-
-
-def resolved_path_str(path: str | Path) -> str:
-    """Canonical absolute path string; results are memoized per process."""
-    raw = os.fspath(path)
-    hit = _RESOLVED_PATH_CACHE.get(raw)
-    if hit is not None:
-        return hit
-    try:
-        out = str(Path(raw).resolve()).replace("\\", "/")
-    except OSError:
-        out = raw.replace("\\", "/")
-    _RESOLVED_PATH_CACHE[raw] = out
-    _RESOLVED_PATH_CACHE[out] = out
-    return out
-
-
-def clear_resolved_path_cache() -> None:
-    """Drop memoized path resolutions (tests only)."""
-    _RESOLVED_PATH_CACHE.clear()
-
 
 def _split_pattern_tokens(raw: str) -> List[str]:
     return [p.strip() for p in str(raw).split(",") if p.strip()]
@@ -151,7 +129,10 @@ def _segment_matches(pattern: str, segment: str) -> bool:
 
 def normalized_ignore_path(path: str | Path) -> str:
     """Canonical absolute path string for ignore-path matching."""
-    return resolved_path_str(path)
+    try:
+        return str(Path(path).resolve()).replace("\\", "/")
+    except OSError:
+        return str(path).replace("\\", "/")
 
 
 def filelist_path_matches(

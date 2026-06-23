@@ -9,6 +9,7 @@ from hierwalk.connect_artifacts import (
     apply_connect_logical_phase,
     archive_run_config_sources,
     connect_output_paths,
+    format_connect_hierarchy_tsv,
     resolve_connect_output_dir,
     snapshot_connect_text_phase,
     prepare_text_connect_request,
@@ -35,6 +36,8 @@ def test_connect_output_paths_under_db(tmp_path: Path):
     paths = connect_output_paths(db)
     assert paths.text_tsv == db / "conn.text.tsv"
     assert paths.logical_tsv == db / "conn.tsv"
+    assert paths.hierarchy_text_tsv == db / "hierarchy.text.tsv"
+    assert paths.hierarchy_logical_tsv == db / "hierarchy.tsv"
 
 
 def test_connect_output_paths_custom_name(tmp_path: Path):
@@ -42,6 +45,15 @@ def test_connect_output_paths_custom_name(tmp_path: Path):
     paths = connect_output_paths(db, "results/conn.tsv")
     assert paths.text_tsv == db / "conn.text.tsv"
     assert paths.logical_tsv == db / "conn.tsv"
+    assert paths.hierarchy_text_tsv == db / "hierarchy.text.tsv"
+    assert paths.hierarchy_logical_tsv == db / "hierarchy.tsv"
+
+
+def test_connect_output_paths_suite_name(tmp_path: Path):
+    db = tmp_path / ".db_top"
+    paths = connect_output_paths(db, "VERIFY_gate_conn.tsv")
+    assert paths.hierarchy_logical_tsv == db / "VERIFY_gate_hierarchy.tsv"
+    assert paths.hierarchy_text_tsv == db / "VERIFY_gate_hierarchy.text.tsv"
 
 
 def test_archive_run_config_sources(tmp_path: Path):
@@ -189,6 +201,42 @@ def test_path_walk_writes_text_and_logical_tsv(tmp_path: Path):
     assert "connected_logical" in logical_rows[0]
     assert batch.results[0].connected_text is not None
     assert batch.results[0].connected_logical is not None
+    hier_text = db / "hierarchy.text.tsv"
+    hier_logical = db / "hierarchy.tsv"
+    assert hier_text.is_file()
+    assert hier_logical.is_file()
+    hier_rows = _tsv_rows(hier_text.read_text(encoding="utf-8"))
+    assert {row["side"] for row in hier_rows} == {"a", "b"}
+    assert any(row["status"] == "hit" for row in hier_rows)
+    assert any(row["kind"] == "port" for row in hier_rows)
+
+
+def test_format_connect_hierarchy_tsv_marks_miss_prefixes():
+    rows_by_path = {
+        "top": FlatRow(
+            full_path="top",
+            inst_leaf="top",
+            module="TOP",
+            depth=0,
+            parent_path=None,
+            file="/rtl/top.v",
+        ),
+    }
+    result = ConnectResult(
+        check_id="c1",
+        endpoint_a=ConnectEndpoint("top.missing.sig", "top", "missing", "TOP"),
+        endpoint_b=ConnectEndpoint("top.clk", "top", "clk", "TOP", port_found=True),
+        connected=False,
+        mode="port-port",
+    )
+    tsv = format_connect_hierarchy_tsv([result], rows_by_path, phase="text")
+    parsed = _tsv_rows(tsv)
+    a_rows = [row for row in parsed if row["side"] == "a"]
+    assert a_rows[0]["path"] == "top"
+    assert a_rows[0]["status"] == "hit"
+    assert any(row["path"] == "top.missing" and row["status"] == "miss" for row in a_rows)
+    b_port = [row for row in parsed if row["side"] == "b" and row["kind"] == "port"]
+    assert b_port and b_port[0]["status"] == "hit"
 
 
 def test_resolve_connect_output_dir_falls_back_to_db_top(tmp_path: Path):

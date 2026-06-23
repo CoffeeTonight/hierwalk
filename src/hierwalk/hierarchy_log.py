@@ -97,30 +97,16 @@ def endpoint_provenance_fields(
     return base
 
 
-def format_rtl_token(path: str, *, compact: bool = False) -> str:
-    """``rtl= /path`` token (space after ``=`` so vim ``gf`` can open the path)."""
-    if not path:
-        return "rtl=(none)"
-    shown = Path(path).name if compact else path
-    return f"rtl= {shown}"
-
-
 def format_row_provenance(row: FlatRow, *, compact: bool = False) -> str:
     """RTL file + filelist chain for one elaborated instance row."""
     parts = [f"module={row.module}"]
     if row.file:
-        parts.append(format_rtl_token(row.file, compact=compact))
+        parts.append(f"rtl={row.file}" if not compact else f"rtl={Path(row.file).name}")
     if row.via_filelist:
         via = row.via_filelist if not compact else Path(row.via_filelist).name
         parts.append(f"via_filelist={via}")
     if row.filelist_chain:
         parts.append(f"filelist_chain={row.filelist_chain}")
-    if row.refine_status:
-        parts.append(f"refine={row.refine_status}")
-    if row.activation:
-        parts.append(f"activation={row.activation}")
-    if row.walk_note:
-        parts.append(f"note={row.walk_note}")
     if row.stop_reason:
         parts.append(f"stop={row.stop_reason}")
     return "  ".join(parts)
@@ -538,7 +524,7 @@ def format_signal_tail_line(
     status = "hit" if hit else "miss"
     rtl_name = Path(rtl_file).name if rtl_file else "?"
     target = f" target={target_path}" if target_path else ""
-    timing = f" check_ms={check_ms:.1f}"
+    timing = f" check_ms={check_ms:.1f}" if check_ms > 0 else ""
     lines_note = f" lines={rtl_lines}" if rtl_lines > 0 else ""
     return (
         f"signal-tail {status} kind={kind} scope={parent_path} tail={tail!r}"
@@ -558,22 +544,6 @@ def path_walk_trace_show_message(message: str) -> bool:
         return False
     if msg.startswith("signal-tail "):
         return True
-    if msg.startswith("connect-coi "):
-        return True
-    if msg.startswith("connect-comb "):
-        return True
-    if msg.startswith("walk miss-"):
-        return True
-    if msg.startswith("walk provisional-pass "):
-        return True
-    if msg.startswith("walk endpoint-specs "):
-        return True
-    if msg.startswith("walk lca-done "):
-        return True
-    if msg.startswith("walk flush-misses "):
-        return True
-    if msg.startswith("walk raw-inst-probe "):
-        return True
     if msg.startswith("confident-miss "):
         return True
     if msg.startswith("recovery-pass "):
@@ -585,17 +555,7 @@ def path_walk_trace_show_message(message: str) -> bool:
     if msg.startswith("pw-db "):
         if " load failed " in msg:
             return True
-        if " edge hit " in msg or msg.startswith("pw-db   hit "):
-            return True
-        if (
-            msg.startswith("pw-db preprocess ")
-            or msg.startswith("pw-db inst-find ")
-            or msg.startswith("pw-db inst-resolve ")
-            or msg.startswith("pw-db tier1-scan ")
-            or msg.startswith("pw-db activation")
-        ):
-            return True
-        return False
+        return " edge hit " in msg or msg.startswith("pw-db   hit ")
     return True
 
 

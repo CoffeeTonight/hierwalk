@@ -333,6 +333,14 @@ def _merge_full_index_fields(
     if _mapping_get_ci(spec, "max_depth") is not None:
         out = replace(out, max_depth=int(_mapping_get_ci(spec, "max_depth")))
 
+    from hierwalk.trace_stop import parse_trace_stop_policy
+
+    trace_stop = parse_trace_stop_policy(spec)
+    if trace_stop.ignore_hierarchy:
+        out = replace(out, ignore_hierarchy=trace_stop.ignore_hierarchy)
+    if trace_stop.trace_max_depth is not None:
+        out = replace(out, trace_max_depth=trace_stop.trace_max_depth)
+
     index_cwd = _first_ci(spec, "index_cwd", "index-cwd")
     if index_cwd:
         out = replace(out, index_cwd=_resolve_path(base, str(index_cwd)))
@@ -379,17 +387,12 @@ def run_config_for_full_index(
     base = base_dir or Path.cwd()
     cfg = _merge_full_index_fields(shared, spec, base_dir=base)
 
-    from hierwalk.connect_artifacts import artifact_output_basename
-
     out_raw = _mapping_get_ci(spec, "output")
-    if out_raw is not None and str(out_raw).strip() == "-":
-        output = "-"
-    elif out_raw is not None and str(out_raw).strip():
-        output = artifact_output_basename(str(out_raw).strip(), default="instances.tsv")
-    elif cfg.output and cfg.output != "-":
-        output = artifact_output_basename(cfg.output, default="instances.tsv")
-    else:
-        output = "instances.tsv"
+    output = (
+        _resolve_path(base, str(out_raw).strip())
+        if out_raw is not None and str(out_raw).strip()
+        else cfg.output
+    )
 
     from hierwalk.search_spec import resolve_search_spec
 
@@ -443,7 +446,7 @@ def run_config_for_test(
     from pathlib import Path
 
     base = base_dir or Path.cwd()
-    cfg = shared
+    cfg = _merge_full_index_fields(shared, spec, base_dir=base)
     if full_index_spec is not None and full_index_enabled:
         cfg = _merge_full_index_fields(cfg, full_index_spec, base_dir=base)
 
@@ -453,31 +456,12 @@ def run_config_for_test(
         full_index_enabled=full_index_enabled,
     )
 
-    from hierwalk.connect_artifacts import (
-        artifact_output_basename,
-        connect_output_basename,
-        default_verification_artifact_name,
-    )
-
     out_raw = _mapping_get_ci(spec, "output")
-    default_out = default_verification_artifact_name(entry.kind)
-    if out_raw is not None and str(out_raw).strip() == "-":
-        output = "-"
-    elif out_raw is not None and str(out_raw).strip():
-        raw_name = str(out_raw).strip()
-        output = (
-            connect_output_basename(raw_name)
-            if entry.kind == RUN_CONN_CHECK
-            else artifact_output_basename(raw_name, default=default_out)
-        )
-    elif cfg.output and cfg.output != "-":
-        output = (
-            connect_output_basename(cfg.output)
-            if entry.kind == RUN_CONN_CHECK
-            else artifact_output_basename(cfg.output, default=default_out)
-        )
-    else:
-        output = default_out
+    output = (
+        _resolve_path(base, str(out_raw).strip())
+        if out_raw is not None and str(out_raw).strip()
+        else cfg.output
+    )
 
     include_ff = _bool_field(spec, "include_ff", "include-ff", default=cfg.include_ff)
     ff_barrier = _first_ci(spec, "ff_barrier", "ff-barrier")
@@ -572,12 +556,7 @@ def run_config_for_test(
     fanin = str(_first_ci(spec, "fanin_cone", "fanin-cone", "endpoint") or "").strip() or None
     fanout = str(_first_ci(spec, "fanout_cone", "fanout-cone") or "").strip() or None
     exec_mode = exec_mode_for_verification(entry.kind, entry.mode)
-    cone_graph_raw = _first_ci(spec, "cone_graph", "cone-graph")
-    cone_graph = (
-        artifact_output_basename(str(cone_graph_raw).strip(), default="cone.dot")
-        if cone_graph_raw is not None and str(cone_graph_raw).strip()
-        else None
-    )
+    cone_graph = _resolve_path(base, _first_ci(spec, "cone_graph", "cone-graph"))
 
     return replace(
         cfg,
@@ -1043,10 +1022,7 @@ def spec_for_test_entry(
 def expand_suite_verification_plan(
     plan: Sequence[Tuple[RunTestEntry, RunConfig]],
 ) -> Sequence[Tuple[RunTestEntry, RunConfig]]:
-    """
-    Flat-suite orchestration: run_on_full_index steps first, then all verification
-    blocks in a text pass, then the same blocks in a logical pass.
-    """
+    """Flat-suite: index steps, then verification text pass, then logical pass."""
     index_steps: list[Tuple[RunTestEntry, RunConfig]] = []
     verify_steps: list[Tuple[RunTestEntry, RunConfig]] = []
     for entry, run_cfg in plan:

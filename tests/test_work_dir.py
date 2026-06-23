@@ -32,8 +32,8 @@ def test_resolve_run_work_dir_creates_db_top(tmp_path: Path, monkeypatch):
     assert (root / "tmp").is_dir()
 
 
-def test_work_base_dir_ignores_index_cwd(tmp_path: Path, monkeypatch):
-    """``.db_{TOP}`` base is shell cwd, not ``index-cwd`` (filelist-only)."""
+def test_work_base_dir_uses_index_cwd_when_set(tmp_path: Path, monkeypatch):
+    """``.db_{TOP}`` base follows explicit ``index-cwd``; default is shell cwd."""
     shell = tmp_path / "shell"
     json_dir = tmp_path / "json"
     shell.mkdir()
@@ -41,7 +41,8 @@ def test_work_base_dir_ignores_index_cwd(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(shell)
     assert work_base_dir() == shell.resolve()
     assert resolve_run_work_dir("top", base=work_base_dir()) == shell / ".db_top"
-    assert not (json_dir / ".db_top").exists()
+    assert work_base_dir(str(json_dir)) == json_dir.resolve()
+    assert resolve_run_work_dir("top", base=work_base_dir(str(json_dir))) == json_dir / ".db_top"
 
 
 def test_default_log_path_under_work_dir(tmp_path: Path):

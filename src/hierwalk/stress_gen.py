@@ -158,7 +158,7 @@ def build_stress_connect_request(design: StressDesign) -> ConnectivityRequest:
             ConnectivityCheck(cx_a, cx_b, check_id="cross_hierarchy"),
             ConnectivityCheck(
                 f"{design.top}.u_missing.probe_in",
-                f"{design.top}.u_spine.probe_out",
+                pp_b,
                 check_id="missing_hierarchy",
             ),
         ),
