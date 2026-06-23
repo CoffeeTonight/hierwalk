@@ -632,6 +632,14 @@ def execute_run(cfg: RunConfig, ap) -> int:
                     phase=stdout_phase,
                 )
                 sys.stdout.write(body)
+            use_trace = cfg.connect_trace or cfg.connect_log
+            trace_on = connect_request.trace or use_trace
+            if do_logical and not do_text:
+                trace_title = "connectivity path evidence (logical)"
+            elif do_text and not do_logical:
+                trace_title = "connectivity path evidence (text)"
+            else:
+                trace_title = "connectivity path evidence"
             if not cfg.quiet:
                 emit_hierarchy_rows_log(
                     pw_state.rows(),
@@ -652,12 +660,27 @@ def execute_run(cfg: RunConfig, ap) -> int:
                         stream=fh,
                         title="path-walk instance rows (rtl + filelist)",
                     )
-            use_trace = cfg.connect_trace or cfg.connect_log
-            if do_logical and (connect_request.trace or use_trace):
+                    if not cfg.quiet:
+                        for result in connect_results:
+                            emit_connect_trace_log(
+                                result,
+                                stream=fh,
+                                check_prefix=result.check_id or "",
+                                rows_by_path=endpoint_rows,
+                            )
+                    if trace_on:
+                        print_connect_trace_reports(
+                            connect_results,
+                            stream=fh,
+                            title=f"{trace_title} (log)",
+                            rows_by_path=endpoint_rows,
+                        )
+            if trace_on:
                 term_stream = sys.stderr if cfg.output == "-" else sys.stdout
                 print_connect_trace_reports(
                     connect_results,
                     stream=term_stream,
+                    title=trace_title,
                     rows_by_path=endpoint_rows,
                 )
             if on_progress and not cfg.quiet:

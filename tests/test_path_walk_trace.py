@@ -227,3 +227,100 @@ def test_path_walk_trace_writes_run_log(tmp_path: Path):
     assert "ok top" in text
     assert "rtl=" in text
     assert "via_filelist=" in text
+
+
+def test_path_walk_connect_execute_writes_conn_summary_to_run_log(tmp_path: Path):
+    import json
+    import subprocess
+
+    rtl = tmp_path / "d.v"
+    rtl.write_text(
+        """
+    module top(input logic clk);
+      child u0 (.clk(clk));
+    endmodule
+    module child(input logic clk); endmodule
+    """,
+        encoding="utf-8",
+    )
+    fl = tmp_path / "fl.f"
+    fl.write_text(f"{rtl.resolve()}\n", encoding="utf-8")
+    run_json = tmp_path / "run.json"
+    run_json.write_text(
+        json.dumps(
+            {
+                "filelist": fl.name,
+                "top": "top",
+                "mode": "path-walk",
+                "connect": {
+                    "top": "top",
+                    "checks": [{"id": "clk", "a": "top.clk", "b": "top.u0.clk"}],
+                },
+                "output": "conn_out.tsv",
+                "no_cache": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    subprocess.run(
+        ["hier-walk", str(run_json)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    log_path = tmp_path / ".db_top" / "conn_out.hier-walk.log"
+    assert log_path.is_file()
+    text = log_path.read_text(encoding="utf-8")
+    assert "[hier-walk connect]" in text
+    assert "[clk]" in text
+    assert "top.clk -> top.u0.clk" in text
+    assert "connected:" in text
+
+
+def test_path_walk_connect_trace_flag_writes_path_evidence_to_run_log(tmp_path: Path):
+    import json
+    import subprocess
+
+    rtl = tmp_path / "d.v"
+    rtl.write_text(
+        """
+    module top(input logic clk);
+      child u0 (.clk(clk));
+    endmodule
+    module child(input logic clk); endmodule
+    """,
+        encoding="utf-8",
+    )
+    fl = tmp_path / "fl.f"
+    fl.write_text(f"{rtl.resolve()}\n", encoding="utf-8")
+    run_json = tmp_path / "run.json"
+    run_json.write_text(
+        json.dumps(
+            {
+                "filelist": fl.name,
+                "top": "top",
+                "mode": "path-walk",
+                "connect_trace": True,
+                "connect": {
+                    "top": "top",
+                    "checks": [{"id": "clk", "a": "top.clk", "b": "top.u0.clk"}],
+                },
+                "output": "conn_out.tsv",
+                "no_cache": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    subprocess.run(
+        ["hier-walk", str(run_json)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    log_path = tmp_path / ".db_top" / "conn_out.hier-walk.log"
+    text = log_path.read_text(encoding="utf-8")
+    assert "connectivity path evidence (log)" in text
+    assert "path evidence:" in text
+    assert "child-down" in text or "parent-up" in text
