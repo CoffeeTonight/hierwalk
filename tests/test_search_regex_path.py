@@ -118,7 +118,7 @@ module er_leaf; endmodule
     )
     fl = tmp_path / "filelist.f"
     fl.write_text(f"{rtl}\n", encoding="utf-8")
-    out = tmp_path / "hits.tsv"
+    out = tmp_path / ".db_top" / "hits.tsv"
 
     proc = subprocess.run(
         [

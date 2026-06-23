@@ -103,17 +103,19 @@ def resolve_run_work_dir(
     base: Optional[Path] = None,
     explicit_cache_dir: Optional[str] = None,
 ) -> Path:
-    """Per-run work root: ``.db_{TOP}`` under *base*, unless overridden."""
+    """Per-run work root: always ``.db_{TOP}`` under *base* (or under ``HIERWALK_CACHE_DIR``)."""
+    resolved_base = base
     if explicit_cache_dir:
         path = Path(explicit_cache_dir).expanduser().resolve()
-        path.mkdir(parents=True, exist_ok=True)
-        return path
-    env = os.environ.get("HIERWALK_CACHE_DIR")
-    if env:
-        path = Path(env).expanduser().resolve()
-        path.mkdir(parents=True, exist_ok=True)
-        return path
-    return ensure_top_work_dir(top, base=base)
+        if path.name.startswith(".db_"):
+            path.mkdir(parents=True, exist_ok=True)
+            return path
+        resolved_base = path
+    elif os.environ.get("HIERWALK_CACHE_DIR"):
+        resolved_base = Path(os.environ["HIERWALK_CACHE_DIR"]).expanduser().resolve()
+    if resolved_base is None:
+        resolved_base = work_base_dir()
+    return ensure_top_work_dir(top, base=resolved_base)
 
 
 def default_cache_dir() -> Path:

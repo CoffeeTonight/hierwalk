@@ -401,8 +401,8 @@ def test_verify_enable_gate_json_subprocess():
     assert "index: building from" not in err
     assert (root / ".db_stress_top" / "VERIFY_gate_conn.text.tsv").is_file()
     assert (root / ".db_stress_top" / "VERIFY_gate_conn.tsv").is_file()
-    assert (root / "VERIFY_gate_trace.text.tsv").is_file()
-    assert (root / "VERIFY_gate_trace.tsv").is_file()
+    assert (root / ".db_stress_top" / "VERIFY_gate_trace.text.tsv").is_file()
+    assert (root / ".db_stress_top" / "VERIFY_gate_trace.tsv").is_file()
     assert not (root / "VERIFY_gate_instances.tsv").exists()
     assert not (root / "VERIFY_gate_cone.tsv").exists()
 

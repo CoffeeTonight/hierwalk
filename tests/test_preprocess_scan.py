@@ -305,7 +305,7 @@ def test_end_to_end_cli(tmp_path: Path, capsys):
     )
     fl = tmp_path / "d.f"
     fl.write_text(f"{tmp_path / 'a.v'}\n", encoding="utf-8")
-    out = tmp_path / "out.tsv"
+    out = tmp_path / ".db_top" / "out.tsv"
     from hierwalk.cli import main
 
     assert main([str(fl), "--top", "top", "-o", str(out), "--max-depth", "2"]) == 0

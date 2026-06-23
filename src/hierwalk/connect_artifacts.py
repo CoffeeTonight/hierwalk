@@ -22,11 +22,40 @@ class ConnectOutputPaths:
     logical_tsv: Path
 
 
+def artifact_output_basename(output: str, *, default: str = "output.tsv") -> str:
+    """Basename for an artifact file stored under the per-top work directory."""
+    if not output or output == "-":
+        return default
+    return Path(output).name
+
+
 def connect_output_basename(output: str = "conn.tsv") -> str:
     """Filename for logical connect TSV (text phase uses ``.text`` suffix)."""
-    if not output or output == "-":
-        return "conn.tsv"
-    return Path(output).name
+    return artifact_output_basename(output, default="conn.tsv")
+
+
+def work_dir_artifact_path(
+    work_dir: Path,
+    output: str,
+    *,
+    phase: str = "logical",
+    default: str = "output.tsv",
+) -> Path:
+    """Resolve a run output path under ``.db_{TOP}/`` (never beside JSON/filelist)."""
+    root = work_dir.expanduser().resolve()
+    logical_name = artifact_output_basename(output, default=default)
+    if str(phase).strip().lower() == "text":
+        filename = verification_output_path(logical_name, "text").name
+    else:
+        filename = logical_name
+    return root / filename
+
+
+def work_dir_sidecar_path(work_dir: Path, path: Optional[str]) -> Optional[Path]:
+    """Resolve auxiliary artifacts (logs, dot graphs) under the work directory."""
+    if not path:
+        return None
+    return work_dir.expanduser().resolve() / Path(path).name
 
 
 def connect_output_paths(
@@ -72,6 +101,26 @@ def format_connect_artifact_log(cfg: RunConfig, *, top: str = "") -> str:
     return f"{paths.text_tsv.resolve()}, {paths.logical_tsv.resolve()}"
 
 
+def format_verification_artifact_log(cfg: RunConfig, *, top: str = "") -> str:
+    """Resolved artifact path(s) for any verification step under the work dir."""
+    from hierwalk.run_request import RUN_CONN_CHECK, normalize_run_mode
+
+    if (
+        cfg.verification_step_kind == RUN_CONN_CHECK
+        or normalize_run_mode(cfg.mode or "") in ("check-connect", "check-connect-batch", "path-walk")
+    ):
+        return format_connect_artifact_log(cfg, top=top)
+    work = resolve_connect_work_dir(cfg, top=top)
+    phase = (cfg.verification_phase or "both").strip().lower()
+    if phase == "text":
+        return str(work_dir_artifact_path(work, cfg.output, phase="text").resolve())
+    if phase == "logical":
+        return str(work_dir_artifact_path(work, cfg.output, phase="logical").resolve())
+    text_p = work_dir_artifact_path(work, cfg.output, phase="text")
+    logical_p = work_dir_artifact_path(work, cfg.output, phase="logical")
+    return f"{text_p.resolve()}, {logical_p.resolve()}"
+
+
 def format_connect_artifact_help(cfg: RunConfig, *, top: str = "") -> str:
     """One-line hint: work dir + text/logical filenames (no conn.logical.tsv)."""
     work = resolve_connect_work_dir(cfg, top=top)
@@ -104,11 +153,14 @@ def resolve_connect_output_dir(
     active = get_active_work_dir()
     if active is not None:
         return active
-    resolved_base = base
-    if resolved_base is None and cache_dir is not None:
+    if cache_dir is not None:
         cache_root = cache_dir.expanduser().resolve()
         if cache_root.name.startswith(".db_"):
-            resolved_base = cache_root.parent
+            cache_root.mkdir(parents=True, exist_ok=True)
+            return cache_root
+        resolved_base = cache_root
+    else:
+        resolved_base = base
     if resolved_base is None:
         resolved_base = work_base_dir()
     return ensure_top_work_dir(top or "top", base=resolved_base)

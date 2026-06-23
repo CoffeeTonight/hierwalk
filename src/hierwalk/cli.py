@@ -49,9 +49,8 @@ from hierwalk.enable_diagnostics import (
     format_enable_root_cause_hint,
     resolve_block_enabled,
 )
-from hierwalk.connect_artifacts import format_connect_artifact_log
+from hierwalk.connect_artifacts import format_verification_artifact_log
 from hierwalk.run_request import (
-    RUN_CONN_CHECK,
     RUN_ON_FULL_INDEX,
     RunConfig,
     _full_index_block_key,
@@ -753,12 +752,12 @@ def main(argv=None) -> int:
             if cache_env:
                 print(
                     f"run: note HIERWALK_CACHE_DIR={cache_env} — "
-                    "connect TSV and cache live there, not under index-cwd",
+                    "artifacts and cache use .db_<top> under this directory",
                     file=sys.stderr,
                 )
             print(
                 f"run: index-cwd: {cfg.index_cwd} "
-                f"(work-dir .db_<top> is created here unless HIERWALK_CACHE_DIR is set)",
+                f"(all logs and result TSV files go under .db_<top> here)",
                 file=sys.stderr,
             )
 
@@ -849,11 +848,8 @@ def main(argv=None) -> int:
                 else ""
             )
             output_note = run_cfg.output
-            if (
-                test_entry.kind == RUN_CONN_CHECK
-                and normalize_run_mode(run_cfg.index_strategy or "") == "path-walk"
-            ):
-                output_note = format_connect_artifact_log(run_cfg)
+            if test_entry.kind in VERIFICATION_KINDS:
+                output_note = format_verification_artifact_log(run_cfg)
             print(
                 f"run: test {label} kind={test_entry.kind} mode={test_entry.mode} "
                 f"index={index_note}{phase_note} output={output_note}",

@@ -379,12 +379,17 @@ def run_config_for_full_index(
     base = base_dir or Path.cwd()
     cfg = _merge_full_index_fields(shared, spec, base_dir=base)
 
+    from hierwalk.connect_artifacts import artifact_output_basename
+
     out_raw = _mapping_get_ci(spec, "output")
-    output = (
-        _resolve_path(base, str(out_raw).strip())
-        if out_raw is not None and str(out_raw).strip()
-        else cfg.output
-    )
+    if out_raw is not None and str(out_raw).strip() == "-":
+        output = "-"
+    elif out_raw is not None and str(out_raw).strip():
+        output = artifact_output_basename(str(out_raw).strip(), default="instances.tsv")
+    elif cfg.output and cfg.output != "-":
+        output = artifact_output_basename(cfg.output, default="instances.tsv")
+    else:
+        output = "instances.tsv"
 
     from hierwalk.search_spec import resolve_search_spec
 
@@ -448,22 +453,27 @@ def run_config_for_test(
         full_index_enabled=full_index_enabled,
     )
 
-    out_raw = _mapping_get_ci(spec, "output")
-    if entry.kind == RUN_CONN_CHECK and index_strategy == "path-walk":
-        from hierwalk.connect_artifacts import connect_output_basename
+    from hierwalk.connect_artifacts import artifact_output_basename, connect_output_basename
 
-        if out_raw is not None and str(out_raw).strip():
-            output = connect_output_basename(str(out_raw).strip())
-        elif cfg.output and cfg.output != "-":
-            output = connect_output_basename(cfg.output)
-        else:
-            output = "conn.tsv"
-    else:
+    out_raw = _mapping_get_ci(spec, "output")
+    default_out = "conn.tsv" if entry.kind == RUN_CONN_CHECK else "output.tsv"
+    if out_raw is not None and str(out_raw).strip() == "-":
+        output = "-"
+    elif out_raw is not None and str(out_raw).strip():
+        raw_name = str(out_raw).strip()
         output = (
-            _resolve_path(base, str(out_raw).strip())
-            if out_raw is not None and str(out_raw).strip()
-            else cfg.output
+            connect_output_basename(raw_name)
+            if entry.kind == RUN_CONN_CHECK
+            else artifact_output_basename(raw_name, default=default_out)
         )
+    elif cfg.output and cfg.output != "-":
+        output = (
+            connect_output_basename(cfg.output)
+            if entry.kind == RUN_CONN_CHECK
+            else artifact_output_basename(cfg.output, default=default_out)
+        )
+    else:
+        output = default_out
 
     include_ff = _bool_field(spec, "include_ff", "include-ff", default=cfg.include_ff)
     ff_barrier = _first_ci(spec, "ff_barrier", "ff-barrier")
@@ -558,7 +568,12 @@ def run_config_for_test(
     fanin = str(_first_ci(spec, "fanin_cone", "fanin-cone", "endpoint") or "").strip() or None
     fanout = str(_first_ci(spec, "fanout_cone", "fanout-cone") or "").strip() or None
     exec_mode = exec_mode_for_verification(entry.kind, entry.mode)
-    cone_graph = _resolve_path(base, _first_ci(spec, "cone_graph", "cone-graph"))
+    cone_graph_raw = _first_ci(spec, "cone_graph", "cone-graph")
+    cone_graph = (
+        artifact_output_basename(str(cone_graph_raw).strip(), default="cone.dot")
+        if cone_graph_raw is not None and str(cone_graph_raw).strip()
+        else None
+    )
 
     return replace(
         cfg,

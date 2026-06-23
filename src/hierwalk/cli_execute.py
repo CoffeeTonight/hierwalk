@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Optional
 
@@ -47,7 +48,11 @@ from hierwalk.path_walk import (
     run_path_walk_connect,
     run_path_walk_index,
 )
-from hierwalk.connect_artifacts import verification_output_path
+from hierwalk.connect_artifacts import (
+    verification_output_path,
+    work_dir_artifact_path,
+    work_dir_sidecar_path,
+)
 from hierwalk.run_request import (
     normalize_run_mode,
     resolve_connectivity_request,
@@ -80,17 +85,28 @@ def _verification_phase(cfg: RunConfig) -> str:
     return phase if phase in ("text", "logical", "both") else "both"
 
 
-def _write_verification_output(
+def _artifact_output_path(
+    work_dir: Path,
     cfg: RunConfig,
-    body: str,
-    output_path: str,
     *,
-    label: str,
+    phase: str = "logical",
+) -> str:
+    path = work_dir_artifact_path(work_dir, cfg.output, phase=phase)
+    return "-" if cfg.output == "-" else str(path)
+
+
+def _write_run_output(
+    cfg: RunConfig,
+    work_dir: Path,
+    body: str,
+    *,
+    phase: str = "logical",
+    label: str = "results",
 ) -> None:
-    if output_path == "-":
+    if cfg.output == "-":
         sys.stdout.write(body)
         return
-    out = Path(output_path)
+    out = work_dir_artifact_path(work_dir, cfg.output, phase=phase)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(body, encoding="utf-8")
     if not cfg.quiet:
@@ -101,20 +117,20 @@ def _write_verification_output(
         )
 
 
-def _write_connect_output(cfg: RunConfig, body: str) -> None:
+def _write_verification_output(
+    cfg: RunConfig,
+    work_dir: Path,
+    body: str,
+    *,
+    phase: str = "logical",
+    label: str,
+) -> None:
+    _write_run_output(cfg, work_dir, body, phase=phase, label=label)
+
+
+def _write_connect_output(cfg: RunConfig, work_dir: Path, body: str) -> None:
     """Write connect TSV immediately so long post-connect logs cannot delay results."""
-    if cfg.output == "-":
-        sys.stdout.write(body)
-        return
-    out = Path(cfg.output)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(body, encoding="utf-8")
-    if not cfg.quiet:
-        print(
-            f"run: connect results written: {out.resolve()}",
-            file=sys.stderr,
-            flush=True,
-        )
+    _write_run_output(cfg, work_dir, body, label="connect results")
 
 
 def execute_run(cfg: RunConfig, ap) -> int:
@@ -189,9 +205,14 @@ def execute_run(cfg: RunConfig, ap) -> int:
             f"HIERWALK_LAZY=0 to disable)"
         )
 
+    index_cwd = cfg.index_cwd
+    if not index_cwd and cfg.filelist:
+        index_cwd = str(Path(cfg.filelist).expanduser().resolve().parent)
+        cfg = replace(cfg, index_cwd=index_cwd)
+
     fl = parse_filelist(
         cfg.filelist,
-        index_cwd=cfg.index_cwd,
+        index_cwd=index_cwd,
         extra_defines=extra_defines,
         on_progress=on_progress,
         ignore_filelists=list(cfg.ignore_filelist),
@@ -210,7 +231,7 @@ def execute_run(cfg: RunConfig, ap) -> int:
     )
     work_dir = resolve_run_work_dir(
         top_label,
-        base=work_base_dir(cfg.index_cwd),
+        base=work_base_dir(index_cwd),
         explicit_cache_dir=cfg.cache_dir,
     )
     cache_dir = work_dir
@@ -232,7 +253,7 @@ def execute_run(cfg: RunConfig, ap) -> int:
     log_path: Path | None = None
     if not cfg.no_log_file:
         log_path = (
-            Path(cfg.log_file)
+            work_dir_sidecar_path(work_dir, cfg.log_file)
             if cfg.log_file
             else default_log_path(cfg.filelist, cfg.output, work_dir=work_dir)
         )
@@ -326,18 +347,14 @@ def execute_run(cfg: RunConfig, ap) -> int:
                     )
                     record_verification_item(spec, time.perf_counter() - _item_t0)
                     trace_rows = rows_lookup(pw_state.rows())
-                    text_out = (
-                        str(verification_output_path(cfg.output, "text"))
-                        if cfg.output != "-"
-                        else "-"
-                    )
                     _write_verification_output(
                         cfg,
+                        work_dir,
                         format_inst_trace_tsv(
                             trace_result,
                             rows_by_path=trace_rows,
                         ),
-                        text_out,
+                        phase="text",
                         label="inst-trace text results",
                     )
                 if do_logical:
@@ -395,8 +412,9 @@ def execute_run(cfg: RunConfig, ap) -> int:
             if do_logical:
                 _write_verification_output(
                     cfg,
+                    work_dir,
                     body,
-                    cfg.output,
+                    phase="logical",
                     label="inst-trace logical results",
                 )
             if on_progress and not cfg.quiet:
@@ -416,8 +434,10 @@ def execute_run(cfg: RunConfig, ap) -> int:
                     elab_tops=[top_name],
                     instance_rows=len(pw_state.rows_by_path),
                     mode=report_mode,
-                    output_path=cfg.output if do_logical else str(
-                        verification_output_path(cfg.output, "text")
+                    output_path=_artifact_output_path(
+                        work_dir,
+                        cfg,
+                        phase="logical" if do_logical else "text",
                     ),
                     filelist_warnings=len(fl.errors),
                     search_pattern=search_pattern,
@@ -480,15 +500,11 @@ def execute_run(cfg: RunConfig, ap) -> int:
                     )
                     cone_result = _run_cone(pw_state, index, top_name)
                     cone_rows = rows_lookup(pw_state.rows())
-                    text_out = (
-                        str(verification_output_path(cfg.output, "text"))
-                        if cfg.output != "-"
-                        else "-"
-                    )
                     _write_verification_output(
                         cfg,
+                        work_dir,
                         format_cone_tsv(cone_result, rows_by_path=cone_rows),
-                        text_out,
+                        phase="text",
                         label="cone text results",
                     )
                 if do_logical:
@@ -529,7 +545,9 @@ def execute_run(cfg: RunConfig, ap) -> int:
                                 rows_by_path=cone_rows,
                             )
                     if cfg.cone_graph:
-                        write_cone_dot(cone_result, cfg.cone_graph)
+                        graph_path = work_dir_sidecar_path(work_dir, cfg.cone_graph)
+                        if graph_path is not None:
+                            write_cone_dot(cone_result, str(graph_path))
                     body = format_cone_tsv(cone_result, rows_by_path=cone_rows)
             except ValueError as exc:
                 print(str(exc), file=sys.stderr)
@@ -537,8 +555,9 @@ def execute_run(cfg: RunConfig, ap) -> int:
             if do_logical:
                 _write_verification_output(
                     cfg,
+                    work_dir,
                     body,
-                    cfg.output,
+                    phase="logical",
                     label="cone logical results",
                 )
             if on_progress and not cfg.quiet:
@@ -558,8 +577,10 @@ def execute_run(cfg: RunConfig, ap) -> int:
                     elab_tops=[top_name],
                     instance_rows=len(pw_state.rows_by_path),
                     mode=report_mode,
-                    output_path=cfg.output if do_logical else str(
-                        verification_output_path(cfg.output, "text")
+                    output_path=_artifact_output_path(
+                        work_dir,
+                        cfg,
+                        phase="logical" if do_logical else "text",
                     ),
                     filelist_warnings=len(fl.errors),
                     search_pattern=search_pattern,
@@ -763,11 +784,7 @@ def execute_run(cfg: RunConfig, ap) -> int:
             )
             return 0
 
-        if cfg.output == "-":
-            sys.stdout.write(body)
-        else:
-            with open(cfg.output, "w", encoding="utf-8") as f:
-                f.write(body)
+        _write_run_output(cfg, work_dir, body)
         if on_progress and not cfg.quiet:
             on_progress(
                 f"path-walk: done 1 trace step, "
@@ -785,7 +802,7 @@ def execute_run(cfg: RunConfig, ap) -> int:
                 elab_tops=[top_name],
                 instance_rows=len(pw_state.rows_by_path),
                 mode=report_mode,
-                output_path=cfg.output,
+                output_path=_artifact_output_path(work_dir, cfg),
                 filelist_warnings=len(fl.errors),
                 search_pattern=search_pattern,
             ),
@@ -838,11 +855,7 @@ def execute_run(cfg: RunConfig, ap) -> int:
             stop = index.module_stop_reason(name)
             lines.append(f"{name}\t{file_p}\t{stop}")
         body = "\n".join(lines) + "\n"
-        if cfg.output == "-":
-            sys.stdout.write(body)
-        else:
-            with open(cfg.output, "w", encoding="utf-8") as f:
-                f.write(body)
+        _write_run_output(cfg, work_dir, body, label="find-top results")
         emit_run_report(
             RunReport(
                 filelist_path=cfg.filelist,
@@ -856,7 +869,7 @@ def execute_run(cfg: RunConfig, ap) -> int:
                 index_incremental=index_incremental,
                 top_candidates=len(tops),
                 mode="find-top",
-                output_path=cfg.output,
+                output_path=_artifact_output_path(work_dir, cfg),
                 filelist_warnings=len(fl.errors),
             ),
             log_path=log_path,
@@ -980,11 +993,7 @@ def execute_run(cfg: RunConfig, ap) -> int:
             trace_result,
             rows_by_path=trace_rows,
         )
-        if cfg.output == "-":
-            sys.stdout.write(body)
-        else:
-            with open(cfg.output, "w", encoding="utf-8") as f:
-                f.write(body)
+        _write_run_output(cfg, work_dir, body, label="inst-trace results")
         emit_run_report(
             RunReport(
                 filelist_path=cfg.filelist,
@@ -1000,7 +1009,7 @@ def execute_run(cfg: RunConfig, ap) -> int:
                 elab_cache_hits=elab_cache_hits,
                 instance_rows=len(rows),
                 mode="inst-trace",
-                output_path=cfg.output,
+                output_path=_artifact_output_path(work_dir, cfg),
                 filelist_warnings=len(fl.errors),
                 search_pattern=cfg.inst_trace.instance,
                 coverage=coverage,
@@ -1063,16 +1072,14 @@ def execute_run(cfg: RunConfig, ap) -> int:
                     rows_by_path=cone_rows,
                 )
         if cfg.cone_graph:
-            write_cone_dot(cone_result, cfg.cone_graph)
+            graph_path = work_dir_sidecar_path(work_dir, cfg.cone_graph)
+            if graph_path is not None:
+                write_cone_dot(cone_result, str(graph_path))
         body = format_cone_tsv(
             cone_result,
             rows_by_path=cone_rows,
         )
-        if cfg.output == "-":
-            sys.stdout.write(body)
-        else:
-            with open(cfg.output, "w", encoding="utf-8") as f:
-                f.write(body)
+        _write_run_output(cfg, work_dir, body, label="cone results")
         emit_run_report(
             RunReport(
                 filelist_path=cfg.filelist,
@@ -1088,7 +1095,7 @@ def execute_run(cfg: RunConfig, ap) -> int:
                 elab_cache_hits=elab_cache_hits,
                 instance_rows=len(rows),
                 mode=mode_name,
-                output_path=cfg.output,
+                output_path=_artifact_output_path(work_dir, cfg),
                 filelist_warnings=len(fl.errors),
                 search_pattern=cone_label,
                 coverage=coverage,
@@ -1186,11 +1193,7 @@ def execute_run(cfg: RunConfig, ap) -> int:
                         title="connectivity path evidence (log)",
                         rows_by_path=endpoint_rows,
                     )
-        if cfg.output == "-":
-            sys.stdout.write(body)
-        else:
-            with open(cfg.output, "w", encoding="utf-8") as f:
-                f.write(body)
+        _write_connect_output(cfg, work_dir, body)
         emit_run_report(
             RunReport(
                 filelist_path=cfg.filelist,
@@ -1206,7 +1209,7 @@ def execute_run(cfg: RunConfig, ap) -> int:
                 elab_cache_hits=elab_cache_hits,
                 instance_rows=len(rows),
                 mode=effective_mode,
-                output_path=cfg.output,
+                output_path=_artifact_output_path(work_dir, cfg),
                 filelist_warnings=len(fl.errors),
                 coverage=coverage,
             ),
@@ -1240,11 +1243,7 @@ def execute_run(cfg: RunConfig, ap) -> int:
                 f"{format_path_chain_compact(h.path_chain)}"
             )
         body = "\n".join(lines) + "\n"
-        if cfg.output == "-":
-            sys.stdout.write(body)
-        else:
-            with open(cfg.output, "w", encoding="utf-8") as f:
-                f.write(body)
+        _write_run_output(cfg, work_dir, body, label="search results")
         emit_run_report(
             RunReport(
                 filelist_path=cfg.filelist,
@@ -1263,7 +1262,7 @@ def execute_run(cfg: RunConfig, ap) -> int:
                 search_pattern=search_spec.summary_pattern(),
                 search_hit_details=hits,
                 mode="search",
-                output_path=cfg.output,
+                output_path=_artifact_output_path(work_dir, cfg),
                 filelist_warnings=len(fl.errors),
                 coverage=coverage,
             ),
@@ -1281,11 +1280,7 @@ def execute_run(cfg: RunConfig, ap) -> int:
                 f"{r.via_filelist}\t{r.filelist_chain}"
             )
         body = "\n".join(lines) + "\n"
-        if cfg.output == "-":
-            sys.stdout.write(body)
-        else:
-            with open(cfg.output, "w", encoding="utf-8") as f:
-                f.write(body)
+        _write_run_output(cfg, work_dir, body, label="hierarchy results")
         emit_run_report(
             RunReport(
                 filelist_path=cfg.filelist,
@@ -1301,7 +1296,7 @@ def execute_run(cfg: RunConfig, ap) -> int:
                 elab_cache_hits=elab_cache_hits,
                 instance_rows=len(rows),
                 mode="hierarchy",
-                output_path=cfg.output,
+                output_path=_artifact_output_path(work_dir, cfg),
                 filelist_warnings=len(fl.errors),
                 coverage=coverage,
                 hierarchy_rows=rows,
