@@ -49,7 +49,9 @@ from hierwalk.enable_diagnostics import (
     format_enable_root_cause_hint,
     resolve_block_enabled,
 )
+from hierwalk.connect_artifacts import format_connect_artifact_log
 from hierwalk.run_request import (
+    RUN_CONN_CHECK,
     RUN_ON_FULL_INDEX,
     RunConfig,
     _full_index_block_key,
@@ -733,6 +735,33 @@ def main(argv=None) -> int:
             for entry, run_cfg in test_plan
         ]
 
+    if config_path is not None:
+        config_index_cwd = str(config_path.parent.resolve())
+        if not cfg.index_cwd:
+            cfg = replace(cfg, index_cwd=config_index_cwd)
+        test_plan = [
+            (
+                entry,
+                run_cfg
+                if run_cfg.index_cwd
+                else replace(run_cfg, index_cwd=config_index_cwd),
+            )
+            for entry, run_cfg in test_plan
+        ]
+        if not cfg.quiet:
+            cache_env = os.environ.get("HIERWALK_CACHE_DIR")
+            if cache_env:
+                print(
+                    f"run: note HIERWALK_CACHE_DIR={cache_env} — "
+                    "connect TSV and cache live there, not under index-cwd",
+                    file=sys.stderr,
+                )
+            print(
+                f"run: index-cwd: {cfg.index_cwd} "
+                f"(work-dir .db_<top> is created here unless HIERWALK_CACHE_DIR is set)",
+                file=sys.stderr,
+            )
+
     has_verification = any(
         entry is not None and entry.kind in VERIFICATION_KINDS
         for entry, _ in test_plan
@@ -819,9 +848,15 @@ def main(argv=None) -> int:
                 and run_cfg.verification_phase != "both"
                 else ""
             )
+            output_note = run_cfg.output
+            if (
+                test_entry.kind == RUN_CONN_CHECK
+                and normalize_run_mode(run_cfg.index_strategy or "") == "path-walk"
+            ):
+                output_note = format_connect_artifact_log(run_cfg)
             print(
                 f"run: test {label} kind={test_entry.kind} mode={test_entry.mode} "
-                f"index={index_note}{phase_note} output={run_cfg.output}",
+                f"index={index_note}{phase_note} output={output_note}",
                 file=sys.stderr,
             )
         step_label = verification_step_label(run_cfg)

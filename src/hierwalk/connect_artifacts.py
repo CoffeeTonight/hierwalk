@@ -22,11 +22,116 @@ class ConnectOutputPaths:
     logical_tsv: Path
 
 
-def connect_output_paths(work_dir: Path) -> ConnectOutputPaths:
+def connect_output_basename(output: str = "conn.tsv") -> str:
+    """Filename for logical connect TSV (text phase uses ``.text`` suffix)."""
+    if not output or output == "-":
+        return "conn.tsv"
+    return Path(output).name
+
+
+def connect_output_paths(
+    work_dir: Path,
+    output: str = "conn.tsv",
+) -> ConnectOutputPaths:
     root = work_dir.expanduser().resolve()
+    logical_name = connect_output_basename(output)
+    text_name = verification_output_path(logical_name, "text").name
     return ConnectOutputPaths(
-        text_tsv=root / "conn.text.tsv",
-        logical_tsv=root / "conn.tsv",
+        text_tsv=root / text_name,
+        logical_tsv=root / logical_name,
+    )
+
+
+def resolve_connect_work_dir(
+    cfg: RunConfig,
+    *,
+    top: str = "",
+) -> Path:
+    from hierwalk.cache import resolve_run_work_dir, work_base_dir
+
+    return resolve_run_work_dir(
+        top or cfg.top or "top",
+        base=work_base_dir(cfg.index_cwd),
+        explicit_cache_dir=cfg.cache_dir,
+    )
+
+
+def connect_artifact_paths(cfg: RunConfig, *, top: str = "") -> ConnectOutputPaths:
+    """Resolved text/logical connect TSV paths for a run config."""
+    return connect_output_paths(resolve_connect_work_dir(cfg, top=top), cfg.output)
+
+
+def format_connect_artifact_log(cfg: RunConfig, *, top: str = "") -> str:
+    """Human-readable artifact path(s) for path-walk connect under the work dir."""
+    paths = connect_artifact_paths(cfg, top=top)
+    phase = (cfg.verification_phase or "both").strip().lower()
+    if phase == "text":
+        return str(paths.text_tsv.resolve())
+    if phase == "logical":
+        return str(paths.logical_tsv.resolve())
+    return f"{paths.text_tsv.resolve()}, {paths.logical_tsv.resolve()}"
+
+
+def format_connect_artifact_help(cfg: RunConfig, *, top: str = "") -> str:
+    """One-line hint: work dir + text/logical filenames (no conn.logical.tsv)."""
+    work = resolve_connect_work_dir(cfg, top=top)
+    paths = connect_output_paths(work, cfg.output)
+    return (
+        f"work-dir={work.resolve()} "
+        f"text={paths.text_tsv.name} logical={paths.logical_tsv.name}"
+    )
+
+
+def resolve_connect_output_dir(
+    connect_output_dir: Optional[Path],
+    *,
+    top: str = "",
+    base: Optional[Path] = None,
+    cache_dir: Optional[Path] = None,
+) -> Path:
+    """
+    Resolve the per-run db folder for connect phase TSV artifacts.
+
+    Falls back through explicit *connect_output_dir*, the active work dir,
+    then ``.db_{TOP}`` under *base* (or the parent of a ``.db_*`` *cache_dir*).
+    """
+    if connect_output_dir is not None:
+        root = connect_output_dir.expanduser().resolve()
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+    from hierwalk.cache import ensure_top_work_dir, get_active_work_dir, work_base_dir
+
+    active = get_active_work_dir()
+    if active is not None:
+        return active
+    resolved_base = base
+    if resolved_base is None and cache_dir is not None:
+        cache_root = cache_dir.expanduser().resolve()
+        if cache_root.name.startswith(".db_"):
+            resolved_base = cache_root.parent
+    if resolved_base is None:
+        resolved_base = work_base_dir()
+    return ensure_top_work_dir(top or "top", base=resolved_base)
+
+
+def ensure_connect_phase_tsv(
+    work_dir: Path,
+    results: Sequence[ConnectResult],
+    *,
+    phase: str,
+    output: str = "conn.tsv",
+    modules_cached: Optional[int] = None,
+    rows_by_path: Optional[Mapping[str, FlatRow]] = None,
+) -> Path:
+    """Write phase TSV if missing; always overwrites with *results* when invoked."""
+    paths = connect_output_paths(work_dir, output)
+    target = paths.text_tsv if phase == "text" else paths.logical_tsv
+    return write_connect_phase_tsv(
+        target,
+        results,
+        phase=phase,
+        modules_cached=modules_cached,
+        rows_by_path=rows_by_path,
     )
 
 

@@ -9,6 +9,7 @@ from hierwalk.connect_artifacts import (
     apply_connect_logical_phase,
     archive_run_config_sources,
     connect_output_paths,
+    resolve_connect_output_dir,
     snapshot_connect_text_phase,
     prepare_text_connect_request,
     reorder_connect_checks_by_b_endpoint,
@@ -32,6 +33,13 @@ def _tsv_rows(tsv: str) -> list[dict[str, str]]:
 def test_connect_output_paths_under_db(tmp_path: Path):
     db = tmp_path / ".db_top"
     paths = connect_output_paths(db)
+    assert paths.text_tsv == db / "conn.text.tsv"
+    assert paths.logical_tsv == db / "conn.tsv"
+
+
+def test_connect_output_paths_custom_name(tmp_path: Path):
+    db = tmp_path / ".db_top"
+    paths = connect_output_paths(db, "results/conn.tsv")
     assert paths.text_tsv == db / "conn.text.tsv"
     assert paths.logical_tsv == db / "conn.tsv"
 
@@ -181,6 +189,67 @@ def test_path_walk_writes_text_and_logical_tsv(tmp_path: Path):
     assert "connected_logical" in logical_rows[0]
     assert batch.results[0].connected_text is not None
     assert batch.results[0].connected_logical is not None
+
+
+def test_resolve_connect_output_dir_falls_back_to_db_top(tmp_path: Path):
+    db = tmp_path / ".db_soc"
+    resolved = resolve_connect_output_dir(
+        None,
+        top="soc",
+        cache_dir=db,
+    )
+    assert resolved == db.resolve()
+    assert resolved.is_dir()
+
+
+def test_path_walk_text_conn_writes_tsv_without_output_dir_or_active_work_dir(
+    tmp_path: Path,
+):
+    """Text-conn step must leave conn.text.tsv even without execute_run work-dir setup."""
+    (tmp_path / "top.v").write_text(
+        "module top(input logic clk); child u0(.clk(clk)); endmodule\n"
+        "module child(input logic clk); endmodule\n",
+        encoding="utf-8",
+    )
+    fl = tmp_path / "fl.f"
+    fl.write_text(f"{(tmp_path / 'top.v').resolve()}\n", encoding="utf-8")
+    flr = parse_filelist(str(fl), index_cwd=str(tmp_path))
+    req = ConnectivityRequest(
+        checks=(ConnectivityCheck("top.clk", "top.u0.clk"),),
+        top="top",
+    )
+    run_path_walk_connect(
+        req,
+        flr,
+        top="top",
+        no_cache=True,
+        connect_phase="text",
+        cache_dir=tmp_path / ".db_top",
+    )
+    assert (tmp_path / ".db_top" / "conn.text.tsv").is_file()
+
+
+def test_path_walk_text_conn_zero_checks_writes_header_tsv(tmp_path: Path):
+    (tmp_path / "top.v").write_text("module top; endmodule\n", encoding="utf-8")
+    fl = tmp_path / "fl.f"
+    fl.write_text(f"{(tmp_path / 'top.v').resolve()}\n", encoding="utf-8")
+    flr = parse_filelist(str(fl), index_cwd=str(tmp_path))
+    db = tmp_path / ".db_top"
+    req = ConnectivityRequest(checks=(), top="top")
+    run_path_walk_connect(
+        req,
+        flr,
+        top="top",
+        no_cache=True,
+        connect_phase="text",
+        connect_output_dir=db,
+    )
+    text_path = db / "conn.text.tsv"
+    assert text_path.is_file()
+    lines = [ln for ln in text_path.read_text(encoding="utf-8").splitlines() if ln]
+    assert lines[0].startswith("check_id\t")
+    data_rows = [ln for ln in lines[1:] if ln and not ln.startswith("#")]
+    assert data_rows == []
 
 
 def test_path_walk_connect_writes_tsv_via_active_work_dir(tmp_path: Path):

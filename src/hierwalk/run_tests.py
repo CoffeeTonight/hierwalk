@@ -449,11 +449,21 @@ def run_config_for_test(
     )
 
     out_raw = _mapping_get_ci(spec, "output")
-    output = (
-        _resolve_path(base, str(out_raw).strip())
-        if out_raw is not None and str(out_raw).strip()
-        else cfg.output
-    )
+    if entry.kind == RUN_CONN_CHECK and index_strategy == "path-walk":
+        from hierwalk.connect_artifacts import connect_output_basename
+
+        if out_raw is not None and str(out_raw).strip():
+            output = connect_output_basename(str(out_raw).strip())
+        elif cfg.output and cfg.output != "-":
+            output = connect_output_basename(cfg.output)
+        else:
+            output = "conn.tsv"
+    else:
+        output = (
+            _resolve_path(base, str(out_raw).strip())
+            if out_raw is not None and str(out_raw).strip()
+            else cfg.output
+        )
 
     include_ff = _bool_field(spec, "include_ff", "include-ff", default=cfg.include_ff)
     ff_barrier = _first_ci(spec, "ff_barrier", "ff-barrier")

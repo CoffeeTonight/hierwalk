@@ -585,7 +585,10 @@ def execute_run(cfg: RunConfig, ap) -> int:
                     print("missing connectivity request", file=sys.stderr)
                     return 1
                 extra_defines.update(connect_request.defines)
-            from hierwalk.connect_artifacts import connect_output_paths
+            from hierwalk.connect_artifacts import (
+                connect_output_paths,
+                ensure_connect_phase_tsv,
+            )
 
             phase = _verification_phase(cfg)
             do_text = phase in ("text", "both")
@@ -599,6 +602,7 @@ def execute_run(cfg: RunConfig, ap) -> int:
                     reuse_suite_session=cfg.flat_suite_step,
                     jobs=cfg.jobs,
                     connect_output_dir=work_dir,
+                    connect_output_name=cfg.output,
                     connect_phase=phase,
                     **pw_connect_ignore,
                 )
@@ -607,18 +611,58 @@ def execute_run(cfg: RunConfig, ap) -> int:
                 return 2
             connect_results = batch.results
             endpoint_rows = pw_state.rows_by_path
-            conn_paths = connect_output_paths(work_dir)
+            conn_paths = connect_output_paths(work_dir, cfg.output)
+            if do_text:
+                ensure_connect_phase_tsv(
+                    work_dir,
+                    connect_results,
+                    phase="text",
+                    output=cfg.output,
+                    modules_cached=batch.modules_cached,
+                    rows_by_path=endpoint_rows,
+                )
+            if do_logical:
+                ensure_connect_phase_tsv(
+                    work_dir,
+                    connect_results,
+                    phase="logical",
+                    output=cfg.output,
+                    modules_cached=batch.modules_cached,
+                    rows_by_path=endpoint_rows,
+                )
             if not cfg.quiet:
-                if do_text:
+                from hierwalk.connect_artifacts import format_connect_artifact_help
+
+                print(
+                    f"run: connect artifacts: {format_connect_artifact_help(cfg, top=top_for_walk)}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                if do_text and conn_paths.text_tsv.is_file():
                     print(
                         f"run: connect text results written: "
                         f"{conn_paths.text_tsv.resolve()}",
                         file=sys.stderr,
                         flush=True,
                     )
-                if do_logical:
+                elif do_text:
+                    print(
+                        f"run: WARNING connect text TSV missing: "
+                        f"{conn_paths.text_tsv.resolve()}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                if do_logical and conn_paths.logical_tsv.is_file():
                     print(
                         f"run: connect logical results written: "
+                        f"{conn_paths.logical_tsv.resolve()} "
+                        f"(logical phase; not conn.logical.tsv)",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                elif do_logical:
+                    print(
+                        f"run: WARNING connect logical TSV missing: "
                         f"{conn_paths.logical_tsv.resolve()}",
                         file=sys.stderr,
                         flush=True,

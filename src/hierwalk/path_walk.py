@@ -3234,6 +3234,7 @@ def run_path_walk_connect(
     jobs: int = 0,
     diagnostic_inst_trace: bool = False,
     connect_output_dir: Optional[Path] = None,
+    connect_output_name: str = "conn.tsv",
     connect_phase: str = "both",
 ) -> Tuple[ConnectivityBatchResult, DesignIndex, PathWalkState]:
     """
@@ -3372,6 +3373,7 @@ def run_path_walk_connect(
             connect_output_paths,
             merge_refined_connect_results,
             prepare_text_connect_request,
+            resolve_connect_output_dir,
             snapshot_connect_text_phase,
             write_connect_phase_tsv,
         )
@@ -3379,16 +3381,12 @@ def run_path_walk_connect(
 
         bind_path_walk_phase_emit(state._emit_walk)
         timing_rec = get_active_recorder()
-        resolved_output_dir = connect_output_dir
-        if resolved_output_dir is None:
-            from hierwalk.cache import get_active_work_dir
-
-            resolved_output_dir = get_active_work_dir()
-        out_paths = (
-            connect_output_paths(resolved_output_dir)
-            if resolved_output_dir is not None
-            else None
+        resolved_output_dir = resolve_connect_output_dir(
+            connect_output_dir,
+            top=top_name,
+            cache_dir=cache_dir,
         )
+        out_paths = connect_output_paths(resolved_output_dir, connect_output_name)
         try:
             batch: Optional[ConnectivityBatchResult] = None
             if do_text:
@@ -3416,22 +3414,16 @@ def run_path_walk_connect(
                 state._emit_walk(
                     f"connect-text-conn done checks={len(batch.results)} ms={coi_ms:.1f}"
                 )
-                if out_paths is not None:
-                    write_connect_phase_tsv(
-                        out_paths.text_tsv,
-                        batch.results,
-                        phase="text",
-                        modules_cached=batch.modules_cached,
-                        rows_by_path=state.rows_by_path,
-                    )
-                    state._emit_walk(
-                        f"connect-text-conn written {out_paths.text_tsv.resolve()}"
-                    )
-                else:
-                    state._emit_walk(
-                        "connect-text-conn skip write: no connect_output_dir "
-                        "(set connect_output_dir or run via hier-walk execute_run)"
-                    )
+                write_connect_phase_tsv(
+                    out_paths.text_tsv,
+                    batch.results,
+                    phase="text",
+                    modules_cached=batch.modules_cached,
+                    rows_by_path=state.rows_by_path,
+                )
+                state._emit_walk(
+                    f"connect-text-conn written {out_paths.text_tsv.resolve()}"
+                )
                 if timing_rec is not None:
                     timing_rec.end_step()
                 state.stats.checks_run = len(batch.results)
@@ -3486,22 +3478,16 @@ def run_path_walk_connect(
                     f"connect-logical-conn done checks={len(batch.results)} "
                     f"ms={logical_ms:.1f}"
                 )
-                if out_paths is not None:
-                    write_connect_phase_tsv(
-                        out_paths.logical_tsv,
-                        batch.results,
-                        phase="logical",
-                        modules_cached=batch.modules_cached,
-                        rows_by_path=state.rows_by_path,
-                    )
-                    state._emit_walk(
-                        f"connect-logical-conn written {out_paths.logical_tsv.resolve()}"
-                    )
-                else:
-                    state._emit_walk(
-                        "connect-logical-conn skip write: no connect_output_dir "
-                        "(set connect_output_dir or run via hier-walk execute_run)"
-                    )
+                write_connect_phase_tsv(
+                    out_paths.logical_tsv,
+                    batch.results,
+                    phase="logical",
+                    modules_cached=batch.modules_cached,
+                    rows_by_path=state.rows_by_path,
+                )
+                state._emit_walk(
+                    f"connect-logical-conn written {out_paths.logical_tsv.resolve()}"
+                )
                 if timing_rec is not None:
                     timing_rec.end_step()
                 state.stats.checks_run = len(batch.results)

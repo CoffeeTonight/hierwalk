@@ -141,6 +141,7 @@ def test_parse_flat_suite_with_full_db_and_three_tests():
     assert conn_entry.mode == "path-walk"
     assert conn_cfg.mode == "check-connect-batch"
     assert conn_cfg.index_strategy == "path-walk"
+    assert conn_cfg.output == "conn.tsv"
     assert conn_cfg.ignore_path == ()
     assert conn_cfg.jobs == 0
     _, trace_cfg = plans[1]
