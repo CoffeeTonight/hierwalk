@@ -264,7 +264,7 @@ def execute_run(cfg: RunConfig, ap) -> int:
     )
     work_dir = resolve_run_work_dir(
         top_label,
-        base=work_base_dir(index_cwd),
+        base=work_base_dir(),
         explicit_cache_dir=cfg.cache_dir,
     )
     cache_dir = work_dir

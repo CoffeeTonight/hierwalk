@@ -4,7 +4,7 @@ Path-walk module DB: Tier-0 regex decl index + Tier-1 validated instance scan.
 Built incrementally during path-walk; disk cache per RTL file (regex + validated).
 Does not participate in full DesignIndex build / load_or_build_index.
 
-Disk layout (default *cache_dir* = ``.db_{TOP}/`` beside ``--index-cwd`` or cwd)::
+Disk layout (default *cache_dir* = ``.db_{TOP}/`` under shell cwd)::
 
     .db_{TOP}/path-walk-db/{cache_key}/regex/{file_token}.pkl
     .db_{TOP}/path-walk-db/{cache_key}/validated/{file_token}_{defines}.pkl

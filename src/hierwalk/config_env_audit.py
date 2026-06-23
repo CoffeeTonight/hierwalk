@@ -39,7 +39,7 @@ _BEHAVIOR_ENV_VARS: Sequence[tuple[str, str, str]] = (
     (
         "HIERWALK_CACHE_DIR",
         "(unset)",
-        "override work/cache root (unset=.db_{TOP} under index-cwd or cwd)",
+        "override work/cache root (unset=.db_{TOP} under shell cwd)",
     ),
     (
         "HIERWALK_IGNORE_PATH",

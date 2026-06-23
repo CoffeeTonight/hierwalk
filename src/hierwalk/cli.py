@@ -459,7 +459,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--cache-dir",
         default=None,
         metavar="DIR",
-        help="cache/work root (default: .db_{TOP} under --index-cwd or cwd; override: $HIERWALK_CACHE_DIR)",
+        help="cache/work root (default: .db_{TOP} under shell cwd; override: $HIERWALK_CACHE_DIR)",
     )
     cache.add_argument(
         "--no-cache",
@@ -757,7 +757,7 @@ def main(argv=None) -> int:
                 )
             print(
                 f"run: index-cwd: {cfg.index_cwd} "
-                f"(all logs and result TSV files go under .db_<top> here)",
+                f"(filelist -F paths only; .db_<top> under shell cwd)",
                 file=sys.stderr,
             )
 

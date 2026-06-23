@@ -298,7 +298,8 @@ def test_preprocess_cache_hit_replays_in_file_defines_for_ifdef():
     assert insts2 == []
 
 
-def test_end_to_end_cli(tmp_path: Path, capsys):
+def test_end_to_end_cli(tmp_path: Path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     (tmp_path / "a.v").write_text(
         "module top;\n  sub u_s ();\nendmodule\nmodule sub;\n  leaf u_l ();\nendmodule\nmodule leaf; endmodule\n",
         encoding="utf-8",

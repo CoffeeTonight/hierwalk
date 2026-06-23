@@ -64,7 +64,8 @@ def test_text_tsv_written_even_with_zero_checks(tmp_path: Path):
     assert text_path.stat().st_size > 0
 
 
-def test_suite_text_step_creates_text_tsv_before_logical(tmp_path: Path):
+def test_suite_text_step_creates_text_tsv_before_logical(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     _minimal_conn_fl(tmp_path)
     doc = {
         "filelist": "fl.f",
@@ -98,7 +99,8 @@ def test_suite_text_step_creates_text_tsv_before_logical(tmp_path: Path):
     assert missing_verification_artifacts(text_cfg, work) == []
 
 
-def test_suite_logical_step_creates_logical_tsv(tmp_path: Path):
+def test_suite_logical_step_creates_logical_tsv(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     _minimal_conn_fl(tmp_path)
     doc = {
         "filelist": "fl.f",

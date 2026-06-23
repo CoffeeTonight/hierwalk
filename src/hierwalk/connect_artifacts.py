@@ -95,7 +95,7 @@ def resolve_connect_work_dir(
 
     return resolve_run_work_dir(
         top or cfg.top or "top",
-        base=work_base_dir(cfg.index_cwd),
+        base=work_base_dir(),
         explicit_cache_dir=cfg.cache_dir,
     )
 

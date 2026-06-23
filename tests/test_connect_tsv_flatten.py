@@ -135,6 +135,7 @@ endmodule
             "-o",
             str(out),
         ],
+        cwd=str(tmp_path),
         capture_output=True,
         text=True,
         check=True,

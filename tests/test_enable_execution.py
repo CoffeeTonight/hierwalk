@@ -407,8 +407,8 @@ def test_verify_enable_gate_json_subprocess():
     assert not (root / "VERIFY_gate_cone.tsv").exists()
 
 
-def test_connect_artifacts_follow_json_dir_not_shell_cwd(tmp_path: Path):
-    """Flat-suite JSON sets index-cwd to the config directory, not the shell cwd."""
+def test_connect_artifacts_follow_shell_cwd_not_json_dir(tmp_path: Path):
+    """Flat-suite JSON sets index-cwd to the config dir; .db_{TOP} uses shell cwd."""
     root = Path(__file__).resolve().parents[1] / "examples" / "stress_seed42"
     cfg = root / "verify_enable_gate.json"
     assert cfg.is_file()
@@ -421,6 +421,6 @@ def test_connect_artifacts_follow_json_dir_not_shell_cwd(tmp_path: Path):
     )
     err = proc.stderr
     assert f"index-cwd: {root}" in err
-    assert f"work-dir: {root / '.db_stress_top'}" in err
-    assert (root / ".db_stress_top" / "VERIFY_gate_conn.text.tsv").is_file()
-    assert (tmp_path / ".db_stress_top").exists() is False
+    assert f"work-dir: {tmp_path / '.db_stress_top'}" in err
+    assert (tmp_path / ".db_stress_top" / "VERIFY_gate_conn.text.tsv").is_file()
+    assert (tmp_path / ".db_stress_top" / "VERIFY_gate_conn.tsv").is_file()

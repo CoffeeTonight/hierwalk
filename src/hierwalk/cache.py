@@ -63,9 +63,8 @@ def top_work_dir_name(top: str) -> str:
     return f".db_{sanitize_top_name(top)}"
 
 
-def work_base_dir(index_cwd: Optional[str] = None) -> Path:
-    if index_cwd:
-        return Path(index_cwd).expanduser().resolve()
+def work_base_dir() -> Path:
+    """Shell cwd for ``.db_{TOP}/`` (``index-cwd`` is filelist-only, not work-dir)."""
     return Path.cwd()
 
 
