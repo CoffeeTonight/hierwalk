@@ -110,6 +110,16 @@ def test_connectivity_port_to_internal_wire(tmp_path: Path):
     assert r.connected
 
 
+def _seed_path_walk_rows(state, rows) -> None:
+    """Mirror production: path-walk always has elaborated rows before signal-tail checks."""
+    for row in rows:
+        state.rows_by_path[row.full_path] = row
+        if row.parent_path:
+            state._children_by_parent.setdefault(row.parent_path, set()).add(
+                row.full_path
+            )
+
+
 def test_signal_tail_dotted_miss_large_module_fast(tmp_path: Path):
     """Instance-like dotted tail must not run full assign/port-map collection on miss."""
     n = 50_000
@@ -117,6 +127,32 @@ def test_signal_tail_dotted_miss_large_module_fast(tmp_path: Path):
     body += "".join(f"  assign w{i} = clk;\n" for i in range(n))
     body += "  child u_core (.clk(clk));\nendmodule\n"
     body += "module child(input logic clk); LEAF u_leaf (); endmodule\nmodule LEAF; endmodule\n"
+    rtl = tmp_path / "big.v"
+    rtl.write_text(body, encoding="utf-8")
+    index = DesignIndex.build({str(rtl): body})
+    _, rows = elaborate(index, "BIG")
+    from hierwalk.path_walk import PathWalkState
+    from hierwalk.path_walk_db import PathWalkModuleDb
+
+    state = PathWalkState(
+        index=index,
+        top="BIG",
+        mod_db=PathWalkModuleDb([str(rtl)], index),
+    )
+    _seed_path_walk_rows(state, rows)
+    t0 = time.perf_counter()
+    hit = state._resolve_signal_tail("BIG", "u_core.u_leaf", target_path="BIG.u_core.u_leaf")
+    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+    assert hit is False
+    assert elapsed_ms < 500.0
+
+
+def test_signal_tail_instance_leaf_miss_large_module_fast(tmp_path: Path):
+    """Single-segment instance miss on assign-heavy parent must stay regex-only."""
+    n = 50_000
+    body = "module BIG(input logic clk);\n"
+    body += "".join(f"  assign w{i} = clk;\n" for i in range(n))
+    body += "  child u_core (.clk(clk));\nendmodule\n"
     rtl = tmp_path / "big.v"
     rtl.write_text(body, encoding="utf-8")
     index = DesignIndex.build({str(rtl): body})
@@ -130,10 +166,12 @@ def test_signal_tail_dotted_miss_large_module_fast(tmp_path: Path):
         top="BIG",
         mod_db=PathWalkModuleDb([str(rtl)], index),
     )
+    _seed_path_walk_rows(state, rows)
     t0 = time.perf_counter()
-    hit = state._resolve_signal_tail("BIG", "u_core.u_leaf", target_path="BIG.u_core.u_leaf")
+    kind, check_ms = state._classify_signal_tail("BIG", "u_core", row)
     elapsed_ms = (time.perf_counter() - t0) * 1000.0
-    assert hit is False
+    assert kind is None
+    assert check_ms < 500.0
     assert elapsed_ms < 500.0
 
 
@@ -175,6 +213,7 @@ def test_signal_tail_wire_probe_large_module_under_one_second(tmp_path: Path):
         top="BIG",
         mod_db=PathWalkModuleDb([str(rtl)], index),
     )
+    _seed_path_walk_rows(state, rows)
     t0 = time.perf_counter()
     kind, check_ms = state._classify_signal_tail("BIG", "w_last", row)
     elapsed_ms = (time.perf_counter() - t0) * 1000.0
