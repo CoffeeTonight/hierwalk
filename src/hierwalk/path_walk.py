@@ -22,6 +22,7 @@ from hierwalk.connect_endpoints import (
     _module_body_for_row,
     _net_exists_in_module,
     _port_exists,
+    is_module_local_signal_name,
     net_exists_in_module_fast,
     wire_tail_exists_fast,
 )
@@ -813,6 +814,9 @@ class PathWalkState:
         def _elapsed() -> float:
             return (time.perf_counter() - t0) * 1000.0
 
+        if not is_module_local_signal_name(signal_name):
+            return None, _elapsed()
+
         body = self._cached_module_body(row)
         if wire_tail_exists_fast(body, signal_name, param_ctx=row.param_ctx or None):
             return "wire", _elapsed()
@@ -896,7 +900,11 @@ class PathWalkState:
             return True
 
         miss_leaf = self._inst_leaf_prefix(remainder)
-        if miss_leaf and miss_leaf != remainder:
+        if (
+            miss_leaf
+            and miss_leaf != remainder
+            and is_module_local_signal_name(remainder)
+        ):
             prefix_kind, prefix_ms = self._classify_signal_tail(parent_path, miss_leaf, row)
             if prefix_kind is not None:
                 self._emit_signal_tail(

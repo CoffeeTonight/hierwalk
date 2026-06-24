@@ -46,6 +46,7 @@ from hierwalk.connect_scan import (
 )
 from hierwalk.hierarchy_log import format_row_provenance
 from hierwalk.index import DesignIndex
+from hierwalk.inst_scan import probe_inst_leaf_regex_fast
 from hierwalk.models import ConnectEndpoint, FlatRow
 from hierwalk.params import resolve_param_map
 from hierwalk.path_refine import refine_param_ctx_for_path
@@ -172,6 +173,12 @@ def _port_exists(
     return bool(matching_ports(port_index, port_name, param_ctx=ctx))
 
 
+def is_module_local_signal_name(name: str) -> bool:
+    """True when *name* is a single module-local identifier (not a dotted hierarchy tail)."""
+    text = name.strip()
+    return bool(text) and "." not in text.split("[", 1)[0]
+
+
 def wire_tail_exists_fast(
     body: str,
     net_name: str,
@@ -181,7 +188,7 @@ def wire_tail_exists_fast(
     """
     Cheapest wire/reg tail probe: decl/assign regex only (no param refine, no stmt walk).
     """
-    if not body or not net_name:
+    if not body or not net_name or not is_module_local_signal_name(net_name):
         return False
     base = net_name.split("[", 1)[0].split(".", 1)[0]
     if _net_base_declared_fast(body, base):
@@ -413,7 +420,7 @@ def net_exists_in_module_fast(
     Wire/reg probes run before param-refine and before full statement walks.
     Avoids :func:`build_module_connect_index` (assign/FF scan + UF compression).
     """
-    if not net_name:
+    if not net_name or not is_module_local_signal_name(net_name):
         return False
     base = net_name.split("[", 1)[0].split(".", 1)[0]
     text = body if body is not None else _module_body_for_row(index, row)
@@ -432,25 +439,17 @@ def net_exists_in_module_fast(
         return True
     if _port_exists(index, row, net_name, top=top, param_ctx=ctx):
         return True
-    names = module_declared_net_names(
-        index,
-        row,
-        top=top,
-        cache=cache,
-        param_ctx=ctx,
-        body=text,
-        deep=False,
-    )
-    if net_name in names or base in names:
-        return True
     if not text:
         return False
-    # Dotted tails are instance paths, not module-local signal names.
-    if "." in net_name.split("[", 1)[0]:
-        return False
+    # Single-name probes only — never walk the full module decl/assign set here.
+    if _net_base_declared_fast(text, base):
+        _cache_note_decl_net_hit(cache, key, net_name, base)
+        return True
     if net_base_in_assign_probe(text, base, param_map=ctx):
         _cache_note_decl_net_hit(cache, key, net_name, base)
         return True
+    if probe_inst_leaf_regex_fast(text, base):
+        return False
     if net_base_in_port_map_probe(text, base, param_map=ctx):
         _cache_note_decl_net_hit(cache, key, net_name, base)
         return True

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from hierwalk.connectivity import check_connectivity
 from hierwalk.connect_endpoints import (
+    is_module_local_signal_name,
     net_exists_in_module_fast,
     parse_connect_endpoint,
     resolve_endpoint,
@@ -134,6 +135,13 @@ def test_signal_tail_dotted_miss_large_module_fast(tmp_path: Path):
     elapsed_ms = (time.perf_counter() - t0) * 1000.0
     assert hit is False
     assert elapsed_ms < 500.0
+
+
+def test_dotted_tail_is_not_module_local_signal_name():
+    assert not is_module_local_signal_name("c.d")
+    assert not is_module_local_signal_name("u_core.u_leaf")
+    assert is_module_local_signal_name("c")
+    assert is_module_local_signal_name("bus[0]")
 
 
 def test_net_exists_port_map_only_wire(tmp_path: Path):

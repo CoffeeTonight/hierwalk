@@ -317,6 +317,38 @@ def instance_edge_matches_leaf(
     return any(name.lower() == leaf_lower for name in expand_inst_names(edge.inst_name, "", pmap))
 
 
+_INST_LEAF_PROBE_RE_CACHE: Dict[str, re.Pattern[str]] = {}
+_INST_PROBE_CELL_KW = (
+    r"(?:input|output|inout|wire|logic|reg|assign|always|parameter|localparam|"
+    r"genvar|typedef|module|endmodule)"
+)
+_INST_PROBE_CELL = r"(?:\\(?:[A-Za-z_]\w*|\S+)|[A-Za-z_]\w*)"
+
+
+def probe_inst_leaf_regex_fast(body: str, inst_leaf: str) -> bool:
+    """
+    Regex probe for ``cell inst (...)`` / ``cell inst;`` without a full body walk.
+
+    Used on path-walk signal-tail miss to avoid scanning large assign-only modules
+    when the first dotted segment is an instance name.
+    """
+    if not body or not inst_leaf:
+        return False
+    base = inst_leaf.split("[", 1)[0]
+    if not base:
+        return False
+    pat = _INST_LEAF_PROBE_RE_CACHE.get(base)
+    if pat is None:
+        esc = re.escape(base)
+        pat = re.compile(
+            rf"(?:^|[;{{}}])\s*(?!{_INST_PROBE_CELL_KW}\b){_INST_PROBE_CELL}\s+"
+            rf"{esc}(?:\s*\[[^\]]*\])?\s*[\(;]",
+            re.MULTILINE,
+        )
+        _INST_LEAF_PROBE_RE_CACHE[base] = pat
+    return pat.search(body) is not None
+
+
 def find_hierarchy_instance(
     body: str,
     inst_leaf: str,
