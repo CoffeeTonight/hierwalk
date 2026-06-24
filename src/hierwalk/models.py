@@ -84,6 +84,7 @@ class FlatRow:
     via_filelist: str = ""
     filelist_chain: str = ""
     param_ctx: Dict[str, str] = field(default_factory=dict)
+    param_ctx_folded: bool = False
 
 
 @dataclass

@@ -7,7 +7,11 @@ from pathlib import Path
 
 from hierwalk.connect_request import ConnectivityCheck, ConnectivityRequest
 from hierwalk.filelist import parse_filelist
-from hierwalk.path_walk import create_path_walk_index, run_path_walk_connect
+from hierwalk.path_walk import (
+    build_path_walk_state,
+    create_path_walk_index,
+    run_path_walk_connect,
+)
 
 
 def _write_large_flat_top(tmp_path: Path, n_inst: int) -> Path:
@@ -79,6 +83,47 @@ def test_selective_child_edge_finds_one_inst_in_large_top(tmp_path: Path, monkey
     assert target in state.rows_by_path
     assert tier1_calls == []
     assert elapsed_ms < 15_000.0
+
+
+def test_deep_hierarchy_through_assign_heavy_parent(tmp_path: Path, monkeypatch):
+    """``top.a.b.c`` must resolve ``b`` in a 50k-assign parent without tier1."""
+    n = 50_000
+    body = "module TOP(input logic clk);\n  MOD_A a (.clk(clk));\nendmodule\n"
+    body += "module MOD_A(input logic clk);\n"
+    body += "".join(f"  assign w{i} = clk;\n" for i in range(n))
+    body += "  MOD_B b (.clk(clk));\nendmodule\n"
+    body += "module MOD_B(input logic clk);\n  MOD_C c (.clk(clk));\nendmodule\n"
+    body += "module MOD_C(input logic clk);\n  wire deep;\n  assign deep = clk;\nendmodule\n"
+    rtl = tmp_path / "chain.v"
+    rtl.write_text(body, encoding="utf-8")
+    fl = tmp_path / "design.f"
+    fl.write_text(str(rtl.resolve()) + "\n", encoding="utf-8")
+    flr = parse_filelist(str(fl), index_cwd=str(tmp_path))
+
+    tier1_calls: list[str] = []
+    from hierwalk.path_walk_db import PathWalkModuleDb
+
+    orig = PathWalkModuleDb.tier1_scan_file
+
+    def traced_tier1(self, path):
+        tier1_calls.append(str(path))
+        return orig(self, path)
+
+    monkeypatch.setattr(PathWalkModuleDb, "tier1_scan_file", traced_tier1)
+    monkeypatch.setattr(PathWalkModuleDb, "_warm_tier1_background", lambda self, _f: None)
+
+    req = ConnectivityRequest(
+        checks=(ConnectivityCheck("TOP.a.b.c.deep", "TOP.clk", check_id="chain"),),
+        top="TOP",
+    )
+    index, mod_db = create_path_walk_index(flr, "TOP", defines={}, no_cache=True, jobs=1)
+    t0 = time.perf_counter()
+    state = build_path_walk_state(index, "TOP", req, mod_db, jobs=1)
+    walk_ms = (time.perf_counter() - t0) * 1000.0
+
+    assert "TOP.a.b.c" in state.rows_by_path
+    assert tier1_calls == []
+    assert walk_ms < 30_000.0
 
 
 def test_preprocessed_text_disk_cache(tmp_path: Path, monkeypatch):
@@ -174,6 +219,54 @@ def test_inst_leaf_index_avoids_repeat_selective_scan(tmp_path: Path, monkeypatc
     state.ensure_path("SOC_TOP.u_ip_200")
     assert "u_ip_200" in find_calls
     assert "u_ip_100" not in find_calls
+
+
+def test_empty_param_ctx_skips_path_refine_on_signal_tail(tmp_path: Path, monkeypatch):
+    """Folded but empty param_ctx must not trigger full-path refine on large parents."""
+    n = 50_000
+    body = "module TOP(input logic clk);\n  MOD_A a (.clk(clk));\nendmodule\n"
+    body += "module MOD_A(input logic clk);\n"
+    body += "".join(f"  assign w{i} = clk;\n" for i in range(n))
+    body += "  MOD_B b (.clk(clk));\nendmodule\n"
+    body += "module MOD_B(input logic clk);\n  MOD_C c (.clk(clk));\nendmodule\n"
+    body += "module MOD_C(input logic clk);\n  wire deep;\n  assign deep = clk;\nendmodule\n"
+    rtl = tmp_path / "chain.v"
+    rtl.write_text(body, encoding="utf-8")
+    fl = tmp_path / "design.f"
+    fl.write_text(str(rtl.resolve()) + "\n", encoding="utf-8")
+    flr = parse_filelist(str(fl), index_cwd=str(tmp_path))
+
+    refine_calls: list[str] = []
+
+    import hierwalk.path_refine as pr
+
+    orig = pr.refine_param_ctx_for_path
+
+    def traced_refine(index, top, full_path):
+        refine_calls.append(full_path)
+        return orig(index, top, full_path)
+
+    monkeypatch.setattr(pr, "refine_param_ctx_for_path", traced_refine)
+    monkeypatch.setattr(
+        "hierwalk.connect_endpoints.refine_param_ctx_for_path",
+        traced_refine,
+    )
+
+    from hierwalk.path_walk_db import PathWalkModuleDb
+
+    monkeypatch.setattr(PathWalkModuleDb, "_warm_tier1_background", lambda self, _f: None)
+
+    req = ConnectivityRequest(
+        checks=(ConnectivityCheck("TOP.a.b.c.deep", "TOP.clk", check_id="chain"),),
+        top="TOP",
+    )
+    index, mod_db = create_path_walk_index(flr, "TOP", defines={}, no_cache=True, jobs=1)
+    t0 = time.perf_counter()
+    build_path_walk_state(index, "TOP", req, mod_db, jobs=1)
+    walk_ms = (time.perf_counter() - t0) * 1000.0
+
+    assert refine_calls == []
+    assert walk_ms < 30_000.0
 
 
 def test_find_instance_by_child_module_returns_first_matching_edge():

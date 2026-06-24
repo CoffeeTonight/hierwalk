@@ -37,6 +37,7 @@ from hierwalk.inst_scan import (
     find_hierarchy_instance,
     find_instance_by_child_module,
     instance_edge_matches_leaf,
+    probe_inst_leaf_regex_fast,
     scan_hierarchy_instances,
 )
 from hierwalk.params import parse_param_pairs
@@ -1690,6 +1691,30 @@ class PathWalkModuleDb:
         edge = find_instance_by_child_module(body, miss_leaf, param_map=pmap)
         return [edge] if edge is not None else []
 
+    def _parent_module_body_text(
+        self,
+        fpath: str,
+        parent_module: str,
+    ) -> str:
+        try:
+            text = self._preprocessed_text_for_file(fpath)
+        except OSError:
+            return ""
+        _header, body = _module_header_body(text, parent_module)
+        return body
+
+    def _inst_absent_from_parent_body(
+        self,
+        fpath: str,
+        parent_module: str,
+        inst_leaf: str,
+    ) -> bool:
+        """True when regex shows *inst_leaf* is not declared in *parent_module* body."""
+        body = self._parent_module_body_text(fpath, parent_module)
+        if not body:
+            return False
+        return not probe_inst_leaf_regex_fast(body, inst_leaf)
+
     def _selective_child_edge_lookup(
         self,
         parent_module: str,
@@ -1698,14 +1723,15 @@ class PathWalkModuleDb:
         fpath: str,
     ) -> Optional[InstanceEdge]:
         """Targeted parent-body scan for one instance (no full tier1 file walk)."""
+        body = self._parent_module_body_text(fpath, parent_module)
+        if not body:
+            return None
+        rec = self._index.get_module(parent_module)
         try:
             text = self._preprocessed_text_for_file(fpath)
         except OSError:
-            return None
-        header, body = _module_header_body(text, parent_module)
-        if not body and not header:
-            return None
-        rec = self._index.get_module(parent_module)
+            text = ""
+        header, _ = _module_header_body(text, parent_module)
         raw_params = dict(rec.raw_params) if rec and rec.raw_params else parse_param_pairs(header)
         pmap = resolve_param_map(raw_params, parent=parent_ctx)
         return find_hierarchy_instance(body, inst_leaf, param_map=pmap)
@@ -2098,6 +2124,9 @@ class PathWalkModuleDb:
             f"pw-db edge policy={policy} {parent_module}.{inst_leaf} "
             f"candidates={len(candidates)}{scope_note}"
         )
+        tried: Set[str] = set()
+        if avoid:
+            tried.add(avoid)
         if avoid:
             selective = self._selective_child_edge_lookup(
                 parent_module,
@@ -2118,7 +2147,6 @@ class PathWalkModuleDb:
                 )
                 self._warm_tier1_background(avoid)
                 return selective
-
         if policy == RESOLVE_CONFIDENT and scope_anchor and not candidates:
             self._enqueue_defer(
                 DeferredResolve(
@@ -2135,9 +2163,6 @@ class PathWalkModuleDb:
             )
             return None
 
-        tried: Set[str] = set()
-        if avoid:
-            tried.add(avoid)
         max_pass = 2 if policy == RESOLVE_CONFIDENT else 3
         for pass_idx in range(max_pass):
             for fpath in candidates:
@@ -2163,6 +2188,16 @@ class PathWalkModuleDb:
                     )
                     self._warm_tier1_background(fpath)
                     return selective
+                if self._inst_absent_from_parent_body(
+                    fpath,
+                    parent_module,
+                    inst_leaf,
+                ):
+                    self._trace(
+                        f"pw-db   edge skip tier1 {Path(fpath).name}: "
+                        f"{parent_module}.{inst_leaf} absent (regex)"
+                    )
+                    continue
                 modules = self.tier1_scan_file(fpath)
                 hit = modules.get(parent_module)
                 if hit is None:

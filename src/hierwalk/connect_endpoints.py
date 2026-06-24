@@ -140,7 +140,7 @@ def parse_connect_endpoint(
                 row,
                 tail,
                 top=top,
-                param_ctx=row.param_ctx or None,
+                param_ctx=_row_param_ctx_optional(row),
             ):
                 return hier, tail
         if "." not in tail:
@@ -148,7 +148,18 @@ def parse_connect_endpoint(
     return text, None
 
 
+def _row_param_ctx_optional(row: FlatRow) -> Optional[Mapping[str, str]]:
+    """Return row ctx for port probes; None only when path-refine may still be needed."""
+    if row.param_ctx_folded:
+        return row.param_ctx
+    if row.param_ctx:
+        return row.param_ctx
+    return None
+
+
 def _port_param_ctx(index: DesignIndex, row: FlatRow, top: str) -> Mapping[str, str]:
+    if row.param_ctx_folded:
+        return row.param_ctx
     if row.param_ctx:
         return row.param_ctx
     if top:
@@ -428,7 +439,11 @@ def net_exists_in_module_fast(
     ctx = (
         dict(param_ctx)
         if param_ctx is not None
-        else (dict(row.param_ctx) if row.param_ctx else _port_param_ctx(index, row, top))
+        else (
+            dict(row.param_ctx)
+            if row.param_ctx_folded or row.param_ctx
+            else dict(_port_param_ctx(index, row, top))
+        )
     )
     key = _decl_net_cache_key(row, ctx)
     if cache is not None and key in cache:
@@ -499,7 +514,7 @@ def _explain_port_miss(
         row,
         port_name,
         top=top,
-        param_ctx=row.param_ctx or None,
+        param_ctx=_row_param_ctx_optional(row),
         body=_module_body_for_row(index, row),
     ):
         return []
@@ -596,7 +611,7 @@ def resolve_endpoint(
         row,
         port_name,
         top=top,
-        param_ctx=row.param_ctx or None,
+        param_ctx=_row_param_ctx_optional(row),
         body=_module_body_for_row(index, row),
     ):
         ep.port_found = True

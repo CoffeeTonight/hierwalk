@@ -325,18 +325,10 @@ _INST_PROBE_CELL_KW = (
 _INST_PROBE_CELL = r"(?:\\(?:[A-Za-z_]\w*|\S+)|[A-Za-z_]\w*)"
 
 
-def probe_inst_leaf_regex_fast(body: str, inst_leaf: str) -> bool:
-    """
-    Regex probe for ``cell inst (...)`` / ``cell inst;`` without a full body walk.
-
-    Used on path-walk signal-tail miss to avoid scanning large assign-only modules
-    when the first dotted segment is an instance name.
-    """
-    if not body or not inst_leaf:
-        return False
+def _inst_leaf_probe_pattern(inst_leaf: str) -> Optional[re.Pattern[str]]:
     base = inst_leaf.split("[", 1)[0]
     if not base:
-        return False
+        return None
     pat = _INST_LEAF_PROBE_RE_CACHE.get(base)
     if pat is None:
         esc = re.escape(base)
@@ -346,7 +338,42 @@ def probe_inst_leaf_regex_fast(body: str, inst_leaf: str) -> bool:
             re.MULTILINE,
         )
         _INST_LEAF_PROBE_RE_CACHE[base] = pat
-    return pat.search(body) is not None
+    return pat
+
+
+def probe_inst_leaf_regex_fast(body: str, inst_leaf: str) -> bool:
+    """
+    Regex probe for ``cell inst (...)`` / ``cell inst;`` without a full body walk.
+
+    Used on path-walk signal-tail miss to avoid scanning large assign-only modules
+    when the first dotted segment is an instance name.
+    """
+    if not body or not inst_leaf:
+        return False
+    pat = _inst_leaf_probe_pattern(inst_leaf)
+    return pat is not None and pat.search(body) is not None
+
+
+def _clean_body_for_instance_scan(body: str) -> str:
+    from hierwalk.preprocess import strip_comments_for_instance_scan
+
+    work = slim_body_for_instance_scan(strip_comments_for_instance_scan(body))
+    if len(work) <= _LARGE_BODY_ATTR_SKIP:
+        clean = _ATTR_RE.sub(" ", work)
+        clean = _BIND_LINE_RE.sub("", clean)
+        return clean
+    return work
+
+
+def _inst_leaf_scan_start(clean: str, inst_leaf: str) -> int:
+    """Clean-body offset to begin instance scan (regex anchor, or 0)."""
+    pat = _inst_leaf_probe_pattern(inst_leaf)
+    if pat is None:
+        return 0
+    hit = pat.search(clean)
+    if hit is None:
+        return 0
+    return max(0, hit.start())
 
 
 def find_hierarchy_instance(
@@ -362,7 +389,15 @@ def find_hierarchy_instance(
     """
     if not body or not inst_leaf:
         return None
-    for edge in _iter_hierarchy_instance_edges(body, param_map=param_map):
+    clean = _clean_body_for_instance_scan(body)
+    if not probe_inst_leaf_regex_fast(clean, inst_leaf):
+        return None
+    start = _inst_leaf_scan_start(clean, inst_leaf)
+    for edge in _iter_hierarchy_instance_edges(
+        body,
+        param_map=param_map,
+        start=start,
+    ):
         if instance_edge_matches_leaf(edge, inst_leaf, param_map=param_map):
             return edge
     return None
@@ -415,6 +450,7 @@ def _iter_hierarchy_instance_edges(
     body: str,
     *,
     param_map: Optional[Mapping[str, str]] = None,
+    start: int = 0,
 ) -> Iterator[InstanceEdge]:
     from hierwalk.preprocess import strip_comments_for_instance_scan
 
@@ -427,7 +463,7 @@ def _iter_hierarchy_instance_edges(
         clean = work
     seen: Set[Tuple[str, str]] = set()
     n = len(clean)
-    i = 0
+    i = max(0, min(start, n))
 
     def add(
         cell: str,

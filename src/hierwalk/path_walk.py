@@ -22,7 +22,7 @@ from hierwalk.connect_endpoints import (
     _module_body_for_row,
     _net_base_declared_fast,
     _net_exists_in_module,
-    _port_exists,
+    _row_param_ctx_optional,
     is_module_local_signal_name,
     net_exists_in_module_fast,
     wire_tail_exists_fast,
@@ -477,6 +477,7 @@ class PathWalkState:
             via_filelist=self.index.filelist_for(file_path),
             filelist_chain=self.index.filelist_chain_for(file_path),
             param_ctx=dict(param_ctx),
+            param_ctx_folded=True,
         )
         if parent:
             self._children_by_parent.setdefault(parent, set()).add(path)
@@ -792,7 +793,7 @@ class PathWalkState:
         hit = self._param_ctx_cache.get(row.full_path)
         if hit is not None:
             return hit
-        if row.param_ctx:
+        if row.param_ctx_folded or row.param_ctx:
             ctx = dict(row.param_ctx)
         else:
             from hierwalk.connect_endpoints import _port_param_ctx
@@ -830,15 +831,6 @@ class PathWalkState:
             return None, _elapsed()
         if wire_tail_exists_fast(body, signal_name):
             return "wire", _elapsed()
-        ctx = row.param_ctx if row.param_ctx else self._cached_param_ctx(row)
-        if _port_exists(
-            self.index,
-            row,
-            signal_name,
-            top=self.top,
-            param_ctx=ctx,
-        ):
-            return "port", _elapsed()
         base = stem.split(".", 1)[0]
         if _net_base_declared_fast(body, base):
             return "wire", _elapsed()
@@ -1563,21 +1555,13 @@ def _walk_target_from_spec(spec: str, state: PathWalkState) -> str:
         if row is None:
             continue
         port = ".".join(parts[i:])
-        if _port_exists(
-            state.index,
-            row,
-            port,
-            top=state.top,
-            param_ctx=row.param_ctx or None,
-        ):
-            return hier
         if net_exists_in_module_fast(
             state.index,
             row,
             port,
             top=state.top,
             cache=state._decl_net_cache,
-            param_ctx=row.param_ctx or None,
+            param_ctx=_row_param_ctx_optional(row),
             body=state._cached_module_body(row),
         ):
             return hier
@@ -1638,21 +1622,13 @@ def _inst_path_from_spec(
         if nxt not in lookup:
             row = lookup.get(cur)
             if row is not None:
-                if _port_exists(
-                    state.index,
-                    row,
-                    remainder,
-                    top=state.top,
-                    param_ctx=row.param_ctx or None,
-                ):
-                    return cur
                 if net_exists_in_module_fast(
                     state.index,
                     row,
                     remainder,
                     top=state.top,
                     cache=state._decl_net_cache,
-                    param_ctx=row.param_ctx or None,
+                    param_ctx=_row_param_ctx_optional(row),
                     body=state._cached_module_body(row),
                 ):
                     return cur
