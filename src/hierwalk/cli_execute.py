@@ -408,6 +408,11 @@ def execute_run(cfg: RunConfig, ap) -> int:
                         check_prefix=result.check_id or "",
                         rows_by_path=endpoint_rows,
                     )
+            if cfg.output == "-":
+                sys.stdout.write(body)
+            else:
+                with open(cfg.output, "w", encoding="utf-8") as f:
+                    f.write(body)
             if log_path is not None:
                 with open(log_path, "a", encoding="utf-8") as fh:
                     emit_hierarchy_rows_log(
@@ -415,6 +420,11 @@ def execute_run(cfg: RunConfig, ap) -> int:
                         stream=fh,
                         title="path-walk instance rows (rtl + filelist)",
                     )
+                    fh.write("\n# connect results\n")
+                    fh.write(body)
+                    if not body.endswith("\n"):
+                        fh.write("\n")
+                    fh.flush()
             use_trace = cfg.connect_trace or cfg.connect_log
             if connect_request.trace or use_trace:
                 term_stream = sys.stderr if cfg.output == "-" else sys.stdout
@@ -423,6 +433,14 @@ def execute_run(cfg: RunConfig, ap) -> int:
                     stream=term_stream,
                     rows_by_path=endpoint_rows,
                 )
+                if log_path is not None:
+                    with open(log_path, "a", encoding="utf-8") as fh:
+                        print_connect_trace_reports(
+                            connect_results,
+                            stream=fh,
+                            rows_by_path=endpoint_rows,
+                        )
+                        fh.flush()
             if on_progress and not cfg.quiet:
                 on_progress(
                     f"path-walk: done {pw_state.stats.checks_run} check(s), "
@@ -430,19 +448,6 @@ def execute_run(cfg: RunConfig, ap) -> int:
                     f"{pw_state.stats.modules_loaded} module(s), "
                     f"{time.perf_counter() - t0:.1f}s"
                 )
-            if cfg.output == "-":
-                sys.stdout.write(body)
-            else:
-                with open(cfg.output, "w", encoding="utf-8") as f:
-                    f.write(body)
-            from hierwalk.path_walk import build_path_walk_db_full
-
-            if not cfg.flat_suite_step:
-                db_queued = build_path_walk_db_full(pw_state.mod_db)
-                if db_queued and on_progress and not cfg.quiet:
-                    on_progress(
-                        f"path-walk: post-verify DB build warmed {db_queued} file(s)"
-                    )
             emit_run_report(
                 RunReport(
                     filelist_path=cfg.filelist,
@@ -458,6 +463,14 @@ def execute_run(cfg: RunConfig, ap) -> int:
                 ),
                 log_path=log_path,
             )
+            from hierwalk.path_walk import build_path_walk_db_full
+
+            if not cfg.flat_suite_step:
+                db_queued = build_path_walk_db_full(pw_state.mod_db)
+                if db_queued and on_progress and not cfg.quiet:
+                    on_progress(
+                        f"path-walk: post-verify DB build warmed {db_queued} file(s)"
+                    )
             return 0
 
         if cfg.output == "-":

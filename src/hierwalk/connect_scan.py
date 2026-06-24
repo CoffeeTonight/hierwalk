@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 from dataclasses import dataclass, field
 from typing import Dict, FrozenSet, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
@@ -1149,6 +1150,52 @@ def _advance_keyword_depths(text: str, pos: int, depths: Dict[str, int]) -> int:
     return 0
 
 
+_LINE_SPLIT_STRUCTURAL_RE = re.compile(
+    r"\b(?:begin|endcase|endgenerate|endfunction|endtask|fork|join|"
+    r"case|generate|always|function|task|initial|specify|property|sequence)\b",
+    re.IGNORECASE,
+)
+_LINE_SPLIT_MIN_BYTES = 64 * 1024
+
+
+def _split_statements_line_fast(clean: str) -> Optional[List[str]]:
+    """
+    O(lines) splitter for large flat bodies (one ``;``-terminated stmt per line).
+
+    Avoids char-wise ``split_statements`` on assign-heavy modules (50k+ lines).
+    """
+    if len(clean) < _LINE_SPLIT_MIN_BYTES:
+        return None
+    if _LINE_SPLIT_STRUCTURAL_RE.search(clean):
+        return None
+    out: List[str] = []
+    for raw in clean.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("//"):
+            continue
+        if line.startswith("`"):
+            continue
+        if line.endswith(";"):
+            stmt = line[:-1].strip()
+        elif _word_at(line, 0, "endmodule") or _word_at(line, 0, "endinterface"):
+            stmt = line
+        elif _word_at(line, 0, "endprogram"):
+            stmt = line
+        else:
+            return None
+        if stmt:
+            out.append(stmt)
+    return out or None
+
+
+@lru_cache(maxsize=16)
+def _split_statements_cached(clean: str) -> Tuple[str, ...]:
+    fast = _split_statements_line_fast(clean)
+    if fast is not None:
+        return tuple(fast)
+    return tuple(_split_statements_slow(clean))
+
+
 def split_statements(text: str) -> List[str]:
     """
     Split RTL body on ``;`` at structural depth zero.
@@ -1157,6 +1204,13 @@ def split_statements(text: str) -> List[str]:
     ``case/endcase``, ``fork/join`` so procedural blocks stay intact until
     their closing keyword, then sub-split recursively.
     """
+    clean = text.strip()
+    if not clean:
+        return []
+    return list(_split_statements_cached(clean))
+
+
+def _split_statements_slow(text: str) -> List[str]:
     clean = text.strip()
     if not clean:
         return []

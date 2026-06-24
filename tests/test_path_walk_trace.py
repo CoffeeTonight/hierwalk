@@ -134,6 +134,69 @@ def test_path_walk_connect_trace_writes_pw_db_to_run_log(tmp_path: Path):
     assert "[hier-walk path-walk]" in text
 
 
+def test_path_walk_connect_execute_writes_tsv_and_report_log(tmp_path: Path):
+    """Result TSV + hier-walk report must land in the log before post-verify DB warm."""
+    top_v = tmp_path / "top.v"
+    top_v.write_text(
+        """
+        module top(input logic clk);
+          leaf u_leaf (.clk(clk));
+        endmodule
+        module leaf(input logic clk);
+          wire w;
+          assign w = clk;
+        endmodule
+        """,
+        encoding="utf-8",
+    )
+    fl_path = tmp_path / "design.f"
+    fl_path.write_text(f"{top_v.resolve()}\n", encoding="utf-8")
+    out_tsv = tmp_path / "conn.tsv"
+    out_log = tmp_path / "conn.hier-walk.log"
+    run_json = tmp_path / "run.json"
+    run_json.write_text(
+        f"""{{
+  "filelist": "{fl_path.name}",
+  "index_cwd": ".",
+  "top": "top",
+  "log_file": "{out_log.name}",
+  "run_on_full_index": {{"enable": 0}},
+  "run_conn_check": {{
+    "enable": 1,
+    "mode": "path-walk",
+    "checks": [{{"id": "t", "a": "top.u_leaf.w", "b": "top.clk"}}],
+    "output": "{out_tsv.name}"
+  }}
+}}""",
+        encoding="utf-8",
+    )
+
+    import json
+
+    from hierwalk.cli_execute import execute_run
+    from hierwalk.run_tests import build_test_run_configs, parse_flat_run_suite
+
+    doc = json.loads(run_json.read_text(encoding="utf-8"))
+    suite = parse_flat_run_suite(doc, base_dir=tmp_path)
+    _, cfg = build_test_run_configs(suite, doc, base_dir=tmp_path)[0]
+
+    class _Ap:
+        def error(self, msg):
+            raise AssertionError(msg)
+
+    rc = execute_run(cfg, _Ap())
+    assert rc == 0
+    assert out_tsv.is_file()
+    assert "connected" in out_tsv.read_text(encoding="utf-8").lower()
+
+    log_path = out_log
+    assert log_path.is_file(), f"missing log at {log_path}"
+    log_text = log_path.read_text(encoding="utf-8")
+    assert "# path-walk trace" in log_text
+    assert "# connect results" in log_text
+    assert "--- hier-walk report ---" in log_text
+
+
 def test_path_walk_trace_writes_run_log(tmp_path: Path):
     top_v = tmp_path / "top.v"
     top_v.write_text(
