@@ -20,18 +20,23 @@ from hierwalk.connect_endpoints import (
     DeclNetCache,
     _lca,
     _module_body_for_row,
+    _net_base_declared_fast,
     _net_exists_in_module,
     _port_exists,
     is_module_local_signal_name,
     net_exists_in_module_fast,
     wire_tail_exists_fast,
 )
+from hierwalk.connect_scan import (
+    _net_base_in_assign_regex_fast,
+    _net_base_in_port_map_regex_fast,
+)
 from hierwalk.connect_request import ConnectivityRequest
 from hierwalk.connectivity import ConnectivityBatchResult, ConnectivitySession
 from hierwalk.filelist import FilelistResult
 from hierwalk.ignore_path import resolve_ignore_path_patterns, source_path_matches
 from hierwalk.index import DesignIndex, _ctx_key
-from hierwalk.inst_scan import expand_inst_names
+from hierwalk.inst_scan import expand_inst_names, probe_inst_leaf_regex_fast
 from hierwalk.lazy_scope import endpoint_specs_from_request, hierarchy_prefixes
 from hierwalk.library_scan import scan_library_modules
 from hierwalk.models import FlatRow, InstanceEdge
@@ -818,11 +823,14 @@ class PathWalkState:
             return None, _elapsed()
 
         body = self._cached_module_body(row)
-        if wire_tail_exists_fast(body, signal_name, param_ctx=row.param_ctx or None):
+        if not body:
+            return None, _elapsed()
+        stem = signal_name.split("[", 1)[0]
+        if probe_inst_leaf_regex_fast(body, stem):
+            return None, _elapsed()
+        if wire_tail_exists_fast(body, signal_name):
             return "wire", _elapsed()
-        ctx = self._cached_param_ctx(row)
-        if wire_tail_exists_fast(body, signal_name, param_ctx=ctx):
-            return "wire", _elapsed()
+        ctx = row.param_ctx if row.param_ctx else self._cached_param_ctx(row)
         if _port_exists(
             self.index,
             row,
@@ -831,15 +839,12 @@ class PathWalkState:
             param_ctx=ctx,
         ):
             return "port", _elapsed()
-        if net_exists_in_module_fast(
-            self.index,
-            row,
-            signal_name,
-            top=self.top,
-            cache=self._decl_net_cache,
-            param_ctx=ctx,
-            body=body,
-        ):
+        base = stem.split(".", 1)[0]
+        if _net_base_declared_fast(body, base):
+            return "wire", _elapsed()
+        if _net_base_in_assign_regex_fast(body, base):
+            return "wire", _elapsed()
+        if _net_base_in_port_map_regex_fast(body, base):
             return "wire", _elapsed()
         return None, _elapsed()
 
@@ -1446,13 +1451,12 @@ class PathWalkState:
                 if self._is_signal_or_port_tail_miss(cur, remainder, target_path=path):
                     return False
                 raw_source_has_inst = False
-                if parent_rec is not None and parent_rec.file_path and miss_leaf:
-                    try:
-                        raw_source_has_inst = miss_leaf in Path(
-                            parent_rec.file_path
-                        ).read_text(encoding="utf-8", errors="ignore")
-                    except OSError:
-                        raw_source_has_inst = False
+                if row is not None and miss_leaf:
+                    body = self._cached_module_body(row)
+                    if body:
+                        raw_source_has_inst = probe_inst_leaf_regex_fast(
+                            body, miss_leaf
+                        )
                 self._queue_walk_miss(
                     cur,
                     miss_leaf,
@@ -1559,7 +1563,13 @@ def _walk_target_from_spec(spec: str, state: PathWalkState) -> str:
         if row is None:
             continue
         port = ".".join(parts[i:])
-        if _port_exists(state.index, row, port, top=state.top):
+        if _port_exists(
+            state.index,
+            row,
+            port,
+            top=state.top,
+            param_ctx=row.param_ctx or None,
+        ):
             return hier
         if net_exists_in_module_fast(
             state.index,
@@ -1567,6 +1577,8 @@ def _walk_target_from_spec(spec: str, state: PathWalkState) -> str:
             port,
             top=state.top,
             cache=state._decl_net_cache,
+            param_ctx=row.param_ctx or None,
+            body=state._cached_module_body(row),
         ):
             return hier
     return text
@@ -1626,7 +1638,13 @@ def _inst_path_from_spec(
         if nxt not in lookup:
             row = lookup.get(cur)
             if row is not None:
-                if _port_exists(state.index, row, remainder, top=state.top):
+                if _port_exists(
+                    state.index,
+                    row,
+                    remainder,
+                    top=state.top,
+                    param_ctx=row.param_ctx or None,
+                ):
                     return cur
                 if net_exists_in_module_fast(
                     state.index,
@@ -1634,6 +1652,8 @@ def _inst_path_from_spec(
                     remainder,
                     top=state.top,
                     cache=state._decl_net_cache,
+                    param_ctx=row.param_ctx or None,
+                    body=state._cached_module_body(row),
                 ):
                     return cur
             return nxt

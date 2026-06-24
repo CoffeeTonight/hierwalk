@@ -664,6 +664,22 @@ def collect_assign_net_names(
     return _net_name_bases(names)
 
 
+def _net_base_in_port_map_regex_fast(body: str, base: str) -> bool:
+    """Regex probe for *base* in instance port expressions (no statement split)."""
+    if not body or not base:
+        return False
+    target = base.split("[", 1)[0].split(".", 1)[0]
+    if not target:
+        return False
+    clean = _clean_body(body)
+    esc = re.escape(target)
+    pat = re.compile(
+        rf"\.(?:\\(?:[A-Za-z_]\w*|\S+)|[A-Za-z_]\w*)\s*\([^)]*\b{esc}\b",
+        re.IGNORECASE,
+    )
+    return pat.search(clean) is not None
+
+
 def net_base_in_port_map_probe(
     body: str,
     base: str,
@@ -676,6 +692,8 @@ def net_base_in_port_map_probe(
     target = base.split("[", 1)[0].split(".", 1)[0]
     if not target:
         return False
+    if _net_base_in_port_map_regex_fast(body, target):
+        return True
     pmap = dict(param_map or {})
     for _inst, ports in instance_port_maps(body, param_map=pmap).items():
         for _port, expr in ports:

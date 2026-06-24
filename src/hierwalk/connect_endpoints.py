@@ -33,6 +33,7 @@ from hierwalk.connect_scan import (
     _clean_body,
     _collect_declared_net_names,
     _net_base_in_assign_regex_fast,
+    _net_base_in_port_map_regex_fast,
     _net_name_bases,
     apply_bind_connectivity,
     apply_empty_module_passthrough,
@@ -134,7 +135,13 @@ def parse_connect_endpoint(
         if index is not None:
             if _port_exists(index, row, tail, top=top):
                 return hier, tail
-            if _net_exists_in_module(index, row, tail, top=top):
+            if net_exists_in_module_fast(
+                index,
+                row,
+                tail,
+                top=top,
+                param_ctx=row.param_ctx or None,
+            ):
                 return hier, tail
         if "." not in tail:
             return hier, tail
@@ -142,12 +149,12 @@ def parse_connect_endpoint(
 
 
 def _port_param_ctx(index: DesignIndex, row: FlatRow, top: str) -> Mapping[str, str]:
+    if row.param_ctx:
+        return row.param_ctx
     if top:
         refined = refine_param_ctx_for_path(index, top, row.full_path)
         if refined.ok and refined.param_ctx:
             return refined.param_ctx
-    if row.param_ctx:
-        return row.param_ctx
     rec = index.get_module(row.module)
     if not rec:
         return {}
@@ -193,15 +200,7 @@ def wire_tail_exists_fast(
     base = net_name.split("[", 1)[0].split(".", 1)[0]
     if _net_base_declared_fast(body, base):
         return True
-    if _net_base_in_assign_regex_fast(body, base):
-        return True
-    if param_ctx is not None and net_base_in_assign_probe(
-        body,
-        base,
-        param_map=param_ctx,
-    ):
-        return True
-    return False
+    return _net_base_in_assign_regex_fast(body, base)
 
 
 def _nearest_hierarchy_row(
@@ -424,7 +423,7 @@ def net_exists_in_module_fast(
         return False
     base = net_name.split("[", 1)[0].split(".", 1)[0]
     text = body if body is not None else _module_body_for_row(index, row)
-    if wire_tail_exists_fast(text, net_name, param_ctx=row.param_ctx or None):
+    if wire_tail_exists_fast(text, net_name):
         return True
     ctx = (
         dict(param_ctx)
@@ -435,8 +434,6 @@ def net_exists_in_module_fast(
     if cache is not None and key in cache:
         names = cache[key]
         return net_name in names or base in names
-    if text and wire_tail_exists_fast(text, net_name, param_ctx=ctx):
-        return True
     if _port_exists(index, row, net_name, top=top, param_ctx=ctx):
         return True
     if not text:
@@ -445,12 +442,12 @@ def net_exists_in_module_fast(
     if _net_base_declared_fast(text, base):
         _cache_note_decl_net_hit(cache, key, net_name, base)
         return True
-    if net_base_in_assign_probe(text, base, param_map=ctx):
-        _cache_note_decl_net_hit(cache, key, net_name, base)
-        return True
     if probe_inst_leaf_regex_fast(text, base):
         return False
-    if net_base_in_port_map_probe(text, base, param_map=ctx):
+    if _net_base_in_assign_regex_fast(text, base):
+        _cache_note_decl_net_hit(cache, key, net_name, base)
+        return True
+    if _net_base_in_port_map_regex_fast(text, base):
         _cache_note_decl_net_hit(cache, key, net_name, base)
         return True
     return False
@@ -497,7 +494,14 @@ def _explain_port_miss(
 ) -> List[str]:
     ctx = _port_param_ctx(index, row, top)
     ports = sorted(ports_for_module(row.file, row.module, ctx))
-    if _net_exists_in_module(index, row, port_name, top=top):
+    if net_exists_in_module_fast(
+        index,
+        row,
+        port_name,
+        top=top,
+        param_ctx=row.param_ctx or None,
+        body=_module_body_for_row(index, row),
+    ):
         return []
     errors = [
         f"signal/port not found: '{inst_path}.{port_name}' on module {row.module} "
@@ -587,7 +591,14 @@ def resolve_endpoint(
         if require_port:
             errors.append(f"port required but not given: {spec}")
         return ep, errors
-    if _net_exists_in_module(index, row, port_name, top=top):
+    if net_exists_in_module_fast(
+        index,
+        row,
+        port_name,
+        top=top,
+        param_ctx=row.param_ctx or None,
+        body=_module_body_for_row(index, row),
+    ):
         ep.port_found = True
         return ep, errors
     errors.extend(_explain_port_miss(inst_path, port_name, row, index=index, top=top))
