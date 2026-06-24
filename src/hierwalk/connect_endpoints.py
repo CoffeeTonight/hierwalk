@@ -172,12 +172,6 @@ def _port_exists(
     return bool(matching_ports(port_index, port_name, param_ctx=ctx))
 
 
-def is_module_local_signal_name(name: str) -> bool:
-    """True when *name* is a single module-local identifier (not a dotted hierarchy tail)."""
-    text = name.strip()
-    return bool(text) and "." not in text.split("[", 1)[0]
-
-
 def wire_tail_exists_fast(
     body: str,
     net_name: str,
@@ -187,7 +181,7 @@ def wire_tail_exists_fast(
     """
     Cheapest wire/reg tail probe: decl/assign regex only (no param refine, no stmt walk).
     """
-    if not body or not net_name or not is_module_local_signal_name(net_name):
+    if not body or not net_name:
         return False
     base = net_name.split("[", 1)[0].split(".", 1)[0]
     if _net_base_declared_fast(body, base):
@@ -419,7 +413,7 @@ def net_exists_in_module_fast(
     Wire/reg probes run before param-refine and before full statement walks.
     Avoids :func:`build_module_connect_index` (assign/FF scan + UF compression).
     """
-    if not net_name or not is_module_local_signal_name(net_name):
+    if not net_name:
         return False
     base = net_name.split("[", 1)[0].split(".", 1)[0]
     text = body if body is not None else _module_body_for_row(index, row)

@@ -22,17 +22,15 @@ from hierwalk.connect_endpoints import (
     _module_body_for_row,
     _net_exists_in_module,
     _port_exists,
-    is_module_local_signal_name,
     net_exists_in_module_fast,
     wire_tail_exists_fast,
 )
-from hierwalk.connect_expand import expand_check_to_pairs
 from hierwalk.connect_request import ConnectivityRequest
 from hierwalk.connectivity import ConnectivityBatchResult, ConnectivitySession
 from hierwalk.filelist import FilelistResult
 from hierwalk.ignore_path import resolve_ignore_path_patterns, source_path_matches
 from hierwalk.index import DesignIndex, _ctx_key
-from hierwalk.inst_scan import expand_inst_names, probe_inst_in_module_text
+from hierwalk.inst_scan import expand_inst_names
 from hierwalk.lazy_scope import endpoint_specs_from_request, hierarchy_prefixes
 from hierwalk.library_scan import scan_library_modules
 from hierwalk.models import FlatRow, InstanceEdge
@@ -816,8 +814,6 @@ class PathWalkState:
             return (time.perf_counter() - t0) * 1000.0
 
         body = self._cached_module_body(row)
-        if not is_module_local_signal_name(signal_name):
-            return None, _elapsed()
         if wire_tail_exists_fast(body, signal_name, param_ctx=row.param_ctx or None):
             return "wire", _elapsed()
         ctx = self._cached_param_ctx(row)
@@ -900,11 +896,7 @@ class PathWalkState:
             return True
 
         miss_leaf = self._inst_leaf_prefix(remainder)
-        if (
-            miss_leaf
-            and miss_leaf != remainder
-            and is_module_local_signal_name(remainder)
-        ):
+        if miss_leaf and miss_leaf != remainder:
             prefix_kind, prefix_ms = self._classify_signal_tail(parent_path, miss_leaf, row)
             if prefix_kind is not None:
                 self._emit_signal_tail(
@@ -1448,14 +1440,9 @@ class PathWalkState:
                 raw_source_has_inst = False
                 if parent_rec is not None and parent_rec.file_path and miss_leaf:
                     try:
-                        body = Path(parent_rec.file_path).read_text(
-                            encoding="utf-8", errors="ignore"
-                        )
-                        parent_row = self.rows_by_path.get(cur)
-                        param_map = parent_row.param_ctx if parent_row else {}
-                        raw_source_has_inst = probe_inst_in_module_text(
-                            body, miss_leaf, param_map=param_map
-                        )
+                        raw_source_has_inst = miss_leaf in Path(
+                            parent_rec.file_path
+                        ).read_text(encoding="utf-8", errors="ignore")
                     except OSError:
                         raw_source_has_inst = False
                 self._queue_walk_miss(
@@ -2377,22 +2364,15 @@ def _extend_path_walk_connect(
     _walk_specs_with_recovery(state, specs, jobs=jobs)
     seen_lca: Set[Tuple[str, str]] = set()
     for chk in request.checks:
-        pairs = expand_check_to_pairs(
-            chk.endpoint_a,
-            chk.endpoint_b,
-            check_id=chk.check_id,
-            expand=chk.expand,
-        )
-        for pair in pairs:
-            a = _cached_walk_target_from_spec(pair.endpoint_a, state)
-            b = _cached_walk_target_from_spec(pair.endpoint_b, state)
-            key = (a, b)
-            if key in seen_lca:
-                continue
-            seen_lca.add(key)
-            if state._is_walk_blocked(a) and state._is_walk_blocked(b):
-                continue
-            state.ensure_lca_subtree(a, b)
+        a = _cached_walk_target_from_spec(chk.endpoint_a, state)
+        b = _cached_walk_target_from_spec(chk.endpoint_b, state)
+        key = (a, b)
+        if key in seen_lca:
+            continue
+        seen_lca.add(key)
+        if state._is_walk_blocked(a) and state._is_walk_blocked(b):
+            continue
+        state.ensure_lca_subtree(a, b)
     state.flush_pending_misses()
 
 
@@ -2770,9 +2750,6 @@ def run_path_walk_connect(
     trace_log_path: Optional[Path] = None,
     reuse_suite_session: bool = False,
     jobs: int = 0,
-    connect_output_dir: Optional[Path] = None,
-    connect_output_name: str = "conn.tsv",
-    connect_phase: str = "both",
 ) -> Tuple[ConnectivityBatchResult, DesignIndex, PathWalkState]:
     """
     Path-walk batch connectivity: on-demand RTL + shared :class:`ConnectivitySession`.
@@ -2878,56 +2855,6 @@ def run_path_walk_connect(
         )
         batch = session.run_request(request, jobs=1, on_progress=on_progress)
         state.stats.checks_run = len(batch.results)
-        if connect_output_dir is not None:
-            from hierwalk.connect_artifacts import (
-                connect_output_paths,
-                format_connect_hierarchy_tsv,
-                resolve_connect_output_dir,
-                write_connect_phase_tsv,
-            )
-
-            phase = connect_phase if connect_phase in ("text", "logical", "both") else "both"
-            out_dir = resolve_connect_output_dir(
-                connect_output_dir,
-                top=top_name,
-                cache_dir=cache_dir,
-            )
-            paths = connect_output_paths(out_dir, connect_output_name)
-            rows = state.rows_by_path
-            if phase in ("text", "both"):
-                from hierwalk.connect_artifacts import snapshot_connect_text_phase
-
-                snapshot_connect_text_phase(batch.results)
-                write_connect_phase_tsv(
-                    paths.text_tsv,
-                    batch.results,
-                    phase="text",
-                    rows_by_path=rows,
-                )
-                paths.hierarchy_text_tsv.write_text(
-                    format_connect_hierarchy_tsv(batch.results, rows, phase="text"),
-                    encoding="utf-8",
-                )
-                state._emit_walk(f"connect-text-conn written {paths.text_tsv.resolve()}")
-            if phase in ("logical", "both"):
-                from hierwalk.connect_artifacts import (
-                    apply_connect_logical_phase,
-                    snapshot_connect_text_phase,
-                )
-
-                snapshot_connect_text_phase(batch.results)
-                apply_connect_logical_phase(batch.results, rows, run_activation=True)
-                write_connect_phase_tsv(
-                    paths.logical_tsv,
-                    batch.results,
-                    phase="logical",
-                    rows_by_path=rows,
-                )
-                paths.hierarchy_logical_tsv.write_text(
-                    format_connect_hierarchy_tsv(batch.results, rows, phase="logical"),
-                    encoding="utf-8",
-                )
-                state._emit_walk(f"connect-logical-conn written {paths.logical_tsv.resolve()}")
         return batch, index, state
     finally:
         if opened_log and trace_log_fh is not None:

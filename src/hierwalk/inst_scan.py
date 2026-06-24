@@ -7,7 +7,6 @@ from typing import Dict, Iterator, List, Mapping, Optional, Set, Tuple, TypedDic
 
 _IDENT = r"[A-Za-z_]\w*"
 _ESC_IDENT = r"\\(?:[A-Za-z_]\w*|\S+)"
-_DIM_PART_RE = re.compile(r"\[[^\]]+\]")
 
 _KEYWORDS = frozenset(
     {
@@ -298,14 +297,6 @@ def iter_module_blocks(text: str) -> Iterator[ModuleBlock]:
         }
 
 
-def inst_base_name(name: str) -> str:
-    """Drop index/generate dimensions from an instance path segment."""
-    text = name.strip()
-    if not text or text.startswith("\\"):
-        return text
-    return _DIM_PART_RE.sub("", text)
-
-
 def instance_edge_matches_leaf(
     edge: InstanceEdge,
     inst_leaf: str,
@@ -326,29 +317,6 @@ def instance_edge_matches_leaf(
     return any(name.lower() == leaf_lower for name in expand_inst_names(edge.inst_name, "", pmap))
 
 
-def instance_edge_matches_leaf_base(
-    edge: InstanceEdge,
-    inst_leaf: str,
-    *,
-    param_map: Optional[Mapping[str, str]] = None,
-) -> bool:
-    """Text-conn: *inst_leaf* matches *edge* on identifier base (ignore ``[...]``)."""
-    if not inst_leaf:
-        return False
-    leaf_base = inst_base_name(inst_leaf)
-    if not leaf_base:
-        return False
-    pmap = dict(param_map or {})
-    if inst_base_name(edge.inst_name).lower() == leaf_base.lower():
-        return True
-    if edge.inst_name.lower() == leaf_base.lower():
-        return True
-    return any(
-        inst_base_name(name).lower() == leaf_base.lower()
-        for name in expand_inst_names(edge.inst_name, "", pmap)
-    )
-
-
 def find_hierarchy_instance(
     body: str,
     inst_leaf: str,
@@ -365,20 +333,29 @@ def find_hierarchy_instance(
     for edge in _iter_hierarchy_instance_edges(body, param_map=param_map):
         if instance_edge_matches_leaf(edge, inst_leaf, param_map=param_map):
             return edge
-    for edge in _iter_hierarchy_instance_edges(body, param_map=param_map):
-        if instance_edge_matches_leaf_base(edge, inst_leaf, param_map=param_map):
-            return edge
     return None
 
 
-def probe_inst_in_module_text(
+def find_instance_by_child_module(
     body: str,
-    inst_leaf: str,
+    child_module: str,
     *,
     param_map: Optional[Mapping[str, str]] = None,
-) -> bool:
-    """True when *inst_leaf* (or its base) is declared in module *body*."""
-    return find_hierarchy_instance(body, inst_leaf, param_map=param_map) is not None
+) -> Optional[InstanceEdge]:
+    """
+    Return the first instance whose cell type matches *child_module*.
+
+    Path-walk uses this when a hierarchy spec names a module type instead of an
+    instance leaf (``type-not-inst`` miss hints).
+    """
+    target = str(child_module or "").strip()
+    if not body or not target:
+        return None
+    target_lower = target.lower()
+    for edge in _iter_hierarchy_instance_edges(body, param_map=param_map):
+        if edge.child_module == target or edge.child_module.lower() == target_lower:
+            return edge
+    return None
 
 
 def scan_hierarchy_instances(

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import sys
 import time
 from pathlib import Path
@@ -43,14 +42,12 @@ from hierwalk.connectivity import (
     print_connect_trace_reports,
     run_connectivity_request,
 )
-from hierwalk.connect_artifacts import work_dir_sidecar_path
 from hierwalk.path_walk import run_path_walk_connect, run_path_walk_index
 from hierwalk.run_request import (
     normalize_run_mode,
     resolve_connectivity_request,
     resolve_effective_run_mode,
 )
-from hierwalk.trace_stop import trace_stop_from_fields
 from hierwalk.cone import (
     fanin_cone,
     fanout_cone,
@@ -164,12 +161,9 @@ def execute_run(cfg: RunConfig, ap) -> int:
         filelist_tops=list(fl.top_modules),
         filelist_path=cfg.filelist,
     )
-    index_base = cfg.index_cwd or (
-        str(fl.index_cwd_used) if fl.index_cwd_used else None
-    )
     work_dir = resolve_run_work_dir(
         top_label,
-        base=work_base_dir(index_base),
+        base=work_base_dir(cfg.index_cwd),
         explicit_cache_dir=cfg.cache_dir,
     )
     cache_dir = work_dir
@@ -183,7 +177,7 @@ def execute_run(cfg: RunConfig, ap) -> int:
     log_path: Path | None = None
     if not cfg.no_log_file:
         log_path = (
-            work_dir_sidecar_path(work_dir, cfg.log_file)
+            Path(cfg.log_file)
             if cfg.log_file
             else default_log_path(cfg.filelist, cfg.output, work_dir=work_dir)
         )
@@ -311,10 +305,6 @@ def execute_run(cfg: RunConfig, ap) -> int:
                 if cfg.over_approximate_if is not None
                 else True
             )
-            trace_stop = trace_stop_from_fields(
-                ignore_hierarchy=cfg.ignore_hierarchy,
-                trace_max_depth=cfg.trace_max_depth,
-            )
             _item_t0 = time.perf_counter()
             if cfg.fanout_cone:
                 cone_result = fanout_cone(
@@ -324,7 +314,6 @@ def execute_run(cfg: RunConfig, ap) -> int:
                     top=top_name,
                     defines=compile_defines,
                     over_approximate_if=over_approx,
-                    trace_stop=trace_stop,
                 )
                 report_mode = "fanout-cone"
             else:
@@ -336,7 +325,6 @@ def execute_run(cfg: RunConfig, ap) -> int:
                     top=top_name,
                     defines=compile_defines,
                     over_approximate_if=over_approx,
-                    trace_stop=trace_stop,
                 )
                 report_mode = "fanin-cone"
             record_verification_item(cone_label, time.perf_counter() - _item_t0)
@@ -387,12 +375,6 @@ def execute_run(cfg: RunConfig, ap) -> int:
                     print("missing connectivity request", file=sys.stderr)
                     return 1
                 extra_defines.update(connect_request.defines)
-            connect_phase = (cfg.verification_phase or "both").strip().lower()
-            if connect_phase not in ("text", "logical", "both"):
-                connect_phase = "both"
-            connect_name = (
-                Path(cfg.output).name if cfg.output and cfg.output != "-" else "conn.tsv"
-            )
             try:
                 batch, index, pw_state = run_path_walk_connect(
                     connect_request,
@@ -401,9 +383,6 @@ def execute_run(cfg: RunConfig, ap) -> int:
                     extra_defines=extra_defines,
                     reuse_suite_session=cfg.flat_suite_step,
                     jobs=cfg.jobs,
-                    connect_output_dir=work_dir,
-                    connect_output_name=connect_name,
-                    connect_phase=connect_phase,
                     **pw_ignore,
                 )
             except ValueError as exc:
@@ -454,34 +433,8 @@ def execute_run(cfg: RunConfig, ap) -> int:
             if cfg.output == "-":
                 sys.stdout.write(body)
             else:
-                from hierwalk.connect_artifacts import connect_output_paths
-
-                artifact_paths = connect_output_paths(work_dir, connect_name)
-                if connect_phase == "text":
-                    out_path = artifact_paths.text_tsv
-                else:
-                    out_path = artifact_paths.logical_tsv
-                if not out_path.is_file():
-                    out_path.parent.mkdir(parents=True, exist_ok=True)
-                    tmp = out_path.with_name(f"{out_path.name}.tmp.{os.getpid()}")
-                    try:
-                        tmp.write_text(body, encoding="utf-8")
-                        tmp.replace(out_path)
-                    finally:
-                        if tmp.exists():
-                            tmp.unlink(missing_ok=True)
-                dest = Path(cfg.output).expanduser().resolve()
-                if dest != out_path.resolve() and out_path.is_file():
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    tmp = dest.with_name(f"{dest.name}.tmp.{os.getpid()}")
-                    try:
-                        tmp.write_text(
-                            out_path.read_text(encoding="utf-8"), encoding="utf-8"
-                        )
-                        tmp.replace(dest)
-                    finally:
-                        if tmp.exists():
-                            tmp.unlink(missing_ok=True)
+                with open(cfg.output, "w", encoding="utf-8") as f:
+                    f.write(body)
             from hierwalk.path_walk import build_path_walk_db_full
 
             if not cfg.flat_suite_step:
@@ -510,32 +463,8 @@ def execute_run(cfg: RunConfig, ap) -> int:
         if cfg.output == "-":
             sys.stdout.write(body)
         else:
-            from hierwalk.connect_artifacts import work_dir_artifact_path
-
-            phase = (cfg.verification_phase or "logical").strip().lower()
-            out_path = work_dir_artifact_path(
-                work_dir,
-                cfg.output,
-                phase=phase if phase in ("text", "logical") else "logical",
-            )
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = out_path.with_name(f"{out_path.name}.tmp.{os.getpid()}")
-            try:
-                tmp.write_text(body, encoding="utf-8")
-                tmp.replace(out_path)
-            finally:
-                if tmp.exists():
-                    tmp.unlink(missing_ok=True)
-            dest = Path(cfg.output).expanduser().resolve()
-            if dest != out_path.resolve():
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                tmp = dest.with_name(f"{dest.name}.tmp.{os.getpid()}")
-                try:
-                    tmp.write_text(body, encoding="utf-8")
-                    tmp.replace(dest)
-                finally:
-                    if tmp.exists():
-                        tmp.unlink(missing_ok=True)
+            with open(cfg.output, "w", encoding="utf-8") as f:
+                f.write(body)
         if on_progress and not cfg.quiet:
             on_progress(
                 f"path-walk: done 1 trace step, "
@@ -785,10 +714,6 @@ def execute_run(cfg: RunConfig, ap) -> int:
             else True
         )
         cone_label = cfg.fanout_cone or cfg.fanin_cone or ""
-        trace_stop = trace_stop_from_fields(
-            ignore_hierarchy=cfg.ignore_hierarchy,
-            trace_max_depth=cfg.trace_max_depth,
-        )
         _item_t0 = time.perf_counter()
         if cfg.fanout_cone:
             cone_result = fanout_cone(
@@ -798,7 +723,6 @@ def execute_run(cfg: RunConfig, ap) -> int:
                 top=top_name,
                 defines=compile_defines,
                 over_approximate_if=over_approx,
-                trace_stop=trace_stop,
             )
             mode_name = "fanout-cone"
         else:
@@ -810,7 +734,6 @@ def execute_run(cfg: RunConfig, ap) -> int:
                 top=top_name,
                 defines=compile_defines,
                 over_approximate_if=over_approx,
-                trace_stop=trace_stop,
             )
             mode_name = "fanin-cone"
         record_verification_item(cone_label, time.perf_counter() - _item_t0)
@@ -960,72 +883,11 @@ def execute_run(cfg: RunConfig, ap) -> int:
                         title="connectivity path evidence (log)",
                         rows_by_path=endpoint_rows,
                     )
-        connect_phase = (cfg.verification_phase or "both").strip().lower()
-        if connect_phase not in ("text", "logical", "both"):
-            connect_phase = "both"
-        connect_name = (
-            Path(cfg.output).name if cfg.output and cfg.output != "-" else "conn.tsv"
-        )
         if cfg.output == "-":
             sys.stdout.write(body)
         else:
-            from hierwalk.connect_artifacts import (
-                apply_connect_logical_phase,
-                connect_output_paths,
-                format_connect_hierarchy_tsv,
-                snapshot_connect_text_phase,
-                write_connect_phase_tsv,
-            )
-
-            artifact_paths = connect_output_paths(work_dir, connect_name)
-            if connect_phase in ("text", "both"):
-                snapshot_connect_text_phase(connect_results)
-                write_connect_phase_tsv(
-                    artifact_paths.text_tsv,
-                    connect_results,
-                    phase="text",
-                    rows_by_path=endpoint_rows,
-                )
-                artifact_paths.hierarchy_text_tsv.write_text(
-                    format_connect_hierarchy_tsv(
-                        connect_results, endpoint_rows, phase="text"
-                    ),
-                    encoding="utf-8",
-                )
-            if connect_phase in ("logical", "both"):
-                snapshot_connect_text_phase(connect_results)
-                apply_connect_logical_phase(
-                    connect_results, endpoint_rows, run_activation=True
-                )
-                write_connect_phase_tsv(
-                    artifact_paths.logical_tsv,
-                    connect_results,
-                    phase="logical",
-                    rows_by_path=endpoint_rows,
-                )
-                artifact_paths.hierarchy_logical_tsv.write_text(
-                    format_connect_hierarchy_tsv(
-                        connect_results, endpoint_rows, phase="logical"
-                    ),
-                    encoding="utf-8",
-                )
-            out_path = (
-                artifact_paths.text_tsv
-                if connect_phase == "text"
-                else artifact_paths.logical_tsv
-            )
-            dest = Path(cfg.output).expanduser().resolve()
-            if dest != out_path.resolve() and out_path.is_file():
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                tmp = dest.with_name(f"{dest.name}.tmp.{os.getpid()}")
-                try:
-                    tmp.write_text(
-                        out_path.read_text(encoding="utf-8"), encoding="utf-8"
-                    )
-                    tmp.replace(dest)
-                finally:
-                    if tmp.exists():
-                        tmp.unlink(missing_ok=True)
+            with open(cfg.output, "w", encoding="utf-8") as f:
+                f.write(body)
         emit_run_report(
             RunReport(
                 filelist_path=cfg.filelist,

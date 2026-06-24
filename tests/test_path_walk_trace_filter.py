@@ -36,7 +36,6 @@ def test_path_walk_abcd_trace_shows_hits_not_search(tmp_path: Path):
         fl,
         top="A",
         no_cache=True,
-        connect_phase="logical",
         trace_stream=buf,
     )
     assert "A.B.C.D" in state.rows_by_path
@@ -44,8 +43,8 @@ def test_path_walk_abcd_trace_shows_hits_not_search(tmp_path: Path):
     text = buf.getvalue()
     assert "ok A.B.C.D" in text
     assert "pw-db   edge hit" in text or "pw-db   hit" in text
-    assert "pw-db tier0 scan" not in text
-    assert "pw-db inst-resolve tier1 enter" not in text
+    assert "pw-db tier0" not in text
+    assert "pw-db tier1" not in text
     assert "pw-db tier0 expand" not in text
     assert "edge miss" not in text
     assert "walk target=" not in text

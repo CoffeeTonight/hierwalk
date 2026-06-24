@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 
 @dataclass
@@ -84,8 +84,6 @@ class FlatRow:
     via_filelist: str = ""
     filelist_chain: str = ""
     param_ctx: Dict[str, str] = field(default_factory=dict)
-    refine_status: str = ""
-    activation: str = ""
 
 
 @dataclass
@@ -167,9 +165,6 @@ class ConnectResult:
     check_id: str = ""
     sub_results: Tuple["ConnectResult", ...] = ()
     waypoint_events: Tuple[Any, ...] = ()
-    connected_text: Optional[bool] = None
-    connected_logical: Optional[bool] = None
-    logical_notes: List[str] = field(default_factory=list)
 
 
 @dataclass

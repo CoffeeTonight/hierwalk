@@ -152,16 +152,6 @@ Cone mode (COI debug)
   Boundaries (stop + collect):
     fanout: always_ff D (ff-sink), module outputs (port-out), blackboxes
     fanin:  always_ff Q (ff-driver), module inputs (port-in), blackboxes
-    ignore-hierarchy: ``ignore_hierarchy`` pattern matched (see below)
-    trace-depth: ``trace_max_depth`` exceeded (top = depth 0)
-
-  ignore_hierarchy (string | array)
-    Hierarchy instance globs for trace stop (cone + inst-trace).
-    ``top.a.b.c.*`` — blackbox strict descendants of ``c`` (not ``c`` itself).
-    ``top.a.b.c`` — ``c`` and all below.  Plain integers in the array set depth
-    (same as ``trace_max_depth``; minimum wins).
-  trace_max_depth (int)
-    Stop tracing below this hierarchy depth (top = 0). Origin endpoint exempt.
 
   Terminal report lists flip-flops, ports, and blackboxes; TSV lists boundaries.
   Uses a separate index path — does not slow default --check-connect.
@@ -186,8 +176,6 @@ Inst-trace mode (instance drivers / sinkers)
     direction (string)        driver | in | sinker | out | both  (default: both)
     path_kind (string)        ff | comb  (default: ff; aliases: ff_comb, ff/comb)
     top, defines              Optional overrides
-    ignore_hierarchy          Trace stop globs (same rules as cone mode)
-    trace_max_depth           Max hierarchy depth from top (origin exempt)
 
   driver/in  — fanin from input (and inout) ports; collect port-in, ff-driver, …
   sinker/out — fanout from output (and inout) ports; collect port-out, ff-sink, …
@@ -261,14 +249,12 @@ Flat run suite (one JSON, sibling blocks, sequential run)
   run_io_trace               Instance driver/sinker trace
     enable (0|1)
     mode                     full-index | path-walk (default: path-walk)
-    instance, direction, path_kind (ff|comb)
-    ignore_hierarchy, trace_max_depth, output
+    instance, direction, path_kind (ff|comb), output
 
   run_cone_trace             Fanin/fanout COI cone
     enable (0|1)
     mode                     full-index | path-walk (default: path-walk)
-    fanin_cone / fanout_cone (pick one), cone-graph
-    ignore_hierarchy, trace_max_depth, output
+    fanin_cone / fanout_cone (pick one), cone-graph, output
 
   Verification block ``mode`` is only the index strategy (full-index vs path-walk).
   The step kind is the block name (run_conn_check, run_io_trace, run_cone_trace).

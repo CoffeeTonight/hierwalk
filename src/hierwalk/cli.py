@@ -76,7 +76,6 @@ from hierwalk.run_tests import (
     RunTestEntry,
     RunTestSuite,
     build_test_run_configs,
-    expand_suite_verification_plan,
     detect_enable_key_typos,
     format_suite_enable_trace,
     list_disabled_suite_blocks,
@@ -178,12 +177,10 @@ def _bootstrap_flat_suite_config(
     )
     if parsed_suite is not None:
         test_plan = list(
-            expand_suite_verification_plan(
-                build_test_run_configs(
-                    parsed_suite,
-                    raw_doc,
-                    base_dir=config_path.parent,
-                )
+            build_test_run_configs(
+                parsed_suite,
+                raw_doc,
+                base_dir=config_path.parent,
             )
         )
         _, jobs_src = _jobs_from_document(raw_doc)

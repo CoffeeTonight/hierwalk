@@ -26,22 +26,6 @@ from hierwalk.models import ElabNode, FlatRow
 
 CACHE_VERSION = 8
 
-_PICKLE_BUILTIN_MODULES = frozenset({"builtins", "collections", "_collections_abc"})
-
-
-class _HierwalkUnpickler(pickle.Unpickler):
-    """Restrict unpickling to trusted hierwalk types (mitigates CWE-502)."""
-
-    def find_class(self, module: str, name: str):
-        if module in _PICKLE_BUILTIN_MODULES or module.startswith("hierwalk."):
-            return super().find_class(module, name)
-        raise pickle.UnpicklingError(f"forbidden unpickle target: {module}.{name}")
-
-
-def _pickle_load(fh) -> object:
-    return _HierwalkUnpickler(fh).load()
-
-
 _active_work_dir: Optional[Path] = None
 
 
@@ -119,20 +103,17 @@ def resolve_run_work_dir(
     base: Optional[Path] = None,
     explicit_cache_dir: Optional[str] = None,
 ) -> Path:
-    """Per-run work root: always ``.db_{TOP}`` under *base* (or under ``HIERWALK_CACHE_DIR``)."""
-    resolved_base = base
+    """Per-run work root: ``.db_{TOP}`` under *base*, unless overridden."""
     if explicit_cache_dir:
         path = Path(explicit_cache_dir).expanduser().resolve()
-        if path.name.startswith(".db_"):
-            (path / "tmp").mkdir(parents=True, exist_ok=True)
-            return path
-        resolved_base = path
-    elif os.environ.get("HIERWALK_CACHE_DIR"):
-        resolved_base = Path(os.environ["HIERWALK_CACHE_DIR"]).expanduser().resolve()
-    if resolved_base is None:
-        resolved_base = work_base_dir()
-    return ensure_top_work_dir(top, base=resolved_base)
-
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+    env = os.environ.get("HIERWALK_CACHE_DIR")
+    if env:
+        path = Path(env).expanduser().resolve()
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+    return ensure_top_work_dir(top, base=base)
 
 
 def default_cache_dir() -> Path:
@@ -175,7 +156,7 @@ def _load_elab_sidecars(
     for path in edir.glob("*.elab.pkl"):
         try:
             with path.open("rb") as fh:
-                payload = _pickle_load(fh)
+                payload = pickle.load(fh)
         except (OSError, pickle.PickleError, EOFError, ValueError):
             continue
         if (
@@ -188,17 +169,6 @@ def _load_elab_sidecars(
             key, entry = payload
             out[key] = entry
     return out
-
-
-def _clear_elab_sidecars(cache_dir: Path, config_key: str) -> None:
-    edir = elab_cache_dir(cache_dir, config_key)
-    if not edir.is_dir():
-        return
-    for path in edir.glob("*.elab.pkl"):
-        try:
-            path.unlink()
-        except OSError:
-            pass
 
 
 def _save_elab_sidecar(
@@ -220,7 +190,7 @@ def load_cache(path: Path, *, cache_dir: Optional[Path] = None) -> Optional[Scan
         return None
     try:
         with path.open("rb") as fh:
-            obj = _pickle_load(fh)
+            obj = pickle.load(fh)
     except (OSError, pickle.PickleError, EOFError, ValueError):
         return None
     if not isinstance(obj, ScanInstCacheBundle):
@@ -306,7 +276,6 @@ def _incremental_update(
     ignore_modules: Sequence[str],
     ignore_filelists: Sequence[str],
     jobs: int,
-    cache_dir: Optional[Path] = None,
     on_progress: Optional[Callable[[str], None]] = None,
 ) -> DesignIndex:
     touch = sorted(changed | added)
@@ -324,9 +293,6 @@ def _incremental_update(
         on_progress=on_progress,
     )
     bundle.source_manifest = dict(manifest)
-    bundle.elab.clear()
-    if cache_dir is not None:
-        _clear_elab_sidecars(cache_dir, bundle.config_key)
     return bundle.index
 
 
@@ -417,7 +383,6 @@ def load_or_build_index(
                         ignore_modules=ignore_modules,
                         ignore_filelists=ignore_filelists,
                         jobs=jobs,
-                        cache_dir=cache_dir,
                         on_progress=on_progress,
                     )
                     save_cache(path, bundle)
@@ -448,7 +413,7 @@ def load_or_build_index(
             config_key=config_key,
             source_manifest=dict(manifest),
             index=index,
-            elab={},
+            elab=bundle.elab if bundle is not None else {},
         )
         if use_cache:
             if on_progress:

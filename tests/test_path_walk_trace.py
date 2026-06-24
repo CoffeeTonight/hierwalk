@@ -30,72 +30,10 @@ def test_path_walk_trace_filter_hides_search_keeps_hits():
     assert not path_walk_trace_show_message("pw-db tier0 scan a.v -> A")
     assert not path_walk_trace_show_message("pw-db tier1 scan a.v -> A(1inst)")
     assert not path_walk_trace_show_message("pw-db edge B.C candidates=2")
-    assert path_walk_trace_show_message(
-        "pw-db inst-resolve enter SOC_TOP.u_ip file=allinst.v policy=confident"
-    )
-    assert path_walk_trace_show_message(
-        "pw-db inst-resolve tier1-fast miss SOC_TOP.u_ip edges=12000 "
-        "tier1_fast_ms=12.0 since_enter_ms=12.1"
-    )
-    assert path_walk_trace_show_message(
-        "pw-db inst-resolve selective miss SOC_TOP.u_ip file=allinst.v "
-        "sel_ms=45000.0 since_enter_ms=45012.0"
-    )
-    assert path_walk_trace_show_message(
-        "pw-db inst-resolve tier1-fold miss SOC_TOP.u_ip edges=12000 "
-        "tier1_fold_ms=45000.0 since_enter_ms=90012.0"
-    )
-    assert path_walk_trace_show_message(
-        "pw-db inst-resolve tier1-fold skip SOC_TOP.u_ip reason=redundant-fast "
-        "edges=12000 since_enter_ms=120.0"
-    )
-    assert path_walk_trace_show_message(
-        "pw-db inst-resolve tier0-done SOC_TOP.u_ip candidates=3 tier0_ms=800.0 "
-        "since_enter_ms=91000.0"
-    )
-    assert path_walk_trace_show_message(
-        "pw-db inst-find enter SOC_TOP.u_ip file=allinst.v pre_ms=12.2"
-    )
-    assert path_walk_trace_show_message(
-        "pw-db inst-find enter SOC_TOP.u_ip file=allinst.v"
-    )
-    assert path_walk_trace_show_message(
-        "pw-db inst-find done SOC_TOP.u_ip file=allinst.v hit ms=12.3 "
-        "preprocess=10.0 module_body=0.1 inst_scan=2.2 body_chars=50000"
-    )
-    assert path_walk_trace_show_message(
-        "pw-db tier1-scan done allinst.v source=cold ms=120000.0 chars=3451958"
-    )
-    assert path_walk_trace_show_message("connect-coi done checks=1 modules_cached=3 ms=45000.0")
-    assert path_walk_trace_show_message(
-        "connect-comb build module=TOP body_chars=3451958 insts=12 ms=8000.0"
-    )
-    assert path_walk_trace_show_message(
-        "walk miss-prep scope=TOP.u_x leaf='u_y' edges=12 hint=0 ms=3.5"
-    )
-    assert path_walk_trace_show_message(
-        "walk raw-inst-probe scope=TOP.u_x leaf='u_y' hit=False rtl=allinst.v ms=1200.0"
-    )
-    assert path_walk_trace_show_message(
-        "walk miss-tail scope=TOP.u_x leaf='u_y' defer=1 ms=0.8"
-    )
-    assert path_walk_trace_show_message(
-        "walk endpoint-specs done unique=1 policy=confident defer=1 "
-        "ms=45000.0 since_probe_ms=44000.0"
-    )
-    assert path_walk_trace_show_message(
-        "recovery-pass start defer=1 since_probe_ms=45001.0"
-    )
-    assert path_walk_trace_show_message("walk lca-done pairs=1 ms=12.3")
-    assert path_walk_trace_show_message("walk flush-misses pending=1 ms=0.5")
-    assert path_walk_trace_show_message("pw-db preprocess enter allinst.v")
-    assert path_walk_trace_show_message(
-        "pw-db preprocess done allinst.v source=cold ms=9000.0 chars=120000"
-    )
     assert not path_walk_trace_show_message("pw-db   edge miss b.v: no inst 'C'")
     assert not path_walk_trace_show_message("pw-db tier0 expand edge B.C +1 file(s)")
     assert not path_walk_trace_show_message("pw-db v3 root=/cache module_map=3")
-    assert path_walk_trace_show_message("ok top.u_a  module=mid  rtl= /rtl/mid.v")
+    assert path_walk_trace_show_message("ok top.u_a  module=mid  rtl=/rtl/mid.v")
     assert path_walk_trace_show_message("pw-db   hit b.v for module 'B'")
     assert path_walk_trace_show_message("pw-db   edge hit B.C via b.v -> child 'C'")
     assert path_walk_trace_show_message("miss inst=C under A.B (instance edge not found)")
@@ -123,9 +61,9 @@ def test_path_walk_spine_lines_include_filelist():
     }
     lines = format_path_walk_spine_lines("top.u_mid", rows)
     joined = "\n".join(lines)
-    assert "rtl= /rtl/top.v" in joined
+    assert "rtl=/rtl/top.v" in joined
     assert "via_filelist=/lists/a.f" in joined
-    assert "rtl= /rtl/mid.v" in joined
+    assert "rtl=/rtl/mid.v" in joined
     assert "filelist_chain=/lists/a.f > /lists/b.f" in joined
 
 
@@ -191,9 +129,7 @@ def test_path_walk_connect_trace_writes_pw_db_to_run_log(tmp_path: Path):
     text = log_path.read_text(encoding="utf-8")
     assert "# path-walk trace" in text
     assert "pw-db tier0" not in text
-    assert "pw-db tier1 scan " not in text
-    assert "connect-coi done" in text
-    assert "ms=" in text
+    assert "pw-db tier1" not in text
     assert "ok A" in text
     assert "[hier-walk path-walk]" in text
 
@@ -227,100 +163,3 @@ def test_path_walk_trace_writes_run_log(tmp_path: Path):
     assert "ok top" in text
     assert "rtl=" in text
     assert "via_filelist=" in text
-
-
-def test_path_walk_connect_execute_writes_conn_summary_to_run_log(tmp_path: Path):
-    import json
-    import subprocess
-
-    rtl = tmp_path / "d.v"
-    rtl.write_text(
-        """
-    module top(input logic clk);
-      child u0 (.clk(clk));
-    endmodule
-    module child(input logic clk); endmodule
-    """,
-        encoding="utf-8",
-    )
-    fl = tmp_path / "fl.f"
-    fl.write_text(f"{rtl.resolve()}\n", encoding="utf-8")
-    run_json = tmp_path / "run.json"
-    run_json.write_text(
-        json.dumps(
-            {
-                "filelist": fl.name,
-                "top": "top",
-                "mode": "path-walk",
-                "connect": {
-                    "top": "top",
-                    "checks": [{"id": "clk", "a": "top.clk", "b": "top.u0.clk"}],
-                },
-                "output": "conn_out.tsv",
-                "no_cache": True,
-            }
-        ),
-        encoding="utf-8",
-    )
-    subprocess.run(
-        ["hier-walk", str(run_json)],
-        cwd=tmp_path,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    log_path = tmp_path / ".db_top" / "conn_out.hier-walk.log"
-    assert log_path.is_file()
-    text = log_path.read_text(encoding="utf-8")
-    assert "[hier-walk connect]" in text
-    assert "[clk]" in text
-    assert "top.clk -> top.u0.clk" in text
-    assert "connected:" in text
-
-
-def test_path_walk_connect_trace_flag_writes_path_evidence_to_run_log(tmp_path: Path):
-    import json
-    import subprocess
-
-    rtl = tmp_path / "d.v"
-    rtl.write_text(
-        """
-    module top(input logic clk);
-      child u0 (.clk(clk));
-    endmodule
-    module child(input logic clk); endmodule
-    """,
-        encoding="utf-8",
-    )
-    fl = tmp_path / "fl.f"
-    fl.write_text(f"{rtl.resolve()}\n", encoding="utf-8")
-    run_json = tmp_path / "run.json"
-    run_json.write_text(
-        json.dumps(
-            {
-                "filelist": fl.name,
-                "top": "top",
-                "mode": "path-walk",
-                "connect_trace": True,
-                "connect": {
-                    "top": "top",
-                    "checks": [{"id": "clk", "a": "top.clk", "b": "top.u0.clk"}],
-                },
-                "output": "conn_out.tsv",
-                "no_cache": True,
-            }
-        ),
-        encoding="utf-8",
-    )
-    subprocess.run(
-        ["hier-walk", str(run_json)],
-        cwd=tmp_path,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    log_path = tmp_path / ".db_top" / "conn_out.hier-walk.log"
-    text = log_path.read_text(encoding="utf-8")
-    assert "connectivity path evidence (log)" in text
-    assert "path evidence:" in text
-    assert "child-down" in text or "parent-up" in text

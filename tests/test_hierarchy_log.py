@@ -29,7 +29,7 @@ def _row(path: str, *, file: str = "/rtl/top.v", via: str = "/lists/design.f") -
 def test_format_row_provenance_includes_file_and_filelist():
     row = _row("top.u_child", file="/proj/child.v", via="/proj/filelist.f")
     text = format_row_provenance(row)
-    assert "rtl= /proj/child.v" in text
+    assert "rtl=/proj/child.v" in text
     assert "via_filelist=/proj/filelist.f" in text
     assert "filelist_chain=" in text
 
@@ -53,7 +53,7 @@ def test_explain_hierarchy_miss_lists_children_with_sources():
     )
     joined = "\n".join(errors)
     assert "path stops at 'top'" in joined
-    assert "rtl= /rtl/top.v" in joined
+    assert "rtl=/rtl/top.v" in joined
     assert "top.u_ok" in joined
     assert "via_filelist=" in joined
 
@@ -92,7 +92,7 @@ def test_emit_connect_log_includes_success_endpoint_provenance():
     ep_b = ConnectEndpoint("top.z", "top.z", "p1", "top", port_found=True)
     result = ConnectResult(ep_a, ep_b, True, "port-port", check_id="ok")
     line_a = format_endpoint_provenance_line("A", ep_a, rows)
-    assert "rtl= /rtl/a.v" in line_a
+    assert "rtl=/rtl/a.v" in line_a
     assert "via_filelist=" in line_a
     import io
 
@@ -100,7 +100,7 @@ def test_emit_connect_log_includes_success_endpoint_provenance():
     emit_connect_trace_log(result, stream=buf, check_prefix="ok", rows_by_path=rows)
     text = buf.getvalue()
     assert "[ok]" in text
-    assert "rtl= /rtl/a.v" in text
-    assert "rtl= /rtl/z.v" in text
+    assert "rtl=/rtl/a.v" in text
+    assert "rtl=/rtl/z.v" in text
     assert "connected: True" in text
     assert "path hierarchy (rtl + filelist):" in text
