@@ -782,9 +782,14 @@ def main(argv=None) -> int:
                     f"run_on_full_index.enable is 0 — using path-walk",
                     file=sys.stderr,
                 )
+            phase_note = (
+                f" phase={run_cfg.verification_phase}"
+                if run_cfg.verification_phase not in ("", "both")
+                else ""
+            )
             print(
                 f"run: test {label} kind={test_entry.kind} mode={test_entry.mode} "
-                f"index={index_note} output={run_cfg.output}",
+                f"index={index_note} output={run_cfg.output}{phase_note}",
                 file=sys.stderr,
             )
         step_label = verification_step_label(run_cfg)

@@ -810,15 +810,29 @@ def run_connectivity_request(
     return session.run_request(request, jobs=jobs, on_progress=on_progress)
 
 
+def _connected_text_value(result: ConnectResult) -> bool:
+    if result.connected_text is not None:
+        return result.connected_text
+    return result.connected
+
+
+def _connected_logical_value(result: ConnectResult) -> bool:
+    if result.connected_logical is not None:
+        return result.connected_logical
+    return result.connected
+
+
 def format_connect_result_row(
     result: ConnectResult,
     *,
     rows_by_path: Optional[Mapping[str, FlatRow]] = None,
+    phase: str = "logical",
 ) -> str:
     from hierwalk.hierarchy_log import endpoint_provenance_fields
 
     err_text = " | ".join(result.errors)
     hop_text = " | ".join(format_connect_hop(h) for h in result.hops)
+    logical_notes = " | ".join(result.logical_notes)
     a_prov = (
         endpoint_provenance_fields(result.endpoint_a, rows_by_path)
         if rows_by_path is not None
@@ -829,15 +843,31 @@ def format_connect_result_row(
         if rows_by_path is not None
         else {}
     )
+    text_connected = _connected_text_value(result)
+    logical_connected = _connected_logical_value(result)
+    if str(phase).strip().lower() == "text":
+        return (
+            f"{result.check_id}\t{result.endpoint_a.spec}\t{result.endpoint_b.spec}\t"
+            f"{text_connected}\t{result.mode}\t{result.note}\t"
+            f"{err_text}\t"
+            f"{hop_text}\t"
+            f"{a_prov.get('rtl', '')}\t{a_prov.get('via_filelist', '')}\t"
+            f"{a_prov.get('filelist_chain', '')}\t"
+            f"{b_prov.get('rtl', '')}\t{b_prov.get('via_filelist', '')}\t"
+            f"{b_prov.get('filelist_chain', '')}\t"
+            f"text"
+        )
     return (
         f"{result.check_id}\t{result.endpoint_a.spec}\t{result.endpoint_b.spec}\t"
-        f"{result.connected}\t{result.mode}\t{result.note}\t"
+        f"{text_connected}\t{logical_connected}\t{logical_connected}\t"
+        f"{result.mode}\t{result.note}\t{logical_notes}\t"
         f"{err_text}\t"
         f"{hop_text}\t"
         f"{a_prov.get('rtl', '')}\t{a_prov.get('via_filelist', '')}\t"
         f"{a_prov.get('filelist_chain', '')}\t"
         f"{b_prov.get('rtl', '')}\t{b_prov.get('via_filelist', '')}\t"
-        f"{b_prov.get('filelist_chain', '')}"
+        f"{b_prov.get('filelist_chain', '')}\t"
+        f"logical"
     )
 
 
@@ -846,17 +876,30 @@ def format_connect_results_tsv(
     *,
     modules_cached: Optional[int] = None,
     rows_by_path: Optional[Mapping[str, FlatRow]] = None,
+    phase: str = "logical",
 ) -> str:
     from hierwalk.waypoint_fanout import format_waypoint_fanout_tsv
 
     leaf_results = flatten_connect_results(results)
+    phase_label = str(phase).strip().lower() or "logical"
+    if phase_label == "text":
+        header = (
+            "check_id\tendpoint_a\tendpoint_b\tconnected_text\tmode\tnote\terrors\thops\t"
+            "a_rtl\ta_via_filelist\ta_filelist_chain\t"
+            "b_rtl\tb_via_filelist\tb_filelist_chain\tphase"
+        )
+    else:
+        header = (
+            "check_id\tendpoint_a\tendpoint_b\tconnected_text\tconnected_logical\t"
+            "connected\tmode\tnote\tlogical_notes\terrors\thops\t"
+            "a_rtl\ta_via_filelist\ta_filelist_chain\t"
+            "b_rtl\tb_via_filelist\tb_filelist_chain\tphase"
+        )
     lines = [
         "# connect results",
-        "check_id\tendpoint_a\tendpoint_b\tconnected\tmode\tnote\terrors\thops\t"
-        "a_rtl\ta_via_filelist\ta_filelist_chain\t"
-        "b_rtl\tb_via_filelist\tb_filelist_chain",
+        header,
         *(
-            format_connect_result_row(r, rows_by_path=rows_by_path)
+            format_connect_result_row(r, rows_by_path=rows_by_path, phase=phase_label)
             for r in leaf_results
         ),
     ]

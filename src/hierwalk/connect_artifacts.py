@@ -545,6 +545,7 @@ def write_connect_phase_tsv(
         results,
         modules_cached=modules_cached,
         rows_by_path=rows_by_path,
+        phase=phase,
     )
     out = path.expanduser().resolve()
     out.parent.mkdir(parents=True, exist_ok=True)

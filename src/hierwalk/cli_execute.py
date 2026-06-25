@@ -43,6 +43,10 @@ from hierwalk.connectivity import (
     run_connectivity_request,
 )
 from hierwalk.path_walk import run_path_walk_connect, run_path_walk_index
+from hierwalk.connect_artifacts import (
+    connect_output_paths,
+    missing_verification_artifacts,
+)
 from hierwalk.run_request import (
     normalize_run_mode,
     resolve_connectivity_request,
@@ -68,6 +72,29 @@ from hierwalk.verification_timing import (
     record_connect_check,
     record_verification_item,
 )
+
+
+def _verification_phase(cfg: RunConfig) -> str:
+    phase = (cfg.verification_phase or "both").strip().lower()
+    return phase if phase in ("text", "logical", "both") else "both"
+
+
+def _fail_if_missing_verification_artifacts(
+    cfg: RunConfig,
+    work_dir: Path,
+    *,
+    label: str,
+) -> int:
+    missing = missing_verification_artifacts(cfg, work_dir)
+    if not missing:
+        return 0
+    for path in missing:
+        print(
+            f"run: ERROR {label} artifact missing: {path.resolve()}",
+            file=sys.stderr,
+            flush=True,
+        )
+    return 2
 
 
 def execute_run(cfg: RunConfig, ap) -> int:
@@ -375,6 +402,9 @@ def execute_run(cfg: RunConfig, ap) -> int:
                     print("missing connectivity request", file=sys.stderr)
                     return 1
                 extra_defines.update(connect_request.defines)
+            phase = _verification_phase(cfg)
+            do_text = phase in ("text", "both")
+            do_logical = phase in ("logical", "both")
             try:
                 batch, index, pw_state = run_path_walk_connect(
                     connect_request,
@@ -383,6 +413,9 @@ def execute_run(cfg: RunConfig, ap) -> int:
                     extra_defines=extra_defines,
                     reuse_suite_session=cfg.flat_suite_step,
                     jobs=cfg.jobs,
+                    connect_output_dir=work_dir,
+                    connect_output_name=cfg.output,
+                    connect_phase=phase,
                     **pw_ignore,
                 )
             except ValueError as exc:
@@ -390,10 +423,20 @@ def execute_run(cfg: RunConfig, ap) -> int:
                 return 2
             connect_results = batch.results
             endpoint_rows = pw_state.rows_by_path
+            conn_paths = connect_output_paths(work_dir, cfg.output)
+            artifact_rc = _fail_if_missing_verification_artifacts(
+                cfg,
+                work_dir,
+                label="connect",
+            )
+            if artifact_rc:
+                return artifact_rc
+            stdout_phase = "logical" if do_logical else "text"
             body = format_connect_results_tsv(
                 connect_results,
                 modules_cached=batch.modules_cached,
                 rows_by_path=endpoint_rows,
+                phase=stdout_phase,
             )
             if not cfg.quiet:
                 emit_hierarchy_rows_log(
@@ -408,11 +451,16 @@ def execute_run(cfg: RunConfig, ap) -> int:
                         check_prefix=result.check_id or "",
                         rows_by_path=endpoint_rows,
                     )
+            use_trace = cfg.connect_trace or cfg.connect_log
+            trace_on = connect_request.trace or use_trace
+            if do_logical and not do_text:
+                trace_title = "connectivity path evidence (logical)"
+            elif do_text and not do_logical:
+                trace_title = "connectivity path evidence (text)"
+            else:
+                trace_title = "connectivity path evidence"
             if cfg.output == "-":
                 sys.stdout.write(body)
-            else:
-                with open(cfg.output, "w", encoding="utf-8") as f:
-                    f.write(body)
             if log_path is not None:
                 with open(log_path, "a", encoding="utf-8") as fh:
                     emit_hierarchy_rows_log(
@@ -420,27 +468,34 @@ def execute_run(cfg: RunConfig, ap) -> int:
                         stream=fh,
                         title="path-walk instance rows (rtl + filelist)",
                     )
+                    if not cfg.quiet:
+                        for result in connect_results:
+                            emit_connect_trace_log(
+                                result,
+                                stream=fh,
+                                check_prefix=result.check_id or "",
+                                rows_by_path=endpoint_rows,
+                            )
                     fh.write("\n# connect results\n")
                     fh.write(body)
                     if not body.endswith("\n"):
                         fh.write("\n")
+                    if trace_on:
+                        print_connect_trace_reports(
+                            connect_results,
+                            stream=fh,
+                            title=f"{trace_title} (log)",
+                            rows_by_path=endpoint_rows,
+                        )
                     fh.flush()
-            use_trace = cfg.connect_trace or cfg.connect_log
-            if connect_request.trace or use_trace:
+            if trace_on:
                 term_stream = sys.stderr if cfg.output == "-" else sys.stdout
                 print_connect_trace_reports(
                     connect_results,
                     stream=term_stream,
+                    title=trace_title,
                     rows_by_path=endpoint_rows,
                 )
-                if log_path is not None:
-                    with open(log_path, "a", encoding="utf-8") as fh:
-                        print_connect_trace_reports(
-                            connect_results,
-                            stream=fh,
-                            rows_by_path=endpoint_rows,
-                        )
-                        fh.flush()
             if on_progress and not cfg.quiet:
                 on_progress(
                     f"path-walk: done {pw_state.stats.checks_run} check(s), "
@@ -458,7 +513,11 @@ def execute_run(cfg: RunConfig, ap) -> int:
                     elab_tops=[top_for_walk],
                     instance_rows=len(pw_state.rows_by_path),
                     mode="path-walk",
-                    output_path=cfg.output,
+                    output_path=str(
+                        conn_paths.logical_tsv
+                        if do_logical
+                        else conn_paths.text_tsv
+                    ),
                     filelist_warnings=len(fl.errors),
                 ),
                 log_path=log_path,

@@ -85,6 +85,9 @@ class FlatRow:
     filelist_chain: str = ""
     param_ctx: Dict[str, str] = field(default_factory=dict)
     param_ctx_folded: bool = False
+    refine_status: str = ""
+    activation: str = ""
+    walk_note: str = ""
 
 
 @dataclass
@@ -166,6 +169,9 @@ class ConnectResult:
     check_id: str = ""
     sub_results: Tuple["ConnectResult", ...] = ()
     waypoint_events: Tuple[Any, ...] = ()
+    connected_text: Optional[bool] = None
+    connected_logical: Optional[bool] = None
+    logical_notes: List[str] = field(default_factory=list)
 
 
 @dataclass
