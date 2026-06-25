@@ -314,11 +314,12 @@ def _connect_pair(
     strict_generate: bool = False,
     ff_barrier: bool = True,
     over_approximate_if: Optional[bool] = None,
-    mod_cache: Dict[Tuple[str, str, str, str, str, bool, bool], ModuleConnectIndex],
+    mod_cache: Dict[Tuple[str, str, str, str, str, bool, bool, bool], ModuleConnectIndex],
     param_ctx_cache: Dict[str, Mapping[str, str]],
     check_id: str = "",
     elab_index: Optional[ElabIndex] = None,
     rows_by_path: Optional[Mapping[str, FlatRow]] = None,
+    resolve_param_dims: bool = True,
 ) -> ConnectResult:
     lookup = (
         rows_by_path
@@ -383,6 +384,7 @@ def _connect_pair(
             mod_cache=mod_cache,
             param_ctx_cache=param_ctx_cache,
             elab_index=elab_index,
+            resolve_param_dims=resolve_param_dims,
         )
         return ConnectResult(
             ep_a,
@@ -413,6 +415,7 @@ def _connect_pair(
             mod_cache=mod_cache,
             param_ctx_cache=param_ctx_cache,
             elab_index=elab_index,
+            resolve_param_dims=resolve_param_dims,
         )
         return ConnectResult(
             ep_a,
@@ -455,11 +458,13 @@ class ConnectivitySession:
     strict_generate: bool = False
     ff_barrier: bool = True
     over_approximate_if: Optional[bool] = None
-    mod_cache: Dict[Tuple[str, str, str, str, str, bool, bool], ModuleConnectIndex] = field(
-        default_factory=dict
-    )
+    mod_cache: Dict[
+        Tuple[str, str, str, str, str, bool, bool, bool],
+        ModuleConnectIndex,
+    ] = field(default_factory=dict)
     param_ctx_cache: Dict[str, Mapping[str, str]] = field(default_factory=dict)
     elab_index: Optional[ElabIndex] = None
+    resolve_param_dims: bool = True
 
     def __post_init__(self) -> None:
         if self.elab_index is None and self.rows:
@@ -548,6 +553,7 @@ class ConnectivitySession:
                 check_id=check_id,
                 elab_index=self.elab_index,
                 rows_by_path=self.rows_by_path,
+                resolve_param_dims=self.resolve_param_dims,
             )
         else:
             fanout_mode = expand.fanout_mode if expand is not None else "all"
@@ -571,6 +577,7 @@ class ConnectivitySession:
                         check_id=sub_id,
                         elab_index=self.elab_index,
                         rows_by_path=self.rows_by_path,
+                        resolve_param_dims=self.resolve_param_dims,
                     )
                 )
             result = aggregate_connect_results(
@@ -637,6 +644,7 @@ class ConnectivitySession:
                 mod_cache=self.mod_cache,
                 param_ctx_cache=self.param_ctx_cache,
                 elab_index=self.elab_index,
+                resolve_param_dims=self.resolve_param_dims,
             )
             return [local.check(a, b, trace=trace) for a, b in chunk]
 
@@ -691,6 +699,7 @@ class ConnectivitySession:
                 mod_cache=self.mod_cache,
                 param_ctx_cache=self.param_ctx_cache,
                 elab_index=self.elab_index,
+                resolve_param_dims=self.resolve_param_dims,
             )
             return [local.check_entry(chk, trace=use_trace) for chk in chunk]
 

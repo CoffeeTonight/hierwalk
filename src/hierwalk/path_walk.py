@@ -768,6 +768,12 @@ class PathWalkState:
         return remainder.split(".", 1)[0]
 
     @staticmethod
+    def _is_terminal_path_segment(remainder: str) -> bool:
+        """True when *remainder* is one hierarchy step (wire/port/reg tail), not ``inst.child``."""
+        text = (remainder or "").strip()
+        return bool(text) and "." not in text
+
+    @staticmethod
     def _is_folded_inst_prefix_miss(
         miss_leaf: str,
         edges: Sequence[InstanceEdge],
@@ -1420,6 +1426,14 @@ class PathWalkState:
                 cur = nxt
                 remainder = ""
                 break
+            if self._is_terminal_path_segment(remainder):
+                row = self.rows_by_path.get(cur)
+                if row is not None and self._is_signal_or_port_tail_miss(
+                    cur,
+                    remainder,
+                    target_path=path,
+                ):
+                    return False
             inst_name, edge = self._resolve_child_step(
                 cur,
                 remainder,
@@ -3092,10 +3106,11 @@ def run_path_walk_connect(
                 text_results: list = []
                 text_modules_cached: Optional[int] = None
                 coi_error = ""
+                conn_session.resolve_param_dims = False
                 try:
                     state._emit_walk(
                         f"connect-coi begin checks={len(text_request.checks)} "
-                        f"rows={len(walk_rows)}"
+                        f"rows={len(walk_rows)} resolve_param_dims=0"
                     )
                     try:
                         batch = conn_session.run_request(
@@ -3169,6 +3184,8 @@ def run_path_walk_connect(
                 logical_results: list = []
                 logical_modules_cached: Optional[int] = None
                 logical_coi_error = ""
+                conn_session.resolve_param_dims = True
+                conn_session.clear_cache()
                 try:
                     finalize_logical_walk_before_connect(state, request)
                     walk_rows = state.rows()

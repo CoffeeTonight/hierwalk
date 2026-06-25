@@ -826,6 +826,35 @@ def collect_hierarchy_evidence(
     return out
 
 
+def compact_hierarchy_evidence(
+    evidence: Sequence[HierarchyEvidenceRow],
+) -> List[HierarchyEvidenceRow]:
+    """
+    Drop redundant inst spine hits; keep miss steps and deepest inst per side.
+
+    Intermediate ``top`` / ``top.a`` hits are omitted when ``top.a.b.c`` is the
+    resolved inst path.  Miss prefixes (e.g. ``top.missing``) are always kept.
+    Port/wire/reg rows are unchanged.
+    """
+    inst_by_group: dict[tuple[str, str], List[HierarchyEvidenceRow]] = {}
+    other: List[HierarchyEvidenceRow] = []
+    for row in evidence:
+        if row.kind == "inst":
+            inst_by_group.setdefault((row.check_id, row.side), []).append(row)
+        else:
+            other.append(row)
+
+    compact: List[HierarchyEvidenceRow] = []
+    for (_cid, _side), rows in inst_by_group.items():
+        misses = [r for r in rows if r.status == "miss"]
+        hits = [r for r in rows if r.status == "hit"]
+        compact.extend(misses)
+        if hits:
+            compact.append(max(hits, key=lambda r: (len(r.path), r.path)))
+    compact.extend(other)
+    return compact
+
+
 def format_hierarchy_evidence_report(
     evidence: Sequence[HierarchyEvidenceRow],
     *,
@@ -874,12 +903,14 @@ def format_connect_results_report(
     lines: List[str] = []
     lookup = rows_by_path or {}
     evidence = (
-        collect_hierarchy_evidence(
-            results,
-            lookup,
-            signal_tails=signal_tails,
-            index=index,
-            top=top,
+        compact_hierarchy_evidence(
+            collect_hierarchy_evidence(
+                results,
+                lookup,
+                signal_tails=signal_tails,
+                index=index,
+                top=top,
+            )
         )
         if lookup or signal_tails
         else []
@@ -933,6 +964,7 @@ def format_connect_hierarchy_tsv(
     signal_tails: Sequence[SignalTailRecord] = (),
     index: Optional[DesignIndex] = None,
     top: str = "",
+    compact: bool = True,
 ) -> str:
     phase_label = str(phase).strip().lower() or "text"
     headers = ["check_id", "side", "kind", "path", "status", "module", "phase"]
@@ -943,6 +975,8 @@ def format_connect_hierarchy_tsv(
         index=index,
         top=top,
     )
+    if compact:
+        evidence = compact_hierarchy_evidence(evidence)
     lines = ["\t".join(headers)]
     for row in evidence:
         lines.append(

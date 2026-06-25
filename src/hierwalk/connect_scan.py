@@ -858,6 +858,8 @@ _MD_DIM_BRACKET_RE = re.compile(r"\[([^\]]+)\]")
 def _collect_decl_md_suffixes(
     body: str,
     param_map: Mapping[str, str],
+    *,
+    resolve_param_dims: bool = True,
 ) -> Dict[str, List[str]]:
     """Materialized multi-dim suffixes from ``logic [2:0][3:0] foo`` declarations."""
     from hierwalk.port_scan import expand_port_name, indices_for_bounds, resolve_dim_spec
@@ -874,7 +876,9 @@ def _collect_decl_md_suffixes(
         base = m.group(2)
         dim_specs = _MD_DIM_BRACKET_RE.findall(dims)
         names: List[str] = []
-        if dim_specs and any(
+        if not resolve_param_dims:
+            names = [base]
+        elif dim_specs and any(
             resolve_dim_spec(spec, pmap) is None for spec in dim_specs
         ):
             try:
@@ -908,7 +912,10 @@ def _collect_decl_md_suffixes(
                         cur = nxt
                     names = cur
             else:
-                names = expand_port_name(base, dims)
+                try:
+                    names = expand_port_name(base, dims)
+                except ValueError:
+                    names = [base]
         suffixes = [
             name[len(base) :]
             for name in names
@@ -924,14 +931,40 @@ def _md_suffixes_for_token(
     param_map: Mapping[str, str],
     decl_md_suffixes: Mapping[str, List[str]],
     decl_widths: Mapping[str, List[int]],
+    *,
+    resolve_param_dims: bool = True,
 ) -> Optional[List[str]]:
     """Per-element suffixes for a net token (supports ``[i][j]`` buses)."""
     base, suffix = _split_net_base_suffix(token)
     if suffix:
         if ":" in suffix:
-            from hierwalk.port_scan import expand_port_name
+            if not resolve_param_dims:
+                return [suffix]
+            from hierwalk.port_scan import expand_port_name, resolve_dim_spec
 
-            names = expand_port_name(base, suffix)
+            dim_specs = _MD_DIM_BRACKET_RE.findall(suffix)
+            resolved_width = suffix
+            if dim_specs:
+                resolved_parts: List[str] = []
+                for spec in dim_specs:
+                    if ":" in spec:
+                        bounds = resolve_dim_spec(spec, param_map)
+                        if bounds is None:
+                            resolved_parts = []
+                            break
+                        resolved_parts.append(f"[{bounds[0]}:{bounds[1]}]")
+                    else:
+                        val = resolve_dim_spec(spec, param_map)
+                        if val is None:
+                            resolved_parts = []
+                            break
+                        resolved_parts.append(f"[{val}:0]")
+                if resolved_parts:
+                    resolved_width = "".join(resolved_parts)
+            try:
+                names = expand_port_name(base, resolved_width)
+            except ValueError:
+                return [suffix]
             out = sorted(
                 {
                     name[len(base) :]
@@ -956,6 +989,8 @@ def _bit_suffixes_for_token(
     token: str,
     param_map: Mapping[str, str],
     decl_widths: Mapping[str, List[int]],
+    *,
+    resolve_param_dims: bool = True,
 ) -> Optional[List[str]]:
     text = re.sub(r"\s+", "", token.strip())
     m = re.match(
@@ -966,6 +1001,8 @@ def _bit_suffixes_for_token(
         return None
     base, sel = m.group(1), m.group(2)
     if sel:
+        if not resolve_param_dims:
+            return [sel]
         inner = sel[1:-1]
         if ":" in inner:
             bits = _range_to_bit_indices(inner, param_map)
@@ -1078,12 +1115,19 @@ def _expand_assign_bit_links(
     edge_prov: Optional[Dict[Tuple[str, str], ConnectEdgeProv]] = None,
     line: int = 0,
     kind: str = "",
+    resolve_param_dims: bool = True,
 ) -> None:
     """Add per-bit edges for vector / part-select assigns (``arr = bus[9:0]``)."""
+    if not resolve_param_dims:
+        return
     pmap = dict(param_map)
     md = dict(decl_md_suffixes or {})
-    a_sfx = _md_suffixes_for_token(a, pmap, md, decl_widths)
-    b_sfx = _md_suffixes_for_token(b, pmap, md, decl_widths)
+    a_sfx = _md_suffixes_for_token(
+        a, pmap, md, decl_widths, resolve_param_dims=resolve_param_dims
+    )
+    b_sfx = _md_suffixes_for_token(
+        b, pmap, md, decl_widths, resolve_param_dims=resolve_param_dims
+    )
     if not a_sfx and not b_sfx:
         return
     a_base, _ = _split_net_base_suffix(a)
@@ -3904,6 +3948,7 @@ def _build_index_cache_key(
     fold_generate: bool,
     over_approximate_if: bool,
     ff_barrier: bool,
+    resolve_param_dims: bool,
     port_decl_widths: Optional[Mapping[str, List[int]]],
     port_decl_md_suffixes: Optional[Mapping[str, List[str]]],
     prepared_body: Optional[str],
@@ -3925,6 +3970,7 @@ def _build_index_cache_key(
         fold_generate,
         over_approximate_if,
         ff_barrier,
+        resolve_param_dims,
         _port_decl_maps_digest(port_decl_widths, port_decl_md_suffixes),
     )
 
@@ -3961,6 +4007,7 @@ def build_module_connect_index(
     fold_generate: bool = True,
     over_approximate_if: bool = True,
     ff_barrier: bool = False,
+    resolve_param_dims: bool = True,
     port_decl_widths: Optional[Mapping[str, List[int]]] = None,
     port_decl_md_suffixes: Optional[Mapping[str, List[str]]] = None,
     prepared_body: Optional[str] = None,
@@ -3977,6 +4024,7 @@ def build_module_connect_index(
             fold_generate=fold_generate,
             over_approximate_if=over_approximate_if,
             ff_barrier=ff_barrier,
+            resolve_param_dims=resolve_param_dims,
             port_decl_widths=port_decl_widths,
             port_decl_md_suffixes=port_decl_md_suffixes,
             prepared_body=prepared_body,
@@ -3988,6 +4036,7 @@ def build_module_connect_index(
         fold_generate=fold_generate,
         over_approximate_if=over_approximate_if,
         ff_barrier=ff_barrier,
+        resolve_param_dims=resolve_param_dims,
         port_decl_widths=port_decl_widths,
         port_decl_md_suffixes=port_decl_md_suffixes,
         prepared_body=prepared_body,
@@ -4005,6 +4054,7 @@ def build_module_connect_index(
             fold_generate=fold_generate,
             over_approximate_if=over_approximate_if,
             ff_barrier=ff_barrier,
+            resolve_param_dims=resolve_param_dims,
             port_decl_widths=port_decl_widths,
             port_decl_md_suffixes=port_decl_md_suffixes,
             prepared_body=prepared_body,
@@ -4021,6 +4071,7 @@ def _build_module_connect_index_uncached(
     fold_generate: bool = True,
     over_approximate_if: bool = True,
     ff_barrier: bool = False,
+    resolve_param_dims: bool = True,
     port_decl_widths: Optional[Mapping[str, List[int]]] = None,
     port_decl_md_suffixes: Optional[Mapping[str, List[str]]] = None,
     prepared_body: Optional[str] = None,
@@ -4043,10 +4094,17 @@ def _build_module_connect_index_uncached(
         text = _apply_ifdef_only(body, defines)
     hier_links: Dict[str, List[Tuple[str, str]]] = {}
     hier_ref_targets: Dict[Tuple[str, str], Set[str]] = {}
-    decl_widths = _collect_decl_bit_indices(text, full_pmap)
-    for name, bits in (port_decl_widths or {}).items():
-        decl_widths.setdefault(name, list(bits))
-    decl_md_suffixes = _collect_decl_md_suffixes(text, full_pmap)
+    if resolve_param_dims:
+        decl_widths = _collect_decl_bit_indices(text, full_pmap)
+        for name, bits in (port_decl_widths or {}).items():
+            decl_widths.setdefault(name, list(bits))
+    else:
+        decl_widths = {}
+    decl_md_suffixes = _collect_decl_md_suffixes(
+        text,
+        full_pmap,
+        resolve_param_dims=resolve_param_dims,
+    )
     for name, suffixes in (port_decl_md_suffixes or {}).items():
         decl_md_suffixes.setdefault(name, list(suffixes))
     raw_edge_prov: Dict[Tuple[str, str], ConnectEdgeProv] = {}

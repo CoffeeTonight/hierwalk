@@ -213,6 +213,24 @@ def test_path_walk_writes_text_and_logical_tsv(tmp_path: Path):
     assert any(row["kind"] in ("port", "wire", "signal") for row in hier_rows)
 
 
+def test_compact_hierarchy_evidence_drops_redundant_inst_hits():
+    from hierwalk.connect_artifacts import (
+        HierarchyEvidenceRow,
+        compact_hierarchy_evidence,
+    )
+
+    evidence = [
+        HierarchyEvidenceRow("c1", "a", "inst", "top", "hit", "TOP"),
+        HierarchyEvidenceRow("c1", "a", "inst", "top.a", "hit", "A"),
+        HierarchyEvidenceRow("c1", "a", "inst", "top.a.b", "hit", "B"),
+        HierarchyEvidenceRow("c1", "a", "wire", "top.a.b.sig", "hit", "B"),
+    ]
+    compact = compact_hierarchy_evidence(evidence)
+    inst_paths = [r.path for r in compact if r.kind == "inst"]
+    assert inst_paths == ["top.a.b"]
+    assert any(r.kind == "wire" for r in compact)
+
+
 def test_format_connect_hierarchy_tsv_marks_miss_prefixes():
     rows_by_path = {
         "top": FlatRow(
@@ -234,8 +252,7 @@ def test_format_connect_hierarchy_tsv_marks_miss_prefixes():
     tsv = format_connect_hierarchy_tsv([result], rows_by_path, phase="text")
     parsed = _tsv_rows(tsv)
     a_rows = [row for row in parsed if row["side"] == "a"]
-    assert a_rows[0]["path"] == "top"
-    assert a_rows[0]["status"] == "hit"
+    assert any(row["path"] == "top" and row["status"] == "hit" for row in a_rows)
     assert any(row["path"] == "top.missing" and row["status"] == "miss" for row in a_rows)
     b_signal = [
         row

@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Dict, FrozenSet, List, Mapping, Optional, Sequence, Set, Tuple
 
-from hierwalk.connect_endpoints import _module_index, _port_param_ctx
+from hierwalk.connect_endpoints import ModuleIndexCacheKey, _module_index, _port_param_ctx
 from hierwalk.connect_scan import (
     ModuleConnectIndex,
     _expand_concat_elements,
@@ -153,7 +153,7 @@ class _SearchCtx:
     dist_to_goal: Dict[str, int]
     index: DesignIndex
     top: str
-    mod_cache: Dict[Tuple[str, str, str, str, str, bool, bool], ModuleConnectIndex]
+    mod_cache: Dict[ModuleIndexCacheKey, ModuleConnectIndex]
     goal_scope: str
     goal_rep: str
     goal_scope_only: bool
@@ -161,6 +161,7 @@ class _SearchCtx:
     param_ctx_cache: Dict[str, Mapping[str, str]] = field(default_factory=dict)
     over_approximate_if: bool = True
     ff_barrier: bool = False
+    resolve_param_dims: bool = True
     port_rep_cache: Dict[Tuple[int, str], str] = field(default_factory=dict)
     net_rep_cache: Dict[Tuple[int, str], str] = field(default_factory=dict)
 
@@ -192,11 +193,12 @@ def _build_search_ctx(
     goal: NetState,
     *,
     goal_scope_only: bool,
-    mod_cache: Dict[Tuple[str, str, str, str, str, bool, bool], ModuleConnectIndex],
+    mod_cache: Dict[ModuleIndexCacheKey, ModuleConnectIndex],
     defines: Mapping[str, str] | None = None,
     param_ctx_cache: Optional[Dict[str, Mapping[str, str]]] = None,
     over_approximate_if: bool = True,
     ff_barrier: bool = False,
+    resolve_param_dims: bool = True,
     elab_index: Optional[ElabIndex] = None,
 ) -> _SearchCtx:
     if elab_index is not None:
@@ -228,6 +230,7 @@ def _build_search_ctx(
             defines=defines,
             over_approximate_if=over_approximate_if,
             ff_barrier=ff_barrier,
+            resolve_param_dims=resolve_param_dims,
         )
         goal_rep = net_representative(gidx, goal_net)
     return _SearchCtx(
@@ -249,6 +252,7 @@ def _build_search_ctx(
         ),
         over_approximate_if=over_approximate_if,
         ff_barrier=ff_barrier,
+        resolve_param_dims=resolve_param_dims,
     )
 
 
@@ -305,6 +309,7 @@ def _expand_state(
         defines=ctx.defines,
         over_approximate_if=ctx.over_approximate_if,
         ff_barrier=ctx.ff_barrier,
+        resolve_param_dims=ctx.resolve_param_dims,
     )
     rep = _cached_net_rep(mod_idx, net, ctx.net_rep_cache)
 
@@ -355,6 +360,7 @@ def _expand_state(
             defines=ctx.defines,
             over_approximate_if=ctx.over_approximate_if,
             ff_barrier=ctx.ff_barrier,
+            resolve_param_dims=ctx.resolve_param_dims,
         )
         push(
             child_path,
@@ -386,6 +392,7 @@ def _expand_state(
             defines=ctx.defines,
             over_approximate_if=ctx.over_approximate_if,
             ff_barrier=ctx.ff_barrier,
+            resolve_param_dims=ctx.resolve_param_dims,
         )
         push(
             child_path,
@@ -411,6 +418,7 @@ def _expand_state(
                 defines=ctx.defines,
                 over_approximate_if=ctx.over_approximate_if,
                 ff_barrier=ctx.ff_barrier,
+                resolve_param_dims=ctx.resolve_param_dims,
             )
             for port_name, expr in parent_idx.inst_ports.get(row.inst_leaf, ()):
                 if not _child_port_rep_matches(
@@ -538,9 +546,10 @@ def _bidirectional_coi(
     strict_generate: bool = False,
     ff_barrier: bool = False,
     over_approximate_if: Optional[bool] = None,
-    mod_cache: Optional[Dict[Tuple[str, str, str, str, str, bool, bool], ModuleConnectIndex]] = None,
+    mod_cache: Optional[Dict[ModuleIndexCacheKey, ModuleConnectIndex]] = None,
     param_ctx_cache: Optional[Dict[str, Mapping[str, str]]] = None,
     elab_index: Optional[ElabIndex] = None,
+    resolve_param_dims: bool = True,
 ) -> Tuple[bool, List[ConnectHop], int]:
     over_approx = _resolve_over_approximate_if(strict_generate, over_approximate_if)
     cache = mod_cache if mod_cache is not None else {}
@@ -555,6 +564,7 @@ def _bidirectional_coi(
         param_ctx_cache=param_ctx_cache,
         over_approximate_if=over_approx,
         ff_barrier=ff_barrier,
+        resolve_param_dims=resolve_param_dims,
         elab_index=elab_index,
     )
 
@@ -570,6 +580,7 @@ def _bidirectional_coi(
         defines=defines,
         over_approximate_if=over_approx,
         ff_barrier=ff_barrier,
+        resolve_param_dims=resolve_param_dims,
     )
     start_key = _state_key(
         start[0],
@@ -596,6 +607,7 @@ def _bidirectional_coi(
             defines=defines,
             over_approximate_if=over_approx,
             ff_barrier=ff_barrier,
+            resolve_param_dims=resolve_param_dims,
         )
         goal_key = _state_key(
             goal[0],
@@ -706,9 +718,10 @@ def _forward_coi_to_scope(
     strict_generate: bool = False,
     ff_barrier: bool = False,
     over_approximate_if: Optional[bool] = None,
-    mod_cache: Optional[Dict[Tuple[str, str, str, str, str, bool, bool], ModuleConnectIndex]] = None,
+    mod_cache: Optional[Dict[ModuleIndexCacheKey, ModuleConnectIndex]] = None,
     param_ctx_cache: Optional[Dict[str, Mapping[str, str]]] = None,
     elab_index: Optional[ElabIndex] = None,
+    resolve_param_dims: bool = True,
 ) -> Tuple[bool, List[ConnectHop], int]:
     over_approx = _resolve_over_approximate_if(strict_generate, over_approximate_if)
     cache = mod_cache if mod_cache is not None else {}
@@ -723,6 +736,7 @@ def _forward_coi_to_scope(
         param_ctx_cache=param_ctx_cache,
         over_approximate_if=over_approx,
         ff_barrier=ff_barrier,
+        resolve_param_dims=resolve_param_dims,
         elab_index=elab_index,
     )
     start_row = ctx.rows_by_path.get(start[0])
@@ -737,6 +751,7 @@ def _forward_coi_to_scope(
         defines=defines,
         over_approximate_if=over_approx,
         ff_barrier=ff_barrier,
+        resolve_param_dims=resolve_param_dims,
     )
     start_key = _state_key(
         start[0],

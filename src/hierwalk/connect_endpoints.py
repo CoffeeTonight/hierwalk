@@ -28,7 +28,7 @@ def _shared_cache_lock(cache: Dict, key: object) -> threading.Lock:
         return lock
 
 
-ModuleIndexCacheKey = Tuple[str, str, str, str, str, bool, bool]
+ModuleIndexCacheKey = Tuple[str, str, str, str, str, bool, bool, bool]
 
 
 def _mod_cache_lock(
@@ -51,6 +51,7 @@ def make_module_index_cache_key(
     bind_digest: str,
     ff_barrier: bool = False,
     over_approximate_if: bool = True,
+    resolve_param_dims: bool = True,
 ) -> ModuleIndexCacheKey:
     return (
         mod_name,
@@ -60,6 +61,7 @@ def make_module_index_cache_key(
         bind_digest,
         ff_barrier,
         over_approximate_if,
+        resolve_param_dims,
     )
 
 from hierwalk.cache import _pickle_load, get_active_work_dir
@@ -776,7 +778,7 @@ def _empty_module_passthrough_ports(
     return None
 
 
-_CONNECT_INDEX_SIDECAR_VERSION = 2
+_CONNECT_INDEX_SIDECAR_VERSION = 3
 
 _ModuleIndexKeyMemoEntry = Tuple[str, str, ModuleIndexCacheKey, Tuple[BindRecord, ...]]
 _module_index_key_memo: Dict[
@@ -799,6 +801,7 @@ def _resolve_module_index_key(
     *,
     ff_barrier: bool,
     over_approximate_if: bool,
+    resolve_param_dims: bool = True,
 ) -> Tuple[ModuleIndexCacheKey, List[BindRecord]]:
     rec = index.get_module(mod_name)
     body = index.module_body(mod_name) if rec else ""
@@ -816,6 +819,7 @@ def _resolve_module_index_key(
         defines_digest,
         ff_barrier,
         over_approximate_if,
+        resolve_param_dims,
         files_digest,
     )
     with _module_index_key_memo_guard:
@@ -834,6 +838,7 @@ def _resolve_module_index_key(
         bind_digest=bind_digest,
         ff_barrier=ff_barrier,
         over_approximate_if=over_approximate_if,
+        resolve_param_dims=resolve_param_dims,
     )
     frozen_binds = tuple(binds)
     with _module_index_key_memo_guard:
@@ -856,6 +861,7 @@ class _ModuleConnectSidecarMeta:
     bind_digest: str
     ff_barrier: bool
     over_approximate_if: bool
+    resolve_param_dims: bool = True
 
 
 def _module_body_digest(mod_name: str, body: str, rec_file_path: Optional[str]) -> str:
@@ -890,11 +896,12 @@ def _module_connect_sidecar_key(
     bind_digest: str,
     ff_barrier: bool,
     over_approximate_if: bool,
+    resolve_param_dims: bool = True,
 ) -> str:
     return (
         f"v={_CONNECT_INDEX_SIDECAR_VERSION}|{mod_name}|{ctx_key}|"
         f"{body_digest}|{defines_digest}|{bind_digest}|"
-        f"{int(ff_barrier)}|{int(over_approximate_if)}"
+        f"{int(ff_barrier)}|{int(over_approximate_if)}|{int(resolve_param_dims)}"
     )
 
 
@@ -956,6 +963,7 @@ def _module_index(
     defines: Mapping[str, str] | None = None,
     over_approximate_if: bool = True,
     ff_barrier: bool = False,
+    resolve_param_dims: bool = True,
 ) -> ModuleConnectIndex:
     key, binds = _resolve_module_index_key(
         index,
@@ -964,6 +972,7 @@ def _module_index(
         defines,
         ff_barrier=ff_barrier,
         over_approximate_if=over_approximate_if,
+        resolve_param_dims=resolve_param_dims,
     )
     hit = cache.get(key)
     if hit is not None:
@@ -982,6 +991,7 @@ def _module_index(
             binds=binds,
             over_approximate_if=over_approximate_if,
             ff_barrier=ff_barrier,
+            resolve_param_dims=resolve_param_dims,
         )
         return built
 
@@ -997,6 +1007,7 @@ def _build_module_index_entry(
     binds: Optional[Sequence[BindRecord]] = None,
     over_approximate_if: bool = True,
     ff_barrier: bool = False,
+    resolve_param_dims: bool = True,
 ) -> ModuleConnectIndex:
     rec = index.get_module(mod_name)
     body = index.module_body(mod_name) if rec else ""
@@ -1018,6 +1029,7 @@ def _build_module_index_entry(
         bind_digest=bind_digest,
         ff_barrier=ff_barrier,
         over_approximate_if=over_approximate_if,
+        resolve_param_dims=resolve_param_dims,
     )
     sidecar_key = _module_connect_sidecar_key(
         mod_name=mod_name,
@@ -1027,6 +1039,7 @@ def _build_module_index_entry(
         bind_digest=bind_digest,
         ff_barrier=ff_barrier,
         over_approximate_if=over_approximate_if,
+        resolve_param_dims=resolve_param_dims,
     )
     disk_hit = _load_module_connect_sidecar(sidecar_key, meta=sidecar_meta)
     if disk_hit is not None:
@@ -1045,9 +1058,16 @@ def _build_module_index_entry(
             fold_generate=True,
             over_approximate_if=over_approximate_if,
             ff_barrier=ff_barrier,
-            port_decl_widths=_port_decl_bit_indices(index, mod_name, param_ctx),
-            port_decl_md_suffixes=_port_decl_md_suffixes(
-                index, mod_name, param_ctx
+            resolve_param_dims=resolve_param_dims,
+            port_decl_widths=(
+                _port_decl_bit_indices(index, mod_name, param_ctx)
+                if resolve_param_dims
+                else None
+            ),
+            port_decl_md_suffixes=(
+                _port_decl_md_suffixes(index, mod_name, param_ctx)
+                if resolve_param_dims
+                else None
             ),
         )
         if bind_list:
