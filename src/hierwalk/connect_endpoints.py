@@ -162,9 +162,20 @@ def parse_connect_endpoint(
     top: str = "",
 ) -> Tuple[str, Optional[str]]:
     text = spec.strip()
+    parts = text.split(".")
+    if len(parts) >= 2 and index is not None:
+        parent = ".".join(parts[:-1])
+        leaf = parts[-1]
+        parent_row = rows_by_path.get(parent)
+        if parent_row is not None and leaf and _port_exists(
+            index,
+            parent_row,
+            leaf,
+            top=top,
+        ):
+            return parent, leaf
     if text in rows_by_path:
         return text, None
-    parts = text.split(".")
     for i in range(len(parts) - 1, 0, -1):
         hier = ".".join(parts[:i])
         row = rows_by_path.get(hier)
@@ -429,10 +440,10 @@ def classify_signal_tail_kind(
     if not text:
         return None
     stem = signal_name.split("[", 1)[0]
-    if probe_inst_leaf_regex_fast(text, stem):
-        return None
     if _port_exists(index, row, signal_name, top=top):
         return "port"
+    if probe_inst_leaf_regex_fast(text, stem):
+        return None
     base = stem.split(".", 1)[0]
     if _net_base_is_reg_fast(text, base):
         return "reg"
