@@ -396,6 +396,55 @@ def _cache_note_decl_net_hit(
             bucket.add(name)
 
 
+def _net_base_is_reg_fast(body: str, base: str) -> bool:
+    """True when *base* is declared as a ``reg`` in module *body*."""
+    if not body or not base:
+        return False
+    clean = _clean_body(body)
+    esc = re.escape(base)
+    pat = re.compile(
+        rf"\breg\b\s*"
+        rf"(?:\([^)]*\)\s*)?"
+        rf"(?:(?:\[[^\]]+\]\s*)*)"
+        rf"(?:{esc}\b|(?:(?:\\(?:[A-Za-z_]\w*|\S+)|[A-Za-z_]\w*)\s*,\s*)*{esc}\b)",
+        re.IGNORECASE,
+    )
+    return pat.search(clean) is not None
+
+
+def classify_signal_tail_kind(
+    index: DesignIndex,
+    row: FlatRow,
+    signal_name: str,
+    *,
+    top: str,
+    body: Optional[str] = None,
+) -> Optional[str]:
+    """Classify a module-local tail as ``port``, ``wire``, ``reg``, or unknown."""
+    if not signal_name or not is_module_local_signal_name(signal_name):
+        return None
+    text = body if body is not None else _module_body_for_row(index, row)
+    if not text:
+        return None
+    stem = signal_name.split("[", 1)[0]
+    if probe_inst_leaf_regex_fast(text, stem):
+        return None
+    if _port_exists(index, row, signal_name, top=top):
+        return "port"
+    base = stem.split(".", 1)[0]
+    if _net_base_is_reg_fast(text, base):
+        return "reg"
+    if wire_tail_exists_fast(text, signal_name):
+        return "wire"
+    if _net_base_declared_fast(text, base):
+        return "wire"
+    if _net_base_in_assign_regex_fast(text, base):
+        return "wire"
+    if _net_base_in_port_map_regex_fast(text, base):
+        return "wire"
+    return None
+
+
 def _net_base_declared_fast(body: str, base: str) -> bool:
     """
     Single-name declaration probe (wire/logic/reg/port) without full statement split.

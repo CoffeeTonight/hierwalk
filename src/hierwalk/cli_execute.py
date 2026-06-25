@@ -529,6 +529,9 @@ def execute_run(cfg: RunConfig, ap) -> int:
                     filelist_warnings=len(fl.errors),
                     connect_results=connect_results,
                     connect_phase=stdout_phase,
+                    connect_rows_by_path=endpoint_rows,
+                    connect_signal_tails=pw_state.signal_tail_records,
+                    connect_top=top_for_walk,
                 ),
                 log_path=log_path,
             )

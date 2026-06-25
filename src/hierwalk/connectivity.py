@@ -203,42 +203,32 @@ def format_connect_results_report(
     results: Sequence[ConnectResult],
     *,
     phase: str = "logical",
+    rows_by_path: Optional[Mapping[str, FlatRow]] = None,
+    signal_tails: Optional[Sequence[object]] = None,
+    index: Optional[DesignIndex] = None,
+    top: str = "",
 ) -> List[str]:
-    """Compact per-check lines for the end-of-run report (always lists endpoints)."""
-    leaf_results = flatten_connect_results(results)
-    if not leaf_results and results:
-        leaf_results = [
-            r
-            for r in results
-            if r.endpoint_a.spec or r.endpoint_b.spec or r.check_id
-        ]
-    if not leaf_results and results:
-        leaf_results = list(results)
-    if not leaf_results:
-        return ["  (no checks)"]
-    phase_label = str(phase).strip().lower() or "logical"
-    lines: List[str] = []
-    for result in leaf_results:
-        cid = f" [{result.check_id}]" if result.check_id else ""
-        pair = f"{result.endpoint_a.spec} -> {result.endpoint_b.spec}"
-        text_ok = _connected_text_value(result)
-        logical_ok = _connected_logical_value(result)
-        if phase_label == "text":
-            status = "PASS" if text_ok else "FAIL"
-            lines.append(f"  {status}{cid} {pair}")
-        elif phase_label == "logical":
-            status = "PASS" if logical_ok else "FAIL"
-            lines.append(f"  {status}{cid} {pair}")
-        else:
-            text_s = "PASS" if text_ok else "FAIL"
-            logical_s = "PASS" if logical_ok else "FAIL"
-            lines.append(f"  text={text_s} logical={logical_s}{cid} {pair}")
-        if result.errors:
-            err = " | ".join(result.errors)
-            lines.append(f"         errors: {err}")
-        elif result.note and not (text_ok if phase_label == "text" else logical_ok):
-            lines.append(f"         note: {result.note}")
-    return lines
+    """Hierarchy-first connect report (inst/port/wire/reg), then COI verdict."""
+    from hierwalk.connect_artifacts import (
+        SignalTailRecord,
+        format_connect_results_report as _format_analysis_report,
+    )
+
+    tails: Sequence[SignalTailRecord] = ()
+    if signal_tails:
+        tails = tuple(
+            rec
+            for rec in signal_tails
+            if isinstance(rec, SignalTailRecord)
+        )
+    return _format_analysis_report(
+        results,
+        phase=phase,
+        rows_by_path=rows_by_path,
+        signal_tails=tails,
+        index=index,
+        top=top,
+    )
 
 
 def flatten_connect_results(
@@ -254,6 +244,23 @@ def flatten_connect_results(
         else:
             out.append(result)
     return out
+
+
+def flatten_connect_results_for_output(
+    results: Sequence[ConnectResult],
+) -> List[ConnectResult]:
+    """Flatten aggregates; keep top-level rows when flatten would drop leaf specs."""
+    leaf = flatten_connect_results(results)
+    if leaf:
+        return leaf
+    if not results:
+        return []
+    fallback = [
+        r
+        for r in results
+        if r.endpoint_a.spec or r.endpoint_b.spec or r.check_id
+    ]
+    return fallback or list(results)
 
 
 def print_connect_trace_reports(
@@ -923,7 +930,7 @@ def format_connect_results_tsv(
 ) -> str:
     from hierwalk.waypoint_fanout import format_waypoint_fanout_tsv
 
-    leaf_results = flatten_connect_results(results)
+    leaf_results = flatten_connect_results_for_output(results)
     phase_label = str(phase).strip().lower() or "logical"
     if phase_label == "text":
         header = (

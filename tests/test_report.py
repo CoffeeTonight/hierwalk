@@ -77,6 +77,7 @@ def test_run_report_lists_connect_endpoints_on_fail(tmp_path):
     )
     assert "Connectivity" in body
     assert "top.a -> top.b" in body
+    assert "coi" in body
     assert "FAIL" in body
     assert "[chk1]" in body
     assert "no path" in body

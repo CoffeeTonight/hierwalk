@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Sequence, TextIO, Tuple
@@ -65,6 +65,9 @@ class RunReport:
     hierarchy_rows: Sequence[FlatRow] = ()
     connect_results: Sequence[ConnectResult] = ()
     connect_phase: str = ""
+    connect_rows_by_path: Mapping[str, FlatRow] = field(default_factory=dict)
+    connect_signal_tails: Sequence[object] = ()
+    connect_top: str = ""
 
     def lines(self) -> List[str]:
         out: List[str] = []
@@ -159,10 +162,22 @@ class RunReport:
             if phase not in ("text", "logical", "both"):
                 phase = "logical"
             out.append("")
-            out.append("Connectivity")
+            out.append("Connectivity (hierarchy analysis)")
             if phase in ("text", "logical"):
                 out.append(f"  Phase:         {phase}")
-            out.extend(format_connect_results_report(self.connect_results, phase=phase))
+            out.append("  Elements:      inst / port / wire / reg (hit or miss)")
+            tops = list(self.elab_tops)
+            top_label = self.connect_top or (tops[0] if tops else "")
+            out.extend(
+                format_connect_results_report(
+                    self.connect_results,
+                    phase=phase,
+                    rows_by_path=self.connect_rows_by_path,
+                    signal_tails=self.connect_signal_tails,
+                    index=self.index,
+                    top=top_label,
+                )
+            )
 
         mapped_hits = [h for h in self.search_hit_details if h.path_chain]
         if mapped_hits:

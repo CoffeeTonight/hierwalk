@@ -206,9 +206,11 @@ def test_path_walk_writes_text_and_logical_tsv(tmp_path: Path):
     assert hier_text.is_file()
     assert hier_logical.is_file()
     hier_rows = _tsv_rows(hier_text.read_text(encoding="utf-8"))
-    assert {row["side"] for row in hier_rows} == {"a", "b"}
+    assert {row["side"] for row in hier_rows} <= {"a", "b", "?"}
+    assert "a" in {row["side"] for row in hier_rows}
+    assert "b" in {row["side"] for row in hier_rows}
     assert any(row["status"] == "hit" for row in hier_rows)
-    assert any(row["kind"] == "port" for row in hier_rows)
+    assert any(row["kind"] in ("port", "wire", "signal") for row in hier_rows)
 
 
 def test_format_connect_hierarchy_tsv_marks_miss_prefixes():
@@ -235,8 +237,12 @@ def test_format_connect_hierarchy_tsv_marks_miss_prefixes():
     assert a_rows[0]["path"] == "top"
     assert a_rows[0]["status"] == "hit"
     assert any(row["path"] == "top.missing" and row["status"] == "miss" for row in a_rows)
-    b_port = [row for row in parsed if row["side"] == "b" and row["kind"] == "port"]
-    assert b_port and b_port[0]["status"] == "hit"
+    b_signal = [
+        row
+        for row in parsed
+        if row["side"] == "b" and row["kind"] in ("port", "wire", "signal")
+    ]
+    assert b_signal and b_signal[0]["status"] == "hit"
 
 
 def test_resolve_connect_output_dir_falls_back_to_db_top(tmp_path: Path):

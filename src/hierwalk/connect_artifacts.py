@@ -10,12 +10,41 @@ from typing import List, Mapping, Optional, Sequence, Union
 
 from hierwalk.connect_request import ConnectivityCheck, ConnectivityRequest
 from hierwalk.connectivity import (
+    ConnectivitySession,
     flatten_connect_results,
+    flatten_connect_results_for_output,
     format_connect_results_tsv,
 )
 from hierwalk.hierarchy_log import path_spine_prefixes
+from hierwalk.index import DesignIndex
 from hierwalk.models import ConnectEndpoint, ConnectResult, FlatRow
 from hierwalk.run_request import RunConfig
+
+HIERARCHY_KINDS = frozenset({"inst", "port", "wire", "reg"})
+
+
+@dataclass(frozen=True)
+class HierarchyEvidenceRow:
+    """One resolved hierarchy element for a connect check (inst/port/wire/reg)."""
+
+    check_id: str
+    side: str
+    kind: str
+    path: str
+    status: str
+    module: str = ""
+
+
+@dataclass(frozen=True)
+class SignalTailRecord:
+    """Path-walk wire/port tail resolution (mirrors signal-tail trace log)."""
+
+    target_path: str
+    parent_path: str
+    tail: str
+    kind: str
+    hit: bool
+    module: str = ""
 
 
 @dataclass(frozen=True)
@@ -403,6 +432,69 @@ def flatten_text_conn_results(results: Sequence[ConnectResult]) -> List[ConnectR
     return flatten_connect_results(results)
 
 
+def build_connect_results_from_request(
+    request: ConnectivityRequest,
+    session: ConnectivitySession,
+    *,
+    coi_error: str = "",
+) -> List[ConnectResult]:
+    """Synthesize per-check rows from JSON endpoints when COI produced none."""
+    from hierwalk.connect_endpoints import resolve_endpoint
+
+    lookup = session.rows_by_path
+    out: List[ConnectResult] = []
+    for chk in request.checks:
+        ep_a, err_a = resolve_endpoint(
+            chk.endpoint_a,
+            session.rows,
+            session.index,
+            top=session.top,
+            require_port=False,
+            rows_by_path=lookup,
+        )
+        ep_b, err_b = resolve_endpoint(
+            chk.endpoint_b,
+            session.rows,
+            session.index,
+            top=session.top,
+            require_port=False,
+            rows_by_path=lookup,
+        )
+        errors = list(err_a) + list(err_b)
+        if coi_error and coi_error not in errors:
+            errors.insert(0, coi_error)
+        out.append(
+            ConnectResult(
+                ep_a,
+                ep_b,
+                False,
+                "unknown",
+                errors=errors,
+                check_id=chk.check_id,
+            )
+        )
+    return out
+
+
+def normalize_connect_results(
+    request: ConnectivityRequest,
+    results: Sequence[ConnectResult],
+    session: ConnectivitySession,
+    *,
+    coi_error: str = "",
+) -> List[ConnectResult]:
+    """Ensure TSV/report list at least one row per request check."""
+    if flatten_connect_results_for_output(results):
+        return list(results)
+    if not request.checks:
+        return []
+    return build_connect_results_from_request(
+        request,
+        session,
+        coi_error=coi_error,
+    )
+
+
 def any_text_conn_hit(results: Sequence[ConnectResult]) -> bool:
     """True when at least one leaf check passed text-conn (worth a logical pass)."""
     return any(r.connected_text for r in flatten_text_conn_results(results))
@@ -487,49 +579,289 @@ def _endpoint_inst_spine(ep: ConnectEndpoint) -> List[str]:
     return path_spine_prefixes(ep.spec)
 
 
+def normalize_hierarchy_kind(kind: str) -> str:
+    """Map probe/trace labels to inst|port|wire|reg."""
+    raw = str(kind or "").strip().lower()
+    if raw.startswith("port"):
+        return "port"
+    if raw.startswith("reg"):
+        return "reg"
+    if raw.startswith("wire"):
+        return "wire"
+    if raw in HIERARCHY_KINDS:
+        return raw
+    if raw in ("signal", "not-signal"):
+        return "wire"
+    return "wire"
+
+
+def _endpoint_signal_kind(
+    ep: ConnectEndpoint,
+    rows_by_path: Mapping[str, FlatRow],
+    *,
+    index: Optional[DesignIndex] = None,
+    top: str = "",
+) -> str:
+    from hierwalk.connect_endpoints import classify_signal_tail_kind
+
+    tail = (ep.port_name or "").strip()
+    if not tail and ep.spec and "." in ep.spec:
+        tail = ep.spec.rsplit(".", 1)[-1]
+    parent = (ep.inst_path or "").strip()
+    if not parent and ep.spec and "." in ep.spec:
+        parent = ep.spec.rsplit(".", 1)[0]
+    row = rows_by_path.get(parent) if parent else None
+    if row is not None and index is not None and tail:
+        kind = classify_signal_tail_kind(index, row, tail, top=top or parent.split(".", 1)[0])
+        if kind in HIERARCHY_KINDS:
+            return kind
+    if ep.port_found:
+        return "port"
+    return "wire"
+
+
+def _match_signal_tail_to_check(
+    target_path: str,
+    result: ConnectResult,
+) -> Optional[str]:
+    """Return ``a`` or ``b`` when *target_path* belongs to this check's endpoint."""
+    for side, ep in (("a", result.endpoint_a), ("b", result.endpoint_b)):
+        spec = (ep.spec or "").strip()
+        if not spec:
+            continue
+        if target_path == spec or spec.endswith("." + target_path.rsplit(".", 1)[-1]):
+            return side
+        if target_path.startswith(spec + ".") or spec.startswith(target_path + "."):
+            return side
+        parent = (ep.inst_path or "").strip()
+        if parent and (target_path == parent or target_path.startswith(parent + ".")):
+            return side
+    return None
+
+
+def collect_hierarchy_evidence(
+    results: Sequence[ConnectResult],
+    rows_by_path: Mapping[str, FlatRow],
+    *,
+    signal_tails: Sequence[SignalTailRecord] = (),
+    index: Optional[DesignIndex] = None,
+    top: str = "",
+) -> List[HierarchyEvidenceRow]:
+    """Gather inst/port/wire/reg rows for every check (hits and misses)."""
+    out: List[HierarchyEvidenceRow] = []
+    seen: set[tuple[str, str, str, str, str]] = set()
+    flat = flatten_connect_results_for_output(results)
+
+    def _add(
+        check_id: str,
+        side: str,
+        kind: str,
+        path: str,
+        status: str,
+        module: str = "",
+    ) -> None:
+        norm_kind = normalize_hierarchy_kind(kind)
+        if norm_kind not in HIERARCHY_KINDS:
+            return
+        key = (check_id, side, norm_kind, path, status)
+        if key in seen:
+            return
+        seen.add(key)
+        out.append(
+            HierarchyEvidenceRow(
+                check_id=check_id,
+                side=side,
+                kind=norm_kind,
+                path=path,
+                status=status,
+                module=module,
+            )
+        )
+
+    for result in flat:
+        check_id = result.check_id or ""
+        for side, ep in (("a", result.endpoint_a), ("b", result.endpoint_b)):
+            for path in _endpoint_inst_spine(ep):
+                row = rows_by_path.get(path)
+                _add(
+                    check_id,
+                    side,
+                    "inst",
+                    path,
+                    "hit" if row is not None else "miss",
+                    row.module if row is not None else ep.module,
+                )
+            tail = (ep.port_name or "").strip()
+            signal_path = (ep.spec or "").strip()
+            if not signal_path and tail:
+                signal_path = (
+                    f"{ep.inst_path}.{tail}" if ep.inst_path else tail
+                )
+            if signal_path:
+                _add(
+                    check_id,
+                    side,
+                    _endpoint_signal_kind(
+                        ep,
+                        rows_by_path,
+                        index=index,
+                        top=top,
+                    ),
+                    signal_path,
+                    "hit" if ep.port_found else "miss",
+                    ep.module,
+                )
+
+    for rec in signal_tails:
+        if not rec.target_path:
+            continue
+        kind = normalize_hierarchy_kind(rec.kind)
+        status = "hit" if rec.hit else "miss"
+        matched_check = ""
+        matched_side = "-"
+        for result in flat:
+            side = _match_signal_tail_to_check(rec.target_path, result)
+            if side is not None:
+                matched_check = result.check_id or ""
+                matched_side = side
+                break
+        _add(matched_check, matched_side, kind, rec.target_path, status, rec.module)
+
+    return out
+
+
+def format_hierarchy_evidence_report(
+    evidence: Sequence[HierarchyEvidenceRow],
+    *,
+    indent: str = "    ",
+) -> List[str]:
+    """Human-readable inst/port/wire/reg lines grouped by check."""
+    if not evidence:
+        return ["  (no hierarchy evidence)"]
+    by_check: dict[str, List[HierarchyEvidenceRow]] = {}
+    for row in evidence:
+        by_check.setdefault(row.check_id or "-", []).append(row)
+    lines: List[str] = []
+    for check_id in sorted(by_check, key=lambda k: (k == "-", k)):
+        label = f"[{check_id}]" if check_id and check_id != "-" else "[—]"
+        lines.append(f"  {label}")
+        for row in by_check[check_id]:
+            side = row.side if row.side in ("a", "b") else "·"
+            mod = f" ({row.module})" if row.module else ""
+            lines.append(
+                f"{indent}{side} {row.kind:4} {row.path:40} {row.status}{mod}"
+            )
+    return lines
+
+
+def format_connect_results_report(
+    results: Sequence[ConnectResult],
+    *,
+    phase: str = "logical",
+    rows_by_path: Optional[Mapping[str, FlatRow]] = None,
+    signal_tails: Sequence[SignalTailRecord] = (),
+    index: Optional[DesignIndex] = None,
+    top: str = "",
+) -> List[str]:
+    """
+    Hierarchy-first connect analysis: inst/port/wire/reg evidence, then COI verdict.
+    """
+    from hierwalk.connectivity import (
+        _connected_logical_value,
+        _connected_text_value,
+    )
+
+    leaf_results = flatten_connect_results_for_output(results)
+    if not leaf_results:
+        return ["  (no checks)"]
+    phase_label = str(phase).strip().lower() or "logical"
+    lines: List[str] = []
+    lookup = rows_by_path or {}
+    evidence = (
+        collect_hierarchy_evidence(
+            results,
+            lookup,
+            signal_tails=signal_tails,
+            index=index,
+            top=top,
+        )
+        if lookup or signal_tails
+        else []
+    )
+    evidence_by_check: dict[str, List[HierarchyEvidenceRow]] = {}
+    for row in evidence:
+        evidence_by_check.setdefault(row.check_id or "", []).append(row)
+
+    for result in leaf_results:
+        cid = result.check_id or ""
+        pair = f"{result.endpoint_a.spec} -> {result.endpoint_b.spec}"
+        header = f"  [{cid}] {pair}" if cid else f"  {pair}"
+        lines.append(header)
+        check_evidence = evidence_by_check.get(cid, [])
+        if check_evidence:
+            for ev in check_evidence:
+                mod = f" ({ev.module})" if ev.module else ""
+                lines.append(
+                    f"    {ev.side} {ev.kind:4} {ev.path:40} {ev.status}{mod}"
+                )
+        else:
+            for side, ep in (("a", result.endpoint_a), ("b", result.endpoint_b)):
+                if ep.spec:
+                    lines.append(f"    {side} ---- {ep.spec:40} (unresolved)")
+        text_ok = _connected_text_value(result)
+        logical_ok = _connected_logical_value(result)
+        if phase_label == "text":
+            coi = "PASS" if text_ok else "FAIL"
+            lines.append(f"    coi(text): {coi}")
+        elif phase_label == "logical":
+            coi = "PASS" if logical_ok else "FAIL"
+            lines.append(f"    coi(logical): {coi}")
+        else:
+            lines.append(
+                f"    coi: text={'PASS' if text_ok else 'FAIL'} "
+                f"logical={'PASS' if logical_ok else 'FAIL'}"
+            )
+        if result.errors:
+            err = " | ".join(result.errors)
+            lines.append(f"    note: {err}")
+        elif result.note:
+            lines.append(f"    note: {result.note}")
+    return lines
+
+
 def format_connect_hierarchy_tsv(
     results: Sequence[ConnectResult],
     rows_by_path: Mapping[str, FlatRow],
     *,
     phase: str = "text",
+    signal_tails: Sequence[SignalTailRecord] = (),
+    index: Optional[DesignIndex] = None,
+    top: str = "",
 ) -> str:
     phase_label = str(phase).strip().lower() or "text"
     headers = ["check_id", "side", "kind", "path", "status", "module", "phase"]
+    evidence = collect_hierarchy_evidence(
+        results,
+        rows_by_path,
+        signal_tails=signal_tails,
+        index=index,
+        top=top,
+    )
     lines = ["\t".join(headers)]
-    for result in flatten_connect_results(results):
-        check_id = result.check_id or ""
-        for side, ep in (("a", result.endpoint_a), ("b", result.endpoint_b)):
-            for path in _endpoint_inst_spine(ep):
-                row = rows_by_path.get(path)
-                status = "hit" if row is not None else "miss"
-                module = row.module if row is not None else ep.module
-                lines.append(
-                    "\t".join(
-                        (
-                            check_id,
-                            side,
-                            "inst",
-                            path,
-                            status,
-                            module,
-                            phase_label,
-                        )
-                    )
+    for row in evidence:
+        lines.append(
+            "\t".join(
+                (
+                    row.check_id,
+                    row.side,
+                    row.kind,
+                    row.path,
+                    row.status,
+                    row.module,
+                    phase_label,
                 )
-            if ep.port_name and ep.port_found:
-                lines.append(
-                    "\t".join(
-                        (
-                            check_id,
-                            side,
-                            "port",
-                            ep.spec,
-                            "hit" if ep.port_found else "miss",
-                            ep.module,
-                            phase_label,
-                        )
-                    )
-                )
+            )
+        )
     return "\n".join(lines) + "\n"
 
 

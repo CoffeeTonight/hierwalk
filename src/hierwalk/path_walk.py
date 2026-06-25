@@ -250,6 +250,7 @@ class PathWalkState:
     _decl_net_cache: DeclNetCache = field(default_factory=dict, repr=False)
     _module_body_cache: Dict[str, str] = field(default_factory=dict, repr=False)
     _param_ctx_cache: Dict[str, Mapping[str, str]] = field(default_factory=dict, repr=False)
+    _signal_tail_records: List[object] = field(default_factory=list, repr=False)
     _walk_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def _trace_streams(self) -> List[TextIO]:
@@ -451,6 +452,11 @@ class PathWalkState:
 
     def rows(self) -> List[FlatRow]:
         return list(self.rows_by_path.values())
+
+    @property
+    def signal_tail_records(self) -> List[object]:
+        """Path-walk port/wire/reg tail probes (for hierarchy artifacts)."""
+        return self._signal_tail_records
 
     def _add_row(
         self,
@@ -814,31 +820,23 @@ class PathWalkState:
         signal_name: str,
         row: FlatRow,
     ) -> Tuple[Optional[str], float]:
-        """Return (kind, check_ms) where kind is port|wire or None."""
+        """Return (kind, check_ms) where kind is port|wire|reg or None."""
+        from hierwalk.connect_endpoints import classify_signal_tail_kind
+
         t0 = time.perf_counter()
 
         def _elapsed() -> float:
             return (time.perf_counter() - t0) * 1000.0
 
-        if not is_module_local_signal_name(signal_name):
-            return None, _elapsed()
-
         body = self._cached_module_body(row)
-        if not body:
-            return None, _elapsed()
-        stem = signal_name.split("[", 1)[0]
-        if probe_inst_leaf_regex_fast(body, stem):
-            return None, _elapsed()
-        if wire_tail_exists_fast(body, signal_name):
-            return "wire", _elapsed()
-        base = stem.split(".", 1)[0]
-        if _net_base_declared_fast(body, base):
-            return "wire", _elapsed()
-        if _net_base_in_assign_regex_fast(body, base):
-            return "wire", _elapsed()
-        if _net_base_in_port_map_regex_fast(body, base):
-            return "wire", _elapsed()
-        return None, _elapsed()
+        kind = classify_signal_tail_kind(
+            self.index,
+            row,
+            signal_name,
+            top=self.top,
+            body=body,
+        )
+        return kind, _elapsed()
 
     def _emit_signal_tail(
         self,
@@ -851,6 +849,21 @@ class PathWalkState:
         row: FlatRow,
         check_ms: float,
     ) -> None:
+        from hierwalk.connect_artifacts import SignalTailRecord
+
+        target = target_path or (
+            f"{parent_path}.{tail}" if parent_path and tail else parent_path or tail
+        )
+        self._signal_tail_records.append(
+            SignalTailRecord(
+                target_path=target,
+                parent_path=parent_path,
+                tail=tail,
+                kind=kind,
+                hit=hit,
+                module=row.module,
+            )
+        )
         self._emit_walk(
             format_signal_tail_line(
                 hit=hit,
@@ -3053,6 +3066,7 @@ def run_path_walk_connect(
             connect_output_paths,
             format_connect_hierarchy_tsv,
             merge_refined_connect_results,
+            normalize_connect_results,
             prepare_text_connect_request,
             require_connect_phase_tsv,
             resolve_connect_output_dir,
@@ -3077,27 +3091,48 @@ def run_path_walk_connect(
                 text_request = prepare_text_connect_request(request)
                 text_results: list = []
                 text_modules_cached: Optional[int] = None
+                coi_error = ""
                 try:
                     state._emit_walk(
                         f"connect-coi begin checks={len(text_request.checks)} "
                         f"rows={len(walk_rows)}"
                     )
-                    batch = conn_session.run_request(
+                    try:
+                        batch = conn_session.run_request(
+                            text_request,
+                            jobs=1,
+                            on_progress=on_progress,
+                        )
+                        text_results = list(batch.results)
+                        text_modules_cached = batch.modules_cached
+                    except Exception as exc:
+                        coi_error = f"connect-coi failed: {exc!r}"
+                        state._emit_walk(coi_error)
+                        text_results = []
+                    text_results = normalize_connect_results(
                         text_request,
-                        jobs=1,
-                        on_progress=on_progress,
+                        text_results,
+                        conn_session,
+                        coi_error=coi_error,
                     )
-                    text_results = list(batch.results)
-                    text_modules_cached = batch.modules_cached
-                    snapshot_connect_text_phase(batch.results)
+                    if text_results:
+                        batch = ConnectivityBatchResult(
+                            results=tuple(text_results),
+                            modules_cached=(
+                                text_modules_cached
+                                if text_modules_cached is not None
+                                else conn_session.modules_cached
+                            ),
+                        )
+                    snapshot_connect_text_phase(text_results)
                     coi_ms = (time.perf_counter() - t_coi) * 1000.0
                     state._emit_walk(
-                        f"connect-coi done checks={len(batch.results)} "
+                        f"connect-coi done checks={len(text_results)} "
                         f"modules_cached={conn_session.modules_cached} "
                         f"ms={coi_ms:.1f}"
                     )
                     state._emit_walk(
-                        f"connect-text-conn done checks={len(batch.results)} "
+                        f"connect-text-conn done checks={len(text_results)} "
                         f"ms={coi_ms:.1f}"
                     )
                 finally:
@@ -3113,6 +3148,9 @@ def run_path_walk_connect(
                             text_results,
                             state.rows_by_path,
                             phase="text",
+                            signal_tails=state._signal_tail_records,
+                            index=index,
+                            top=top_name,
                         ),
                         encoding="utf-8",
                     )
@@ -3130,6 +3168,7 @@ def run_path_walk_connect(
                 t_refine = time.perf_counter()
                 logical_results: list = []
                 logical_modules_cached: Optional[int] = None
+                logical_coi_error = ""
                 try:
                     finalize_logical_walk_before_connect(state, request)
                     walk_rows = state.rows()
@@ -3140,11 +3179,19 @@ def run_path_walk_connect(
                     )
                     conn_session.clear_cache()
                     t_recoi = time.perf_counter()
-                    refined_batch = conn_session.run_request(
-                        request,
-                        jobs=1,
-                        on_progress=on_progress,
-                    )
+                    try:
+                        refined_batch = conn_session.run_request(
+                            request,
+                            jobs=1,
+                            on_progress=on_progress,
+                        )
+                    except Exception as exc:
+                        logical_coi_error = f"connect-coi failed: {exc!r}"
+                        state._emit_walk(logical_coi_error)
+                        refined_batch = ConnectivityBatchResult(
+                            results=(),
+                            modules_cached=conn_session.modules_cached,
+                        )
                     if batch is not None:
                         merge_refined_connect_results(
                             batch.results,
@@ -3173,7 +3220,16 @@ def run_path_walk_connect(
                         state.rows_by_path,
                         run_activation=True,
                     )
-                    logical_results = list(batch.results)
+                    logical_results = normalize_connect_results(
+                        request,
+                        batch.results,
+                        conn_session,
+                        coi_error=logical_coi_error,
+                    )
+                    batch = ConnectivityBatchResult(
+                        results=tuple(logical_results),
+                        modules_cached=batch.modules_cached,
+                    )
                     logical_modules_cached = batch.modules_cached
                     logical_ms = (time.perf_counter() - t_act) * 1000.0
                     state._emit_walk(
@@ -3193,6 +3249,9 @@ def run_path_walk_connect(
                             logical_results,
                             state.rows_by_path,
                             phase="logical",
+                            signal_tails=state._signal_tail_records,
+                            index=index,
+                            top=top_name,
                         ),
                         encoding="utf-8",
                     )
