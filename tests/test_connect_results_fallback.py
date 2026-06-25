@@ -13,6 +13,7 @@ from hierwalk.connect_artifacts import (
     normalize_connect_results,
     normalize_hierarchy_kind,
 )
+from hierwalk.connect_expand import build_expand_meta, parse_endpoint_elements
 from hierwalk.connect_request import ConnectivityCheck, ConnectivityRequest
 from hierwalk.connectivity import ConnectivitySession, format_connect_results_report
 from hierwalk.connect_endpoints import classify_signal_tail_kind
@@ -129,3 +130,59 @@ def test_collect_hierarchy_evidence_includes_inst_port_wire_reg(tmp_path: Path):
     assert any("inst" in line for line in report)
     assert any("port" in line for line in report)
     assert any("wire" in line for line in report)
+
+
+def test_hierarchy_tsv_expands_list_endpoint_display(tmp_path: Path):
+    """Bracket list display must not become paths like ``[top`` in hierarchy TSV."""
+    rtl = tmp_path / "top.v"
+    rtl.write_text(
+        "module top;\n"
+        "  wire e, u;\n"
+        "  wire c;\n"
+        "endmodule\n",
+        encoding="utf-8",
+    )
+    index = DesignIndex.build({str(rtl): rtl.read_text(encoding="utf-8")})
+    _, rows = elaborate(index, "top")
+    session = ConnectivitySession(rows=rows, index=index, top="top")
+
+    display_a, _, _, _ = parse_endpoint_elements(
+        ["top.a.b.e.r.t", "top.a.b.u.i.o"]
+    )
+    display_b, _, _, _ = parse_endpoint_elements("top.a.b.c")
+    meta = build_expand_meta(
+        ["top.a.b.e.r.t", "top.a.b.u.i.o"],
+        "top.a.b.c",
+    )
+    req = ConnectivityRequest(
+        checks=(
+            ConnectivityCheck(display_a, display_b, check_id="lst", expand=meta),
+        ),
+        top="top",
+    )
+    results = build_connect_results_from_request(req, session)
+    assert len(results) == 1
+    assert len(results[0].sub_results) == 2
+
+    body = format_connect_hierarchy_tsv(
+        results,
+        session.rows_by_path,
+        phase="text",
+        index=index,
+        top="top",
+    )
+    assert "[top" not in body
+    assert "\tinst\ttop\t" in body or "\tinst\ttop\thit" in body
+    assert "top.a.b.e.r.t" in body
+    assert "top.a.b.u.i.o" in body
+    assert "top.a.b.c" in body
+
+    evidence = collect_hierarchy_evidence(
+        results,
+        session.rows_by_path,
+        index=index,
+        top="top",
+    )
+    paths = {row.path for row in evidence}
+    assert "[top" not in paths
+    assert "top" in paths

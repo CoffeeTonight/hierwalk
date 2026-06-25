@@ -8,6 +8,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Mapping, Optional, Sequence, Union
 
+from hierwalk.connect_expand import (
+    aggregate_connect_results,
+    expand_check_to_pairs,
+    hierarchy_endpoint_specs,
+)
 from hierwalk.connect_request import ConnectivityCheck, ConnectivityRequest
 from hierwalk.connectivity import (
     ConnectivitySession,
@@ -444,35 +449,62 @@ def build_connect_results_from_request(
     lookup = session.rows_by_path
     out: List[ConnectResult] = []
     for chk in request.checks:
-        ep_a, err_a = resolve_endpoint(
+        pairs = expand_check_to_pairs(
             chk.endpoint_a,
-            session.rows,
-            session.index,
-            top=session.top,
-            require_port=False,
-            rows_by_path=lookup,
-        )
-        ep_b, err_b = resolve_endpoint(
             chk.endpoint_b,
-            session.rows,
-            session.index,
-            top=session.top,
-            require_port=False,
-            rows_by_path=lookup,
+            check_id=chk.check_id,
+            expand=chk.expand,
         )
-        errors = list(err_a) + list(err_b)
-        if coi_error and coi_error not in errors:
-            errors.insert(0, coi_error)
-        out.append(
-            ConnectResult(
-                ep_a,
-                ep_b,
-                False,
-                "unknown",
-                errors=errors,
-                check_id=chk.check_id,
+        fanout_mode = chk.expand.fanout_mode if chk.expand is not None else "all"
+        sub_results: List[ConnectResult] = []
+        for pair in pairs:
+            ep_a, err_a = resolve_endpoint(
+                pair.endpoint_a,
+                session.rows,
+                session.index,
+                top=session.top,
+                require_port=False,
+                rows_by_path=lookup,
             )
-        )
+            ep_b, err_b = resolve_endpoint(
+                pair.endpoint_b,
+                session.rows,
+                session.index,
+                top=session.top,
+                require_port=False,
+                rows_by_path=lookup,
+            )
+            errors = list(err_a) + list(err_b)
+            if coi_error and coi_error not in errors:
+                errors.insert(0, coi_error)
+            sub_id = pair.sub_id
+            leaf_id = (
+                f"{chk.check_id}{sub_id}"
+                if chk.check_id and sub_id
+                else (chk.check_id or sub_id.strip("[]->"))
+            )
+            sub_results.append(
+                ConnectResult(
+                    ep_a,
+                    ep_b,
+                    False,
+                    "unknown",
+                    errors=errors,
+                    check_id=leaf_id,
+                )
+            )
+        if len(sub_results) == 1:
+            out.append(sub_results[0])
+        elif len(sub_results) > 1:
+            out.append(
+                aggregate_connect_results(
+                    chk.endpoint_a,
+                    chk.endpoint_b,
+                    sub_results,
+                    check_id=chk.check_id,
+                    fanout_mode=fanout_mode,
+                )
+            )
     return out
 
 
@@ -570,13 +602,43 @@ def apply_connect_logical_phase(
 
 
 def _endpoint_inst_spine(ep: ConnectEndpoint) -> List[str]:
-    base = (ep.inst_path or "").strip()
-    if ep.port_name and not ep.port_found:
-        full = f"{base}.{ep.port_name}" if base else ep.port_name
-        return path_spine_prefixes(full)
-    if base:
-        return path_spine_prefixes(base)
-    return path_spine_prefixes(ep.spec)
+    """Instance spine paths; expands ``[a, b]`` display specs into real paths."""
+    specs = hierarchy_endpoint_specs(
+        ep.spec,
+        inst_path=ep.inst_path,
+        port_name=ep.port_name,
+        port_found=ep.port_found,
+    )
+    out: List[str] = []
+    seen: set[str] = set()
+    for spec_path in specs:
+        for path in path_spine_prefixes(spec_path):
+            if path in seen:
+                continue
+            seen.add(path)
+            out.append(path)
+    return out
+
+
+def _resolve_endpoint_for_spec(
+    spec_path: str,
+    rows_by_path: Mapping[str, FlatRow],
+    *,
+    index: Optional[DesignIndex],
+    top: str,
+    rows: Sequence[FlatRow],
+) -> ConnectEndpoint:
+    from hierwalk.connect_endpoints import resolve_endpoint
+
+    ep, _errors = resolve_endpoint(
+        spec_path,
+        rows,
+        index,
+        top=top,
+        require_port=False,
+        rows_by_path=rows_by_path,
+    )
+    return ep
 
 
 def normalize_hierarchy_kind(kind: str) -> str:
@@ -620,21 +682,36 @@ def _endpoint_signal_kind(
     return "wire"
 
 
+def _endpoint_matches_signal_path(ep: ConnectEndpoint, target_path: str) -> bool:
+    """True when *target_path* belongs to *ep* (including ``[a, b]`` display specs)."""
+    text = (target_path or "").strip()
+    if not text:
+        return False
+    for spec_path in hierarchy_endpoint_specs(
+        ep.spec,
+        inst_path=ep.inst_path,
+        port_name=ep.port_name,
+        port_found=ep.port_found,
+    ):
+        if text == spec_path:
+            return True
+        if spec_path.endswith("." + text.rsplit(".", 1)[-1]):
+            return True
+        if text.startswith(spec_path + ".") or spec_path.startswith(text + "."):
+            return True
+    parent = (ep.inst_path or "").strip()
+    if parent and (text == parent or text.startswith(parent + ".")):
+        return True
+    return False
+
+
 def _match_signal_tail_to_check(
     target_path: str,
     result: ConnectResult,
 ) -> Optional[str]:
     """Return ``a`` or ``b`` when *target_path* belongs to this check's endpoint."""
     for side, ep in (("a", result.endpoint_a), ("b", result.endpoint_b)):
-        spec = (ep.spec or "").strip()
-        if not spec:
-            continue
-        if target_path == spec or spec.endswith("." + target_path.rsplit(".", 1)[-1]):
-            return side
-        if target_path.startswith(spec + ".") or spec.startswith(target_path + "."):
-            return side
-        parent = (ep.inst_path or "").strip()
-        if parent and (target_path == parent or target_path.startswith(parent + ".")):
+        if _endpoint_matches_signal_path(ep, target_path):
             return side
     return None
 
@@ -691,25 +768,44 @@ def collect_hierarchy_evidence(
                     "hit" if row is not None else "miss",
                     row.module if row is not None else ep.module,
                 )
-            tail = (ep.port_name or "").strip()
-            signal_path = (ep.spec or "").strip()
-            if not signal_path and tail:
-                signal_path = (
-                    f"{ep.inst_path}.{tail}" if ep.inst_path else tail
+            spec_paths = hierarchy_endpoint_specs(
+                ep.spec,
+                inst_path=ep.inst_path,
+                port_name=ep.port_name,
+                port_found=ep.port_found,
+            )
+            if not spec_paths:
+                tail = (ep.port_name or "").strip()
+                fallback = (
+                    f"{ep.inst_path}.{tail}" if ep.inst_path and tail else tail
                 )
-            if signal_path:
+                if fallback:
+                    spec_paths = (fallback,)
+            for spec_path in spec_paths:
+                signal_ep = ep
+                if spec_path != (ep.spec or "").strip() and index is not None:
+                    signal_ep = _resolve_endpoint_for_spec(
+                        spec_path,
+                        rows_by_path,
+                        index=index,
+                        top=top,
+                        rows=list(rows_by_path.values()),
+                    )
+                signal_path = (signal_ep.spec or spec_path).strip()
+                if not signal_path:
+                    continue
                 _add(
                     check_id,
                     side,
                     _endpoint_signal_kind(
-                        ep,
+                        signal_ep,
                         rows_by_path,
                         index=index,
                         top=top,
                     ),
                     signal_path,
-                    "hit" if ep.port_found else "miss",
-                    ep.module,
+                    "hit" if signal_ep.port_found else "miss",
+                    signal_ep.module or ep.module,
                 )
 
     for rec in signal_tails:

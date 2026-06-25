@@ -407,6 +407,45 @@ def parse_endpoint_elements(
     return text, (text,), False, False
 
 
+def parse_list_display_spec(spec: str) -> Optional[Tuple[str, ...]]:
+    """
+    Parse a JSON list display string like ``[top.a, top.b]`` into endpoint paths.
+
+    Returns ``None`` when *spec* is a plain scalar path (not bracket-wrapped).
+    """
+    text = str(spec or "").strip()
+    if not (text.startswith("[") and text.endswith("]")):
+        return None
+    inner = text[1:-1].strip()
+    if not inner:
+        return ()
+    parts = tuple(part.strip() for part in inner.split(",") if part.strip())
+    return parts if parts else ()
+
+
+def hierarchy_endpoint_specs(
+    spec: str,
+    *,
+    inst_path: str = "",
+    port_name: str = "",
+    port_found: bool = False,
+) -> Tuple[str, ...]:
+    """Return one or more hierarchy path specs (never a bracket-wrapped display blob)."""
+    listed = parse_list_display_spec(spec)
+    if listed is not None:
+        return listed
+    text = str(spec or "").strip()
+    if text:
+        return (text,)
+    if port_name and not port_found:
+        full = f"{inst_path}.{port_name}" if inst_path else port_name
+        if full:
+            return (full,)
+    if inst_path:
+        return (inst_path,)
+    return ()
+
+
 def _loop_expand_elements(
     elements: Tuple[str, ...],
     loop_map: Mapping[str, Tuple[str, ...]],
