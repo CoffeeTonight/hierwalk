@@ -254,9 +254,9 @@ class PathWalkState:
 
     def _trace_streams(self) -> List[TextIO]:
         out: List[TextIO] = []
-        if self.trace_stream is not None:
+        if self.trace_stream is not None and not self.trace_stream.closed:
             out.append(self.trace_stream)
-        if self._trace_log is not None:
+        if self._trace_log is not None and not self._trace_log.closed:
             out.append(self._trace_log)
         return out
 
@@ -2124,9 +2124,6 @@ def _acquire_path_walk_trace_log(
             write_path_walk_trace_section(fh, phase=phase)
             return fh, False
     fh = open_path_walk_trace_log(log_path, phase=phase)
-    if reuse_suite_session and _suite_session is not None:
-        _suite_session.trace_log_fh = fh
-        _suite_session.trace_log_path = log_path
     return fh, True
 
 

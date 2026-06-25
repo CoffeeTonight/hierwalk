@@ -295,8 +295,13 @@ def test_path_walk_text_conn_zero_checks_writes_header_tsv(tmp_path: Path):
     text_path = db / "conn.text.tsv"
     assert text_path.is_file()
     lines = [ln for ln in text_path.read_text(encoding="utf-8").splitlines() if ln]
-    assert lines[0].startswith("check_id\t")
-    data_rows = [ln for ln in lines[1:] if ln and not ln.startswith("#")]
+    assert lines[0] == "# connect results"
+    assert any(ln.startswith("check_id\t") for ln in lines)
+    data_rows = [
+        ln
+        for ln in lines
+        if ln and not ln.startswith("#") and not ln.startswith("check_id\t")
+    ]
     assert data_rows == []
 
 

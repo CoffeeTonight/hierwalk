@@ -239,6 +239,7 @@ class RunConfig:
     verification_step_kind: str = ""
     verification_step_name: str = ""
     verification_phase: str = "both"
+    run_config_source: Optional[str] = None
 
     @property
     def defines_map(self) -> Dict[str, str]:
