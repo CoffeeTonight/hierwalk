@@ -262,9 +262,18 @@ def test_empty_param_ctx_skips_path_refine_on_signal_tail(tmp_path: Path, monkey
     )
     index, mod_db = create_path_walk_index(flr, "TOP", defines={}, no_cache=True, jobs=1)
     t0 = time.perf_counter()
-    build_path_walk_state(index, "TOP", req, mod_db, jobs=1)
+    state = build_path_walk_state(index, "TOP", req, mod_db, jobs=1)
     walk_ms = (time.perf_counter() - t0) * 1000.0
 
+    batch, _index, _state = run_path_walk_connect(
+        req,
+        flr,
+        top="TOP",
+        no_cache=True,
+        jobs=1,
+    )
+
+    assert batch.results[0].connected is True
     assert refine_calls == []
     assert walk_ms < 30_000.0
 

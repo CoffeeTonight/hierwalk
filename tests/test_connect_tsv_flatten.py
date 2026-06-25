@@ -107,7 +107,7 @@ endmodule
     )
     fl = tmp_path / "filelist.f"
     fl.write_text(f"{rtl}\n", encoding="utf-8")
-    out = tmp_path / "conn.tsv"
+    out = tmp_path / ".db_top" / "conn.tsv"
     batch_json = tmp_path / "checks.json"
     batch_json.write_text(
         """
@@ -135,6 +135,7 @@ endmodule
             "-o",
             str(out),
         ],
+        cwd=str(tmp_path),
         capture_output=True,
         text=True,
         check=True,

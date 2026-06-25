@@ -175,13 +175,6 @@ def test_signal_tail_instance_leaf_miss_large_module_fast(tmp_path: Path):
     assert elapsed_ms < 500.0
 
 
-def test_dotted_tail_is_not_module_local_signal_name():
-    assert not is_module_local_signal_name("c.d")
-    assert not is_module_local_signal_name("u_core.u_leaf")
-    assert is_module_local_signal_name("c")
-    assert is_module_local_signal_name("bus[0]")
-
-
 def test_net_exists_port_map_only_wire(tmp_path: Path):
     v = """
     module top(input logic clk);
@@ -220,6 +213,91 @@ def test_signal_tail_wire_probe_large_module_under_one_second(tmp_path: Path):
     assert kind == "wire"
     assert check_ms < 500.0
     assert elapsed_ms < 500.0
+
+
+def test_dotted_tail_is_not_module_local_signal_name():
+    assert not is_module_local_signal_name("c.d")
+    assert not is_module_local_signal_name("u_core.u_leaf")
+    assert is_module_local_signal_name("c")
+    assert is_module_local_signal_name("bus[0]")
+
+
+def test_parse_connect_endpoint_dotted_tail_not_decoy_parent_wire(tmp_path: Path):
+    """``c.d`` under ``u_b`` must not match a decoy wire ``c`` in module B."""
+    v = """
+    module top; A a (); endmodule
+    module A; B u_b (); endmodule
+    module B;
+      wire c;
+      C c (.d(c));
+    endmodule
+    module C; input logic d; endmodule
+    """
+    index, rows = _index_and_rows(v, tmp_path)
+    lookup = {r.full_path: r for r in rows}
+    partial = {p: r for p, r in lookup.items() if p in ("top", "top.a", "top.a.u_b")}
+    hier, tail = parse_connect_endpoint(
+        "top.a.u_b.c.d",
+        partial,
+        index=index,
+        top="top",
+    )
+    assert (hier, tail) != ("top.a.u_b", "c.d")
+    assert net_exists_in_module_fast(
+        index,
+        partial["top.a.u_b"],
+        "c.d",
+        top="top",
+    ) is False
+    hier2, tail2 = parse_connect_endpoint(
+        "top.a.u_b.c.d",
+        lookup,
+        index=index,
+        top="top",
+    )
+    assert hier2 == "top.a.u_b.c"
+    assert tail2 == "d"
+
+
+def test_path_walk_nested_inst_port_with_decoy_parent_wire(tmp_path: Path):
+    """``top.a.u_b.c.d`` must reach child port ``d``, not stop at wire ``c`` in B."""
+    v = """
+    module top; A a (); endmodule
+    module A; B u_b (); endmodule
+    module B;
+      wire c;
+      C c (.d(c));
+    endmodule
+    module C; input logic d; endmodule
+    """
+    rtl = tmp_path / "d.v"
+    rtl.write_text(v, encoding="utf-8")
+    fl = tmp_path / "design.f"
+    fl.write_text(str(rtl.resolve()) + "\n", encoding="utf-8")
+    flr = parse_filelist(str(fl), index_cwd=str(tmp_path))
+    req = ConnectivityRequest(
+        checks=(ConnectivityCheck("top.a.u_b.c.d", "top.a.u_b.c.d"),),
+        top="top",
+    )
+    batch, _index, state = run_path_walk_connect(
+        req,
+        flr,
+        top="top",
+        no_cache=True,
+    )
+    assert "top.a.u_b.c.d" in state.rows_by_path or "top.a.u_b.c" in state.rows_by_path
+    ep, errs = resolve_endpoint(
+        "top.a.u_b.c.d",
+        state.rows(),
+        _index,
+        top="top",
+        rows_by_path=state.rows_by_path,
+    )
+    assert not errs
+    assert ep.inst_path == "top.a.u_b.c"
+    assert ep.port_name == "d"
+    assert ep.port_found
+    assert batch.results[0].connected is True
 
 
 def test_net_exists_in_module_fast_assign_only_implicit(tmp_path: Path):

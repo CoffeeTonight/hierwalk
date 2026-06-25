@@ -7,16 +7,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, FrozenSet, IO, List, Mapping, Optional, Sequence, Set, Tuple
 
-from hierwalk.connect_endpoints import _mod_cache_lock
-from hierwalk.connect_scan import (
-    ModuleConnectIndex,
-    build_module_connect_index,
-    net_representative,
-    prepare_connect_body,
-)
+from hierwalk.connect_endpoints import _module_index
+from hierwalk.connect_scan import ModuleConnectIndex, net_representative
 from hierwalk.connectivity import resolve_endpoint
 from hierwalk.index import DesignIndex
 from hierwalk.models import FlatRow
+from hierwalk.trace_stop import TraceStopPolicy, trace_stop_boundary_kind
 from hierwalk.params import resolve_param_map
 from hierwalk.path_refine import refine_param_ctx_for_path
 from hierwalk.port_scan import scan_ports_detail_from_module_text
@@ -91,7 +87,10 @@ class _ConeCtx:
     over_approximate_if: bool
     direction: str
     path_kind: str = "comb"
-    comb_cache: Optional[Dict[Tuple[str, "ModuleConnectIndex"]]] = None
+    comb_cache: Dict[Tuple[str, str, str, str, str, bool, bool], ModuleConnectIndex] = field(
+        default_factory=dict
+    )
+    trace_stop: TraceStopPolicy = field(default_factory=TraceStopPolicy)
 
 
 def _net_label(scope: str, net: str) -> str:
@@ -132,7 +131,7 @@ def _build_cone_module_index(
     defines: Mapping[str, str] | None,
     over_approximate_if: bool,
     cache: Dict[Tuple[str, str], ConeModuleIndex],
-    comb_cache: Optional[Dict[Tuple[str, str], ModuleConnectIndex]] = None,
+    comb_cache: Dict[Tuple[str, str, str, str, str, bool, bool], ModuleConnectIndex],
 ) -> ConeModuleIndex:
     ctx_key = "|".join(f"{k}={v}" for k, v in sorted(param_ctx.items()))
     key = (mod_name, ctx_key)
@@ -152,46 +151,15 @@ def _build_cone_module_index(
         cache[key] = empty
         return empty
     pmap = dict(param_ctx)
-    if comb_cache is not None:
-        comb_hit = comb_cache.get(key)
-        if comb_hit is not None:
-            comb = comb_hit
-        else:
-            with _mod_cache_lock(comb_cache, key):
-                comb_hit = comb_cache.get(key)
-                if comb_hit is not None:
-                    comb = comb_hit
-                else:
-                    text = prepare_connect_body(
-                        body,
-                        param_map=pmap,
-                        defines=defines,
-                        over_approximate_if=over_approximate_if,
-                    )
-                    comb = build_module_connect_index(
-                        body,
-                        param_map=pmap,
-                        defines=defines,
-                        over_approximate_if=over_approximate_if,
-                        ff_barrier=True,
-                        prepared_body=text,
-                    )
-                    comb_cache[key] = comb
-    else:
-        text = prepare_connect_body(
-            body,
-            param_map=pmap,
-            defines=defines,
-            over_approximate_if=over_approximate_if,
-        )
-        comb = build_module_connect_index(
-            body,
-            param_map=pmap,
-            defines=defines,
-            over_approximate_if=over_approximate_if,
-            ff_barrier=True,
-            prepared_body=text,
-        )
+    comb = _module_index(
+        comb_cache,
+        index,
+        mod_name,
+        pmap,
+        defines=defines,
+        over_approximate_if=over_approximate_if,
+        ff_barrier=True,
+    )
     ff_d_reps = frozenset(
         {comb.net_rep.get(n, n) for n in comb.ff_d_roots}
     )
@@ -276,6 +244,16 @@ def _boundary_at_state(
         return None
     mod_idx = _cached_cone_mod(ctx, row)
     mod_name = row.module
+    stop = trace_stop_boundary_kind(
+        scope,
+        top=ctx.top,
+        row=row,
+        policy=ctx.trace_stop,
+        is_origin=is_origin,
+    )
+    if stop is not None:
+        kind, detail = stop
+        return ConeBoundary(kind, scope, rep, mod_name, detail)
     if _is_blackbox_instance(ctx, row) and not is_origin:
         return ConeBoundary(
             "blackbox",
@@ -587,7 +565,14 @@ def _run_cone(
     defines: Mapping[str, str] | None = None,
     over_approximate_if: bool = True,
     path_kind: str = "comb",
+    trace_stop: Optional[TraceStopPolicy] = None,
+    ignore_hierarchy: Sequence[str] = (),
+    trace_max_depth: Optional[int] = None,
 ) -> ConeResult:
+    stop_policy = trace_stop or TraceStopPolicy(
+        ignore_hierarchy=tuple(ignore_hierarchy),
+        trace_max_depth=trace_max_depth,
+    )
     ep, errs = resolve_endpoint(endpoint, rows, index, top=top, require_port=False)
     if errs:
         return ConeResult(
@@ -613,6 +598,8 @@ def _run_cone(
         over_approximate_if=over_approximate_if,
         direction=direction,
         path_kind=path_kind,
+        trace_stop=stop_policy,
+        comb_cache={},
     )
     row = rows_by_path.get(ep.inst_path)
     if row is None:
@@ -690,6 +677,9 @@ def fanout_cone(
     defines: Mapping[str, str] | None = None,
     over_approximate_if: bool = True,
     path_kind: str = "comb",
+    trace_stop: Optional[TraceStopPolicy] = None,
+    ignore_hierarchy: Sequence[str] = (),
+    trace_max_depth: Optional[int] = None,
 ) -> ConeResult:
     return _run_cone(
         endpoint,
@@ -700,6 +690,9 @@ def fanout_cone(
         defines=defines,
         over_approximate_if=over_approximate_if,
         path_kind=path_kind,
+        trace_stop=trace_stop,
+        ignore_hierarchy=ignore_hierarchy,
+        trace_max_depth=trace_max_depth,
     )
 
 
@@ -712,6 +705,9 @@ def fanin_cone(
     defines: Mapping[str, str] | None = None,
     over_approximate_if: bool = True,
     path_kind: str = "comb",
+    trace_stop: Optional[TraceStopPolicy] = None,
+    ignore_hierarchy: Sequence[str] = (),
+    trace_max_depth: Optional[int] = None,
 ) -> ConeResult:
     return _run_cone(
         endpoint,
@@ -722,6 +718,9 @@ def fanin_cone(
         defines=defines,
         over_approximate_if=over_approximate_if,
         path_kind=path_kind,
+        trace_stop=trace_stop,
+        ignore_hierarchy=ignore_hierarchy,
+        trace_max_depth=trace_max_depth,
     )
 
 

@@ -522,7 +522,7 @@ def run_waypoint_fanout_check(
     trace_interior: bool = False,
     full_path_kinds: bool = False,
     elab_index: Optional[ElabIndex] = None,
-    comb_cache: Optional[Dict[Tuple[str, str], ModuleConnectIndex]] = None,
+    comb_cache: Optional[Dict[Tuple[str, str, str, str, str, bool, bool], ModuleConnectIndex]] = None,
 ) -> Tuple[ConnectResult, List[WaypointFanoutEvent]]:
     if elab_index is not None:
         rows_by_path = elab_index.rows_by_path

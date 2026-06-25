@@ -15,6 +15,7 @@ from hierwalk.connect_request import (
     try_parse_connect_request_json,
 )
 from hierwalk.inst_trace import InstTraceRequest, parse_inst_trace_json
+from hierwalk.trace_stop import parse_trace_stop_policy
 from hierwalk.search_spec import (
     SearchSpec,
     document_has_search,
@@ -220,6 +221,8 @@ class RunConfig:
     ignore_path_file: Tuple[str, ...] = ()
     ignore_module: Tuple[str, ...] = ()
     ignore_filelist: Tuple[str, ...] = ()
+    ignore_hierarchy: Tuple[str, ...] = ()
+    trace_max_depth: Optional[int] = None
     jobs: int = 0
     low_memory: bool = False
     cache_dir: Optional[str] = None
@@ -235,6 +238,7 @@ class RunConfig:
     direct_filelist_cli: bool = False
     verification_step_kind: str = ""
     verification_step_name: str = ""
+    verification_phase: str = "both"
 
     @property
     def defines_map(self) -> Dict[str, str]:
@@ -644,6 +648,8 @@ def parse_run_request_json(
             defines=defines,
         )
 
+    trace_stop = parse_trace_stop_policy(data)
+
     raw_search = _mapping_get_ci(data, "search")
     search_spec = resolve_search_spec(data)
     search: Optional[str] = None
@@ -718,6 +724,8 @@ def parse_run_request_json(
                 field="ignore_filelist",
             )
         ),
+        ignore_hierarchy=trace_stop.ignore_hierarchy,
+        trace_max_depth=trace_stop.trace_max_depth,
         jobs=_jobs_from_document(data)[0],
         low_memory=bool(data.get("low_memory", False)),
         cache_dir=_resolve_path(base, data.get("cache_dir")),

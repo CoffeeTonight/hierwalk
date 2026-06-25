@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
-
 import pytest
 
 from hierwalk.connect_scan import (
@@ -1374,32 +1373,27 @@ def test_connectivity_session_reuses_mod_cache(tmp_path: Path):
     index, rows = _index_and_rows(v, tmp_path)
     session = ConnectivitySession(rows=rows, index=index, top="top")
 
-    build_calls: list[int] = []
-    orig = endpoints_mod.build_module_connect_index
+    from hierwalk.connect_scan import (
+        clear_module_connect_index_cache,
+        module_connect_index_stats,
+    )
 
-    def counting_build(*args, **kwargs):
-        build_calls.append(1)
-        return orig(*args, **kwargs)
+    clear_module_connect_index_cache()
+    r0 = session.check("top.s0", "top.d0")
+    r1 = session.check("top.s1", "top.d1")
+    uncached, hits = module_connect_index_stats()
 
-    endpoints_mod.build_module_connect_index = counting_build
-    try:
-        r0 = session.check("top.s0", "top.d0")
-        r1 = session.check("top.s1", "top.d1")
-        isolated_calls: list[int] = []
-
-        def isolated_build(*args, **kwargs):
-            isolated_calls.append(1)
-            return orig(*args, **kwargs)
-
-        endpoints_mod.build_module_connect_index = isolated_build
-        check_connectivity("top.s0", "top.d0", rows=rows, index=index, top="top")
-        check_connectivity("top.s1", "top.d1", rows=rows, index=index, top="top")
-    finally:
-        endpoints_mod.build_module_connect_index = orig
+    clear_module_connect_index_cache()
+    check_connectivity("top.s0", "top.d0", rows=rows, index=index, top="top")
+    check_connectivity("top.s1", "top.d1", rows=rows, index=index, top="top")
+    iso_uncached, iso_hits = module_connect_index_stats()
 
     assert r0.connected and r1.connected
     assert session.modules_cached >= 1
-    assert len(build_calls) < len(isolated_calls)
+    assert uncached == 1
+    assert hits == 0
+    assert iso_uncached == 1
+    assert iso_hits == 1
 
 
 def test_check_connectivity_batch_same_api_as_single(tmp_path: Path):
@@ -1582,9 +1576,10 @@ def test_cli_check_connect_batch(tmp_path: Path):
         check=True,
     )
     lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
-    assert lines[0].startswith("check_id\tendpoint_a\t")
-    assert len(lines) == 4  # header + 2 rows + modules_cached comment
-    assert all("True" in ln for ln in lines[1:3])
+    assert lines[0] == "# connect results"
+    assert lines[1].startswith("check_id\tendpoint_a\t")
+    assert len(lines) == 5  # marker + header + 2 rows + modules_cached comment
+    assert all("True" in ln for ln in lines[2:4])
     assert lines[-1].startswith("# modules_cached\t")
 
 

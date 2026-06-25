@@ -153,7 +153,7 @@ class _SearchCtx:
     dist_to_goal: Dict[str, int]
     index: DesignIndex
     top: str
-    mod_cache: Dict[Tuple[str, str], ModuleConnectIndex]
+    mod_cache: Dict[Tuple[str, str, str, str, str, bool, bool], ModuleConnectIndex]
     goal_scope: str
     goal_rep: str
     goal_scope_only: bool
@@ -192,7 +192,7 @@ def _build_search_ctx(
     goal: NetState,
     *,
     goal_scope_only: bool,
-    mod_cache: Dict[Tuple[str, str], ModuleConnectIndex],
+    mod_cache: Dict[Tuple[str, str, str, str, str, bool, bool], ModuleConnectIndex],
     defines: Mapping[str, str] | None = None,
     param_ctx_cache: Optional[Dict[str, Mapping[str, str]]] = None,
     over_approximate_if: bool = True,
@@ -538,7 +538,7 @@ def _bidirectional_coi(
     strict_generate: bool = False,
     ff_barrier: bool = False,
     over_approximate_if: Optional[bool] = None,
-    mod_cache: Optional[Dict[Tuple[str, str], ModuleConnectIndex]] = None,
+    mod_cache: Optional[Dict[Tuple[str, str, str, str, str, bool, bool], ModuleConnectIndex]] = None,
     param_ctx_cache: Optional[Dict[str, Mapping[str, str]]] = None,
     elab_index: Optional[ElabIndex] = None,
 ) -> Tuple[bool, List[ConnectHop], int]:
@@ -706,7 +706,7 @@ def _forward_coi_to_scope(
     strict_generate: bool = False,
     ff_barrier: bool = False,
     over_approximate_if: Optional[bool] = None,
-    mod_cache: Optional[Dict[Tuple[str, str], ModuleConnectIndex]] = None,
+    mod_cache: Optional[Dict[Tuple[str, str, str, str, str, bool, bool], ModuleConnectIndex]] = None,
     param_ctx_cache: Optional[Dict[str, Mapping[str, str]]] = None,
     elab_index: Optional[ElabIndex] = None,
 ) -> Tuple[bool, List[ConnectHop], int]:

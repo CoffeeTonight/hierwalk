@@ -8,7 +8,7 @@ from pathlib import Path
 from hierwalk.connect_request import ConnectivityCheck, ConnectivityRequest
 from hierwalk.filelist import parse_filelist
 from hierwalk.path_walk import run_path_walk_connect
-from hierwalk.path_walk_db import RESOLVE_CONFIDENT, RESOLVE_RECOVERY
+from hierwalk.path_walk_db import RESOLVE_CONFIDENT, RESOLVE_RECOVERY, PathWalkModuleDb
 
 
 def _write_nested_child_fl_design(tmp_path: Path) -> Path:
@@ -159,6 +159,148 @@ def _minimal_mod_db_for_recovery_test(fl, tmp_path: Path):
     return mod_db, blk_stub, blk_real
 
 
+def _empty_index():
+    from hierwalk.index import DesignIndex
+
+    return DesignIndex._assemble(
+        {},
+        path_patterns=[],
+        module_patterns=[],
+        filelist_patterns=[],
+        library_files=[],
+        library_dirs=[],
+        libexts=[],
+        preprocess_include_dirs=[],
+        preprocess_defines={},
+    )
+
+
+def test_recovery_global_tier0_scans_past_pw_global_max(tmp_path: Path):
+    """Recovery global expand must not truncate at pw_tier0_global_scan_max (128)."""
+    (tmp_path / "blk_stub.v").write_text("module BLK; endmodule\n", encoding="utf-8")
+    (tmp_path / "blk_real.v").write_text(
+        "module BLK; CORE u_core (); endmodule\n",
+        encoding="utf-8",
+    )
+    for i in range(130):
+        (tmp_path / f"f{i}.v").write_text(f"module m{i}; endmodule\n", encoding="utf-8")
+    sources = [str((tmp_path / "blk_stub.v").resolve())]
+    sources.extend(str((tmp_path / f"f{i}.v").resolve()) for i in range(130))
+    blk_real = str((tmp_path / "blk_real.v").resolve())
+    sources.append(blk_real)
+    mod_db = PathWalkModuleDb(sources, _empty_index(), no_cache=True)
+    mod_db._tier0_scan_file(sources[0])
+    assert blk_real not in mod_db._module_to_files.get("BLK", [])
+
+    mod_db._scan_remaining_sources_tier0(
+        None,
+        target_module="BLK",
+        policy=RESOLVE_RECOVERY,
+    )
+    assert blk_real in mod_db._module_to_files["BLK"]
+
+
+def test_recovery_global_tier0_finds_second_dup_with_tier1_cap_1(
+    tmp_path: Path, monkeypatch
+):
+    """Recovery must not use target_module early-exit (dup decl #2 past tier1 cap)."""
+    import hierwalk.perf as perf_mod
+
+    monkeypatch.setattr(perf_mod, "pw_inst_resolve_tier1_max", lambda _policy: 1)
+    (tmp_path / "blk_stub.v").write_text("module BLK; endmodule\n", encoding="utf-8")
+    (tmp_path / "blk_real.v").write_text(
+        "module BLK; CORE u_core (); endmodule\n",
+        encoding="utf-8",
+    )
+    blk_stub = str((tmp_path / "blk_stub.v").resolve())
+    blk_real = str((tmp_path / "blk_real.v").resolve())
+    mod_db = PathWalkModuleDb([blk_stub, blk_real], _empty_index(), no_cache=True)
+    mod_db._tier0_scan_file(blk_stub)
+    assert blk_real not in mod_db._module_to_files.get("BLK", [])
+
+    mod_db._scan_remaining_sources_tier0(
+        None,
+        target_module="BLK",
+        policy=RESOLVE_RECOVERY,
+    )
+    assert blk_real in mod_db._module_to_files["BLK"]
+
+
+def test_ensure_regex_candidates_recovery_scans_past_stub_map(tmp_path: Path):
+    """Recovery must not early-return when stub alone is already in _module_to_files."""
+    stub = tmp_path / "blk_stub.v"
+    stub.write_text("module BLK; endmodule\n", encoding="utf-8")
+    real = tmp_path / "blk_real.v"
+    real.write_text("module BLK; CORE u_core (); endmodule\n", encoding="utf-8")
+    sources = [str(stub.resolve())]
+    for i in range(10):
+        p = tmp_path / f"f{i}.v"
+        p.write_text(f"module m{i}; endmodule\n", encoding="utf-8")
+        sources.append(str(p.resolve()))
+    sources.append(str(real.resolve()))
+    mod_db = PathWalkModuleDb(sources, _empty_index(), no_cache=True)
+    mod_db._tier0_scan_file(str(stub.resolve()))
+    assert "BLK" in mod_db._module_to_files
+    assert str(real.resolve()) not in mod_db._module_to_files["BLK"]
+
+    candidates = mod_db._ensure_regex_candidates(
+        "BLK",
+        scope_anchor=str(stub.resolve()),
+        policy=RESOLVE_RECOVERY,
+    )
+    assert str(real.resolve()) in candidates
+    edge = mod_db.resolve_child_edge(
+        "BLK",
+        {},
+        "u_core",
+        current_file=str(stub.resolve()),
+        policy=RESOLVE_RECOVERY,
+    )
+    assert edge is not None
+    assert edge.child_module == "CORE"
+
+
+def test_recovery_finds_real_blk_after_many_dup_stubs_module_cap(tmp_path: Path):
+    """Per-module file cap must not permanently drop late dup-module decls."""
+    from hierwalk.index import DesignIndex
+
+    sources = []
+    for i in range(35):
+        p = tmp_path / f"blk_stub_{i}.v"
+        p.write_text("module BLK; endmodule\n", encoding="utf-8")
+        sources.append(str(p.resolve()))
+    real = tmp_path / "blk_real.v"
+    real.write_text("module BLK; CORE u_core (); endmodule\n", encoding="utf-8")
+    sources.append(str(real.resolve()))
+    mod_db = PathWalkModuleDb(
+        sources,
+        DesignIndex._assemble(
+            {},
+            path_patterns=[],
+            module_patterns=[],
+            filelist_patterns=[],
+            library_files=[],
+            library_dirs=[],
+            libexts=[],
+            preprocess_include_dirs=[],
+            preprocess_defines={},
+        ),
+        no_cache=True,
+    )
+    for src in sources:
+        mod_db._tier0_scan_file(src)
+    assert str(real.resolve()) in mod_db._module_to_files.get("BLK", [])
+    edge = mod_db.resolve_child_edge(
+        "BLK",
+        {},
+        "u_core",
+        current_file=str(sources[0]),
+        policy=RESOLVE_RECOVERY,
+    )
+    assert edge is not None
+    assert edge.child_module == "CORE"
+
+
 def test_recovery_pass1_retries_mapped_candidates_when_pending_zero(tmp_path: Path):
     """Global tier0 done (pending==0) must still retry _module_to_files entries."""
     fl_path, _leaf = _write_stub_child_recovery_design(tmp_path)
@@ -190,6 +332,128 @@ def test_recovery_pass1_retries_mapped_candidates_when_pending_zero(tmp_path: Pa
     )
     assert edge is not None
     assert edge.child_module == "CORE"
+
+
+def _write_top_a_ub_c_recovery_design(tmp_path: Path) -> tuple[Path, str]:
+    """``top.a.u_b.c``: confident miss on ``u_b``, recovery hits real ``B.v``."""
+    (tmp_path / "top.v").write_text("module top; A a (); endmodule\n", encoding="utf-8")
+    (tmp_path / "a.v").write_text("module A; B u_b (); endmodule\n", encoding="utf-8")
+    (tmp_path / "b_stub.v").write_text("module B; endmodule\n", encoding="utf-8")
+    (tmp_path / "b_real.v").write_text("module B; C c (); endmodule\n", encoding="utf-8")
+    (tmp_path / "c.v").write_text("module C; endmodule\n", encoding="utf-8")
+    lists = tmp_path / "lists"
+    lists.mkdir()
+    (lists / "child.f").write_text(
+        str((tmp_path / "b_stub.v").resolve()) + "\n",
+        encoding="utf-8",
+    )
+    (lists / "parent.f").write_text(
+        "\n".join(
+            [
+                str((tmp_path / "top.v").resolve()),
+                str((tmp_path / "a.v").resolve()),
+                f"-f {(lists / 'child.f').resolve()}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    root = tmp_path / "root.f"
+    root.write_text(
+        "\n".join(
+            [
+                f"-f {(lists / 'parent.f').resolve()}",
+                str((tmp_path / "b_real.v").resolve()),
+                str((tmp_path / "c.v").resolve()),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return root, "top.a.u_b.c"
+
+
+def test_connect_resolves_top_a_ub_c_after_recovery(tmp_path: Path):
+    fl_path, target = _write_top_a_ub_c_recovery_design(tmp_path)
+    fl = parse_filelist(str(fl_path), index_cwd=str(tmp_path))
+    req = ConnectivityRequest(
+        checks=(ConnectivityCheck(target, target, check_id="1"),),
+        top="top",
+    )
+    batch, _index, state = run_path_walk_connect(
+        req,
+        fl,
+        top="top",
+        no_cache=True,
+    )
+    assert target in state.rows_by_path
+    assert not batch.results[0].errors
+    assert batch.results[0].connected is True
+
+
+def _write_top_a_b_cd_scoped_design(tmp_path: Path) -> tuple[Path, str]:
+    """``top.a.b.c.d`` with real ``B`` only on ancestor filelist (child FL has stub)."""
+    (tmp_path / "top_a.v").write_text(
+        "module A; B b (); endmodule\nmodule top; A a (); endmodule\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "b_stub.v").write_text("module B; endmodule\n", encoding="utf-8")
+    (tmp_path / "b_real.v").write_text(
+        "module B; C c (); endmodule\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "c.v").write_text("module C; D d (); endmodule\n", encoding="utf-8")
+    (tmp_path / "d.v").write_text("module D; endmodule\n", encoding="utf-8")
+    lists = tmp_path / "lists"
+    lists.mkdir()
+    (lists / "child.f").write_text(
+        str((tmp_path / "b_stub.v").resolve()) + "\n",
+        encoding="utf-8",
+    )
+    (lists / "parent.f").write_text(
+        "\n".join(
+            [
+                str((tmp_path / "top_a.v").resolve()),
+                f"-f {(lists / 'child.f').resolve()}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    root = tmp_path / "root.f"
+    root.write_text(
+        "\n".join(
+            [
+                f"-f {(lists / 'parent.f').resolve()}",
+                str((tmp_path / "b_real.v").resolve()),
+                str((tmp_path / "c.v").resolve()),
+                str((tmp_path / "d.v").resolve()),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return root, "top.a.b.c.d"
+
+
+def test_text_phase_resolves_top_a_b_c_d_with_scoped_filelist(tmp_path: Path):
+    """Text-conn must selective-recover dup-module paths (not defer to logical only)."""
+    fl_path, target = _write_top_a_b_cd_scoped_design(tmp_path)
+    fl = parse_filelist(str(fl_path), index_cwd=str(tmp_path))
+    req = ConnectivityRequest(
+        checks=(ConnectivityCheck(target, target, check_id="1"),),
+        top="top",
+    )
+    batch, _index, state = run_path_walk_connect(
+        req,
+        fl,
+        top="top",
+        no_cache=True,
+        connect_phase="text",
+    )
+    assert target in state.rows_by_path
+    assert not batch.results[0].errors
+    assert batch.results[0].connected is True
 
 
 def test_confident_defers_then_recovery_walks_full_chain(tmp_path: Path):

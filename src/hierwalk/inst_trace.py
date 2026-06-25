@@ -15,6 +15,7 @@ from hierwalk.models import FlatRow, PortInfo
 from hierwalk.params import resolve_param_map
 from hierwalk.path_refine import refine_param_ctx_for_path
 from hierwalk.port_scan import port_index_for_design_module, scan_ports_detail_from_module_text
+from hierwalk.trace_stop import TraceStopPolicy, parse_trace_stop_policy
 
 
 _DIRECTION_ALIASES: Dict[str, str] = {
@@ -53,6 +54,15 @@ class InstTraceRequest:
     top: str = ""
     defines: Mapping[str, str] = field(default_factory=dict)
     over_approximate_if: Optional[bool] = None
+    ignore_hierarchy: Tuple[str, ...] = ()
+    trace_max_depth: Optional[int] = None
+
+    @property
+    def trace_stop(self) -> TraceStopPolicy:
+        return TraceStopPolicy(
+            ignore_hierarchy=self.ignore_hierarchy,
+            trace_max_depth=self.trace_max_depth,
+        )
 
 
 @dataclass
@@ -162,6 +172,8 @@ def parse_inst_trace_json(
     if over_approx is not None and not isinstance(over_approx, bool):
         raise ValueError("inst_trace.over_approximate_if must be boolean or null")
 
+    stop = parse_trace_stop_policy(data)
+
     return InstTraceRequest(
         instance=instance,
         direction=direction,
@@ -169,6 +181,8 @@ def parse_inst_trace_json(
         top=req_top,
         defines=req_defines,
         over_approximate_if=over_approx,
+        ignore_hierarchy=stop.ignore_hierarchy,
+        trace_max_depth=stop.trace_max_depth,
     )
 
 
@@ -322,6 +336,7 @@ def run_inst_trace(
                 defines=compile_defines,
                 over_approximate_if=over_approx,
                 path_kind=request.path_kind,
+                trace_stop=request.trace_stop,
             )
         else:
             cone = fanout_cone(
@@ -332,6 +347,7 @@ def run_inst_trace(
                 defines=compile_defines,
                 over_approximate_if=over_approx,
                 path_kind=request.path_kind,
+                trace_stop=request.trace_stop,
             )
         if cone.errors:
             result.errors.extend(

@@ -41,6 +41,7 @@ _ENDIF_DIRECTIVE_SUFFIX_RE = re.compile(
 )
 _LARGE_BODY_ATTR_SKIP = 512 * 1024
 _LARGE_BODY_SLIM = 256 * 1024
+_INSTANCE_TAIL_SCAN_CHARS = 64 * 1024
 
 _MODULE_KIND_END = {
     "module": "endmodule",
@@ -297,6 +298,11 @@ def iter_module_blocks(text: str) -> Iterator[ModuleBlock]:
         }
 
 
+def inst_base_name(inst_leaf: str) -> str:
+    """Strip array dimensions and surrounding whitespace from an instance leaf."""
+    return inst_leaf.strip().split("[", 1)[0]
+
+
 def instance_edge_matches_leaf(
     edge: InstanceEdge,
     inst_leaf: str,
@@ -317,12 +323,35 @@ def instance_edge_matches_leaf(
     return any(name.lower() == leaf_lower for name in expand_inst_names(edge.inst_name, "", pmap))
 
 
+def instance_edge_matches_leaf_base(
+    edge: InstanceEdge,
+    inst_leaf: str,
+    *,
+    param_map: Optional[Mapping[str, str]] = None,
+) -> bool:
+    """Over-approximate match on base identifier when index is out of range."""
+    leaf_base = inst_base_name(inst_leaf)
+    if leaf_base == inst_leaf:
+        return False
+    edge_base = inst_base_name(edge.inst_name)
+    if edge_base == leaf_base or edge_base.lower() == leaf_base.lower():
+        return True
+    return instance_edge_matches_leaf(edge, leaf_base, param_map=param_map)
+
+
+def probe_inst_in_module_text(body: str, inst_leaf: str) -> bool:
+    """Regex probe using the base identifier (``[]`` stripped)."""
+    base = inst_base_name(inst_leaf)
+    return probe_inst_leaf_regex_fast(body, base)
+
+
 _INST_LEAF_PROBE_RE_CACHE: Dict[str, re.Pattern[str]] = {}
 _INST_PROBE_CELL_KW = (
     r"(?:input|output|inout|wire|logic|reg|assign|always|parameter|localparam|"
     r"genvar|typedef|module|endmodule)"
 )
 _INST_PROBE_CELL = r"(?:\\(?:[A-Za-z_]\w*|\S+)|[A-Za-z_]\w*)"
+_INST_PROBE_HASH = r"(?:\s*#\s*\((?:[^()]|\([^()]*\))*\))*"
 
 
 def _inst_leaf_probe_pattern(inst_leaf: str) -> Optional[re.Pattern[str]]:
@@ -333,7 +362,8 @@ def _inst_leaf_probe_pattern(inst_leaf: str) -> Optional[re.Pattern[str]]:
     if pat is None:
         esc = re.escape(base)
         pat = re.compile(
-            rf"(?:^|[;{{}}])\s*(?!{_INST_PROBE_CELL_KW}\b){_INST_PROBE_CELL}\s+"
+            rf"(?:^|[;{{}}])\s*(?!{_INST_PROBE_CELL_KW}\b){_INST_PROBE_CELL}"
+            rf"{_INST_PROBE_HASH}\s+"
             rf"{esc}(?:\s*\[[^\]]*\])?\s*[\(;]",
             re.MULTILINE,
         )
@@ -376,11 +406,30 @@ def _inst_leaf_scan_start(clean: str, inst_leaf: str) -> int:
     return max(0, hit.start())
 
 
+def _instance_scan_tail_start(clean: str, start: int) -> Optional[int]:
+    """Reverse-anchor: for large bodies, try the declaration tail before full scan."""
+    if len(clean) <= _LARGE_BODY_ATTR_SKIP or start > 0:
+        return None
+    return max(0, len(clean) - _INSTANCE_TAIL_SCAN_CHARS)
+
+
+def _instance_edge_matches_lookup(
+    edge: InstanceEdge,
+    inst_leaf: str,
+    *,
+    param_map: Optional[Mapping[str, str]] = None,
+) -> bool:
+    if instance_edge_matches_leaf(edge, inst_leaf, param_map=param_map):
+        return True
+    return instance_edge_matches_leaf_base(edge, inst_leaf, param_map=param_map)
+
+
 def find_hierarchy_instance(
     body: str,
     inst_leaf: str,
     *,
     param_map: Optional[Mapping[str, str]] = None,
+    reverse_anchor: bool = True,
 ) -> Optional[InstanceEdge]:
     """
     Selective instance lookup: scan until *inst_leaf* matches, then stop.
@@ -393,12 +442,24 @@ def find_hierarchy_instance(
     if not probe_inst_leaf_regex_fast(clean, inst_leaf):
         return None
     start = _inst_leaf_scan_start(clean, inst_leaf)
+    if reverse_anchor:
+        tail_start = _instance_scan_tail_start(clean, start)
+        if tail_start is not None:
+            for edge in _iter_hierarchy_instance_edges(
+                body,
+                param_map=param_map,
+                start=tail_start,
+            ):
+                if _instance_edge_matches_lookup(
+                    edge, inst_leaf, param_map=param_map
+                ):
+                    return edge
     for edge in _iter_hierarchy_instance_edges(
         body,
         param_map=param_map,
         start=start,
     ):
-        if instance_edge_matches_leaf(edge, inst_leaf, param_map=param_map):
+        if _instance_edge_matches_lookup(edge, inst_leaf, param_map=param_map):
             return edge
     return None
 

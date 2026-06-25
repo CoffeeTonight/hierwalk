@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
 import re
+import threading
 from functools import lru_cache
 from dataclasses import dataclass, field
 from typing import Dict, FrozenSet, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
@@ -53,6 +56,24 @@ class BindRecord:
     ports: List[Tuple[str, str]]
 
 
+def binds_digest(binds: Sequence[BindRecord]) -> str:
+    """Stable digest of bind records targeting one module."""
+    if not binds:
+        return "0" * 16
+    hasher = hashlib.sha256()
+    for rec in sorted(binds, key=lambda b: (b.cell, b.inst_leaf)):
+        hasher.update(rec.cell.encode("utf-8"))
+        hasher.update(b"\0")
+        hasher.update(rec.inst_leaf.encode("utf-8"))
+        hasher.update(b"\0")
+        for port, expr in sorted(rec.ports):
+            hasher.update(port.encode("utf-8"))
+            hasher.update(b"\0")
+            hasher.update(expr.encode("utf-8"))
+            hasher.update(b"\0")
+    return hasher.hexdigest()[:16]
+
+
 @dataclass(frozen=True)
 class ConnectEdgeProv:
     line: int
@@ -77,6 +98,27 @@ class ModuleConnectIndex:
     ff_q_roots: FrozenSet[str] = field(default_factory=frozenset)
     vector_bases: FrozenSet[str] = field(default_factory=frozenset)
     vector_scalar_rep: Dict[str, str] = field(default_factory=dict)
+
+    def copy(self) -> ModuleConnectIndex:
+        """Shallow copy of mutable fields (safe before in-place bind folding)."""
+        return ModuleConnectIndex(
+            inst_ports={k: list(v) for k, v in self.inst_ports.items()},
+            net_rep=dict(self.net_rep),
+            rep_adj={k: set(v) for k, v in self.rep_adj.items()},
+            net_to_children={k: list(v) for k, v in self.net_to_children.items()},
+            expr_roots=dict(self.expr_roots),
+            hier_links={k: list(v) for k, v in self.hier_links.items()},
+            hier_ref_targets={
+                k: set(v) for k, v in self.hier_ref_targets.items()
+            },
+            edge_prov=dict(self.edge_prov),
+            inst_stmt_lines=dict(self.inst_stmt_lines),
+            ff_net_lines=dict(self.ff_net_lines),
+            ff_d_roots=self.ff_d_roots,
+            ff_q_roots=self.ff_q_roots,
+            vector_bases=self.vector_bases,
+            vector_scalar_rep=dict(self.vector_scalar_rep),
+        )
 
 
 def _clean_body(body: str) -> str:
@@ -593,12 +635,32 @@ def _collect_declared_net_names(body: str) -> Set[str]:
     return names
 
 
-def _net_base_in_assign_regex_fast(body: str, base: str) -> bool:
-    """Regex probe for assign/``<=`` drives — avoids full statement iteration."""
-    if not body or not base:
-        return False
+_ASSIGN_DRIVE_BASE_INDEX_MIN = 64 * 1024
+_ASSIGN_PROBE_MISS_CACHE_MAX = 8192
+_assign_drive_bases_cache: Dict[str, FrozenSet[str]] = {}
+_assign_probe_miss_cache: Dict[Tuple[str, str], None] = {}
+_assign_probe_miss_cache_guard = threading.Lock()
+
+
+def _assign_body_digest(body: str) -> str:
     clean = _clean_body(body)
-    esc = re.escape(base)
+    return hashlib.sha256(clean.encode("utf-8", errors="surrogateescape")).hexdigest()[:16]
+
+
+def _seed_assign_drive_bases_cache(body: str, bases: Iterable[str]) -> None:
+    if len(body) < _ASSIGN_DRIVE_BASE_INDEX_MIN:
+        return
+    digest = _assign_body_digest(body)
+    if digest in _assign_drive_bases_cache:
+        return
+    normalized = frozenset(
+        b.split("[", 1)[0].split(".", 1)[0] for b in bases if b
+    )
+    _assign_drive_bases_cache[digest] = normalized
+
+
+def _regex_net_in_assign(clean: str, target: str) -> bool:
+    esc = re.escape(target)
     if re.search(
         rf"\bassign\b(?:[^;]|\n)*?\b{esc}\b",
         clean,
@@ -614,6 +676,32 @@ def _net_base_in_assign_regex_fast(body: str, base: str) -> bool:
     ):
         return True
     return False
+
+
+def _net_base_in_assign_regex_fast(body: str, base: str) -> bool:
+    """Regex probe for assign/``<=`` drives — avoids full statement iteration."""
+    if not body or not base:
+        return False
+    target = base.split("[", 1)[0].split(".", 1)[0]
+    if not target:
+        return False
+    large = len(body) >= _ASSIGN_DRIVE_BASE_INDEX_MIN
+    digest = _assign_body_digest(body) if large else ""
+    if large:
+        cached = _assign_drive_bases_cache.get(digest)
+        if cached is not None:
+            return target in cached
+        with _assign_probe_miss_cache_guard:
+            if (digest, target) in _assign_probe_miss_cache:
+                return False
+    clean = _clean_body(body)
+    hit = _regex_net_in_assign(clean, target)
+    if large and not hit:
+        with _assign_probe_miss_cache_guard:
+            if len(_assign_probe_miss_cache) >= _ASSIGN_PROBE_MISS_CACHE_MAX:
+                _assign_probe_miss_cache.pop(next(iter(_assign_probe_miss_cache)))
+            _assign_probe_miss_cache[(digest, target)] = None
+    return hit
 
 
 def _net_name_bases(names: Iterable[str]) -> Set[str]:
@@ -1763,32 +1851,71 @@ def _effective_assign_rhs_roots(
     return roots
 
 
+def _const_assign_from_stmt(
+    stmt: str,
+    pmap: Mapping[str, str],
+) -> Optional[Tuple[str, int]]:
+    if not _stmt_starts_with(stmt, "assign"):
+        return None
+    pos = _skip_ws(stmt, 6)
+    eq = _find_blocking_eq(stmt[pos:])
+    if eq is None:
+        return None
+    lhs = extract_connect_nodes(stmt[pos : pos + eq], pmap)
+    if len(lhs) != 1:
+        return None
+    rhs = stmt[pos + eq + 1 :].strip().rstrip(";")
+    val = _param_int(rhs) if _LITERAL_RHS_RE.match(rhs) else None
+    if val is None:
+        val = _eval_index_expr(rhs, pmap)
+    if val is None:
+        val = resolve_param_expr(rhs, pmap)
+    if val is None:
+        return None
+    return next(iter(lhs)), val
+
+
+def _collect_const_assigns_from_stmts(
+    stmts: Sequence[str],
+    *,
+    param_map: Mapping[str, str],
+    known: Optional[Mapping[str, int]] = None,
+) -> Dict[str, int]:
+    pmap = _enriched_param_map(param_map, known or {})
+    consts: Dict[str, int] = {}
+    for stmt in stmts:
+        hit = _const_assign_from_stmt(stmt, pmap)
+        if hit is not None:
+            consts[hit[0]] = hit[1]
+    return consts
+
+
+def _collect_const_assigns_fixed(
+    body: str,
+    *,
+    param_map: Mapping[str, str] | None = None,
+    max_rounds: int = 4,
+) -> Tuple[Dict[str, int], Dict[str, str]]:
+    """Grow const map with at most *max_rounds* passes over one statement list."""
+    pmap = dict(param_map or {})
+    stmts = split_statements(_clean_body(body))
+    consts: Dict[str, int] = {}
+    for _ in range(max_rounds):
+        grown = _collect_const_assigns_from_stmts(stmts, param_map=pmap, known=consts)
+        if not grown:
+            break
+        consts.update(grown)
+        pmap = _enriched_param_map(pmap, consts)
+    return consts, pmap
+
+
 def _collect_const_assigns(
     body: str,
     *,
     param_map: Mapping[str, str] | None = None,
 ) -> Dict[str, int]:
     """Map signal -> integer value for ``assign sel = 2'b01`` style ties."""
-    pmap = dict(param_map or {})
-    consts: Dict[str, int] = {}
-    for stmt in split_statements(_clean_body(body)):
-        if not _stmt_starts_with(stmt, "assign"):
-            continue
-        pos = _skip_ws(stmt, 6)
-        eq = _find_blocking_eq(stmt[pos:])
-        if eq is None:
-            continue
-        lhs = extract_connect_nodes(stmt[pos : pos + eq], pmap)
-        if len(lhs) != 1:
-            continue
-        rhs = stmt[pos + eq + 1 :].strip().rstrip(";")
-        val = _param_int(rhs) if _LITERAL_RHS_RE.match(rhs) else None
-        if val is None:
-            val = _eval_index_expr(rhs, pmap)
-        if val is None:
-            val = resolve_param_expr(rhs, pmap)
-        if val is not None:
-            consts[next(iter(lhs))] = val
+    consts, _ = _collect_const_assigns_fixed(body, param_map=param_map)
     return consts
 
 
@@ -2924,16 +3051,7 @@ def scan_assign_adjacency(
     edge_prov: Optional[Dict[Tuple[str, str], ConnectEdgeProv]] = None,
     iface_insts: Optional[Set[str]] = None,
 ) -> Dict[str, Set[str]]:
-    pmap = dict(param_map or {})
-    consts = _collect_const_assigns(body, param_map=pmap)
-    for _ in range(4):
-        grown = _collect_const_assigns(
-            body, param_map=_enriched_param_map(pmap, consts)
-        )
-        if not grown:
-            break
-        consts.update(grown)
-    pmap = _enriched_param_map(pmap, consts)
+    consts, pmap = _collect_const_assigns_fixed(body, param_map=param_map)
     zero_nets = {
         name: val
         for name, val in _collect_supply_net_values(body).items()
@@ -2981,6 +3099,7 @@ def scan_assign_adjacency(
     const_driven = _collect_const_driven_lhs(body, param_map=pmap)
     if const_driven:
         _prune_const_driven_adjacency(adj, const_driven)
+    _seed_assign_drive_bases_cache(body, adj.keys())
     return adj
 
 
@@ -2990,16 +3109,7 @@ def scan_ff_endpoint_sets(
     param_map: Mapping[str, str] | None = None,
 ) -> Tuple[Set[str], Set[str]]:
     """Return (D-input roots, Q-output roots) from ``always_ff`` without D->Q edges."""
-    pmap = dict(param_map or {})
-    consts = _collect_const_assigns(body, param_map=pmap)
-    for _ in range(4):
-        grown = _collect_const_assigns(
-            body, param_map=_enriched_param_map(pmap, consts)
-        )
-        if not grown:
-            break
-        consts.update(grown)
-    pmap = _enriched_param_map(pmap, consts)
+    consts, pmap = _collect_const_assigns_fixed(body, param_map=param_map)
     d_roots: Set[str] = set()
     q_roots: Set[str] = set()
     for stmt in _iter_connect_statements(body):
@@ -3234,16 +3344,7 @@ def scan_ff_adjacency(
     collect_endpoints = ff_d_roots is not None and ff_q_roots is not None
     if ff_barrier and not record_meta and not collect_endpoints:
         return {}
-    pmap = dict(param_map or {})
-    consts = _collect_const_assigns(body, param_map=pmap)
-    for _ in range(4):
-        grown = _collect_const_assigns(
-            body, param_map=_enriched_param_map(pmap, consts)
-        )
-        if not grown:
-            break
-        consts.update(grown)
-    pmap = _enriched_param_map(pmap, consts)
+    consts, pmap = _collect_const_assigns_fixed(body, param_map=param_map)
     adj: Dict[str, Set[str]] = {}
     for stmt, stmt_line in _iter_connect_statements_with_lines(body):
         _parse_ff_stmt(
@@ -3622,8 +3723,49 @@ def collect_design_defines(index: object) -> Dict[str, str]:
     return dict(out)
 
 
+_bind_records_memo: Dict[Tuple[int, str, str], Tuple[BindRecord, ...]] = {}
+_bind_records_memo_guard = threading.Lock()
+
+
+def file_modules_bind_digest(index: object) -> str:
+    """Digest of RTL files in *index* for bind-memo invalidation."""
+    file_modules = getattr(index, "file_modules", None)
+    if not isinstance(file_modules, Mapping):
+        return "0" * 16
+    from pathlib import Path
+
+    from hierwalk.manifest import path_content_digest
+
+    hasher = hashlib.sha256()
+    for fpath in sorted(file_modules):
+        digest = path_content_digest(Path(fpath)) or ""
+        if not digest:
+            try:
+                digest = hashlib.sha256(
+                    Path(fpath).read_bytes()
+                ).hexdigest()[:16]
+            except OSError:
+                digest = "missing"
+        hasher.update(fpath.encode("utf-8"))
+        hasher.update(b"\0")
+        hasher.update(digest.encode("utf-8"))
+        hasher.update(b"\0")
+    return hasher.hexdigest()[:16]
+
+
+def clear_bind_records_memo() -> None:
+    """Drop per-design bind scan memo (for tests)."""
+    with _bind_records_memo_guard:
+        _bind_records_memo.clear()
+
+
 def collect_bind_records_for_module(index: object, mod_name: str) -> List[BindRecord]:
     """Scan RTL sources for ``bind`` statements targeting *mod_name*."""
+    memo_key = (id(index), mod_name, file_modules_bind_digest(index))
+    with _bind_records_memo_guard:
+        hit = _bind_records_memo.get(memo_key)
+        if hit is not None:
+            return list(hit)
     file_modules = getattr(index, "file_modules", None)
     if not isinstance(file_modules, Mapping):
         return []
@@ -3642,7 +3784,10 @@ def collect_bind_records_for_module(index: object, mod_name: str) -> List[BindRe
         for target, records in scan_bind_records(text).items():
             if target == mod_name:
                 out.extend(records)
-    return out
+    frozen = tuple(out)
+    with _bind_records_memo_guard:
+        _bind_records_memo[memo_key] = frozen
+    return list(frozen)
 
 
 def _interface_mod_names_in_body(body: str) -> Set[str]:
@@ -3695,6 +3840,119 @@ def _interface_inst_names_from_scan(
     }
 
 
+_BUILD_INDEX_MEMO_VERSION = 1
+_build_index_mem_cache: Dict[Tuple[object, ...], ModuleConnectIndex] = {}
+_build_index_cache_key_locks: Dict[Tuple[object, ...], threading.Lock] = {}
+_build_index_cache_key_locks_guard = threading.Lock()
+_build_index_uncached_calls = 0
+_build_index_mem_hits = 0
+
+
+def _build_index_mem_cache_lock(key: Tuple[object, ...]) -> threading.Lock:
+    with _build_index_cache_key_locks_guard:
+        lock = _build_index_cache_key_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _build_index_cache_key_locks[key] = lock
+        return lock
+
+
+def _defines_digest(defines: Mapping[str, str] | None) -> str:
+    hasher = hashlib.sha256()
+    for key in sorted(defines or {}):
+        hasher.update(key.encode("utf-8"))
+        hasher.update(b"\0")
+        hasher.update(str(defines[key]).encode("utf-8"))
+        hasher.update(b"\0")
+    return hasher.hexdigest()[:16]
+
+
+def _param_map_digest(param_map: Mapping[str, str] | None) -> str:
+    hasher = hashlib.sha256()
+    for key in sorted(param_map or {}):
+        hasher.update(key.encode("utf-8"))
+        hasher.update(b"\0")
+        hasher.update(str(param_map[key]).encode("utf-8"))
+        hasher.update(b"\0")
+    return hasher.hexdigest()[:16]
+
+
+def _port_decl_maps_digest(
+    widths: Optional[Mapping[str, List[int]]],
+    suffixes: Optional[Mapping[str, List[str]]],
+) -> str:
+    hasher = hashlib.sha256()
+    for name in sorted(widths or {}):
+        hasher.update(name.encode("utf-8"))
+        hasher.update(b"\0")
+        hasher.update(",".join(str(b) for b in widths[name]).encode("utf-8"))
+        hasher.update(b"\0")
+    for name in sorted(suffixes or {}):
+        hasher.update(b"sfx:")
+        hasher.update(name.encode("utf-8"))
+        hasher.update(b"\0")
+        hasher.update(",".join(suffixes[name]).encode("utf-8"))
+        hasher.update(b"\0")
+    return hasher.hexdigest()[:16]
+
+
+def _build_index_cache_key(
+    body: str,
+    *,
+    param_map: Mapping[str, str] | None,
+    defines: Mapping[str, str] | None,
+    fold_generate: bool,
+    over_approximate_if: bool,
+    ff_barrier: bool,
+    port_decl_widths: Optional[Mapping[str, List[int]]],
+    port_decl_md_suffixes: Optional[Mapping[str, List[str]]],
+    prepared_body: Optional[str],
+) -> Tuple[object, ...]:
+    body_digest = hashlib.sha256(
+        body.encode("utf-8", errors="surrogateescape")
+    ).hexdigest()[:16]
+    prepared_digest = ""
+    if prepared_body is not None:
+        prepared_digest = hashlib.sha256(
+            prepared_body.encode("utf-8", errors="surrogateescape")
+        ).hexdigest()[:16]
+    return (
+        _BUILD_INDEX_MEMO_VERSION,
+        body_digest,
+        prepared_digest,
+        _param_map_digest(param_map),
+        _defines_digest(defines),
+        fold_generate,
+        over_approximate_if,
+        ff_barrier,
+        _port_decl_maps_digest(port_decl_widths, port_decl_md_suffixes),
+    )
+
+
+def clear_module_connect_index_mem_cache() -> None:
+    """Drop in-process memo entries without resetting build/hit counters."""
+    _build_index_mem_cache.clear()
+    with _assign_probe_miss_cache_guard:
+        _assign_probe_miss_cache.clear()
+
+
+def clear_module_connect_index_cache() -> None:
+    """Reset in-process build_module_connect_index memo (for tests)."""
+    global _build_index_uncached_calls, _build_index_mem_hits
+    clear_module_connect_index_mem_cache()
+    clear_bind_records_memo()
+    from hierwalk.connect_endpoints import _clear_module_index_key_memo
+
+    _clear_module_index_key_memo()
+    _build_index_uncached_calls = 0
+    _build_index_mem_hits = 0
+
+
+def module_connect_index_stats() -> Tuple[int, int]:
+    """Return (uncached_build_calls, mem_cache_hits) since last clear."""
+    return _build_index_uncached_calls, _build_index_mem_hits
+
+
 def build_module_connect_index(
     body: str,
     *,
@@ -3707,6 +3965,68 @@ def build_module_connect_index(
     port_decl_md_suffixes: Optional[Mapping[str, List[str]]] = None,
     prepared_body: Optional[str] = None,
 ) -> ModuleConnectIndex:
+    if os.environ.get("HIERWALK_CONNECT_INDEX_MEMO", "").lower() in (
+        "0",
+        "off",
+        "false",
+    ):
+        return _build_module_connect_index_uncached(
+            body,
+            param_map=param_map,
+            defines=defines,
+            fold_generate=fold_generate,
+            over_approximate_if=over_approximate_if,
+            ff_barrier=ff_barrier,
+            port_decl_widths=port_decl_widths,
+            port_decl_md_suffixes=port_decl_md_suffixes,
+            prepared_body=prepared_body,
+        )
+    key = _build_index_cache_key(
+        body,
+        param_map=param_map,
+        defines=defines,
+        fold_generate=fold_generate,
+        over_approximate_if=over_approximate_if,
+        ff_barrier=ff_barrier,
+        port_decl_widths=port_decl_widths,
+        port_decl_md_suffixes=port_decl_md_suffixes,
+        prepared_body=prepared_body,
+    )
+    with _build_index_mem_cache_lock(key):
+        hit = _build_index_mem_cache.get(key)
+        if hit is not None:
+            global _build_index_mem_hits
+            _build_index_mem_hits += 1
+            return hit.copy()
+        built = _build_module_connect_index_uncached(
+            body,
+            param_map=param_map,
+            defines=defines,
+            fold_generate=fold_generate,
+            over_approximate_if=over_approximate_if,
+            ff_barrier=ff_barrier,
+            port_decl_widths=port_decl_widths,
+            port_decl_md_suffixes=port_decl_md_suffixes,
+            prepared_body=prepared_body,
+        )
+        _build_index_mem_cache[key] = built
+        return built
+
+
+def _build_module_connect_index_uncached(
+    body: str,
+    *,
+    param_map: Mapping[str, str] | None = None,
+    defines: Mapping[str, str] | None = None,
+    fold_generate: bool = True,
+    over_approximate_if: bool = True,
+    ff_barrier: bool = False,
+    port_decl_widths: Optional[Mapping[str, List[int]]] = None,
+    port_decl_md_suffixes: Optional[Mapping[str, List[str]]] = None,
+    prepared_body: Optional[str] = None,
+) -> ModuleConnectIndex:
+    global _build_index_uncached_calls
+    _build_index_uncached_calls += 1
     pmap = dict(param_map or {})
     body_params = collect_connect_module_params("", body)
     full_pmap = resolve_param_map(body_params, parent=pmap, overrides=pmap)

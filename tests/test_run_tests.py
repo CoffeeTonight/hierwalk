@@ -17,6 +17,7 @@ from hierwalk.run_tests import (
     RUN_IO_TRACE,
     RUN_ON_FULL_INDEX,
     build_test_run_configs,
+    expand_suite_verification_plan,
     list_disabled_suite_blocks,
     parse_enable,
     parse_flat_run_suite,
@@ -140,6 +141,7 @@ def test_parse_flat_suite_with_full_db_and_three_tests():
     assert conn_entry.mode == "path-walk"
     assert conn_cfg.mode == "check-connect-batch"
     assert conn_cfg.index_strategy == "path-walk"
+    assert conn_cfg.output == "conn.tsv"
     assert conn_cfg.ignore_path == ()
     assert conn_cfg.jobs == 0
     _, trace_cfg = plans[1]
@@ -147,6 +149,38 @@ def test_parse_flat_suite_with_full_db_and_three_tests():
     req = resolve_connectivity_request(conn_cfg)
     assert req is not None
     assert req.checks[0].check_id == "a"
+
+
+def test_expand_suite_verification_plan_text_then_logical():
+    doc = {
+        "filelist": "design.f",
+        "top": "top",
+        "run_on_full_index": {"enable": 1, "mode": "hierarchy", "output": "inst.tsv"},
+        "run_conn_check": {
+            "enable": 1,
+            "mode": "path-walk",
+            "checks": [{"id": "a", "a": "top.a", "b": "top.b"}],
+        },
+        "run_io_trace": {
+            "enable": 1,
+            "mode": "path-walk",
+            "instance": "top.u_m",
+            "output": "io.tsv",
+        },
+    }
+    suite = parse_flat_run_suite(doc, base_dir="/tmp")
+    base_plan = build_test_run_configs(suite, doc, base_dir="/tmp")
+    expanded = expand_suite_verification_plan(base_plan)
+    kinds = [entry.kind if entry else "legacy" for entry, _ in expanded]
+    assert kinds == [
+        RUN_ON_FULL_INDEX,
+        RUN_CONN_CHECK,
+        RUN_IO_TRACE,
+        RUN_CONN_CHECK,
+        RUN_IO_TRACE,
+    ]
+    phases = [cfg.verification_phase for _, cfg in expanded]
+    assert phases == ["both", "text", "text", "logical", "logical"]
 
 
 def test_run_on_full_index_step_when_enabled():
@@ -331,7 +365,9 @@ def test_cli_runs_flat_suite(tmp_path: Path):
         text=True,
         check=True,
     )
-    assert "test-suite 3 step(s)" in proc.stderr
+    assert "test-suite 3 verification block(s), text then logical" in proc.stderr
+    assert "phase=text" in proc.stderr
+    assert "phase=logical" in proc.stderr
     assert "inactive run_on_full_index (enable: 0" in proc.stderr
     assert "run: mode=hierarchy" not in proc.stderr
     assert "index: building from" not in proc.stderr

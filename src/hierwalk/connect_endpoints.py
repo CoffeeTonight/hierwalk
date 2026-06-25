@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
+import pickle
 import re
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Sequence, Set, Tuple
+
+from hierwalk.connect_scan import BindRecord
 
 _cache_key_locks: Dict[Tuple[int, object], threading.Lock] = {}
 _cache_key_locks_guard = threading.Lock()
@@ -22,29 +28,62 @@ def _shared_cache_lock(cache: Dict, key: object) -> threading.Lock:
         return lock
 
 
+ModuleIndexCacheKey = Tuple[str, str, str, str, str, bool, bool]
+
+
 def _mod_cache_lock(
-    cache: Dict[Tuple[str, str], ModuleConnectIndex],
-    key: Tuple[str, str],
+    cache: Dict[ModuleIndexCacheKey, ModuleConnectIndex],
+    key: ModuleIndexCacheKey,
 ) -> threading.Lock:
     return _shared_cache_lock(cache, key)
 
+
+def _param_ctx_key(param_ctx: Mapping[str, str]) -> str:
+    return "|".join(f"{k}={v}" for k, v in sorted(param_ctx.items()))
+
+
+def make_module_index_cache_key(
+    mod_name: str,
+    param_ctx: Mapping[str, str],
+    *,
+    body_digest: str,
+    defines_digest: str,
+    bind_digest: str,
+    ff_barrier: bool = False,
+    over_approximate_if: bool = True,
+) -> ModuleIndexCacheKey:
+    return (
+        mod_name,
+        _param_ctx_key(param_ctx),
+        body_digest,
+        defines_digest,
+        bind_digest,
+        ff_barrier,
+        over_approximate_if,
+    )
+
+from hierwalk.cache import _pickle_load, get_active_work_dir
 from hierwalk.connect_scan import (
     ModuleConnectIndex,
     _clean_body,
     _collect_declared_net_names,
+    _defines_digest,
     _net_base_in_assign_regex_fast,
     _net_base_in_port_map_regex_fast,
     _net_name_bases,
     apply_bind_connectivity,
     apply_empty_module_passthrough,
+    binds_digest,
     build_module_connect_index,
     collect_assign_net_names,
     collect_bind_records_for_module,
     extract_connect_nodes,
+    file_modules_bind_digest,
     net_base_in_assign_probe,
     net_base_in_port_map_probe,
     instance_port_maps,
 )
+from hierwalk.manifest import path_content_digest
 from hierwalk.hierarchy_log import format_row_provenance
 from hierwalk.index import DesignIndex
 from hierwalk.inst_scan import probe_inst_leaf_regex_fast
@@ -211,6 +250,8 @@ def wire_tail_exists_fast(
     base = net_name.split("[", 1)[0].split(".", 1)[0]
     if _net_base_declared_fast(body, base):
         return True
+    if param_ctx:
+        return net_base_in_assign_probe(body, base, param_map=param_ctx)
     return _net_base_in_assign_regex_fast(body, base)
 
 
@@ -434,8 +475,6 @@ def net_exists_in_module_fast(
         return False
     base = net_name.split("[", 1)[0].split(".", 1)[0]
     text = body if body is not None else _module_body_for_row(index, row)
-    if wire_tail_exists_fast(text, net_name):
-        return True
     ctx = (
         dict(param_ctx)
         if param_ctx is not None
@@ -445,6 +484,13 @@ def net_exists_in_module_fast(
             else dict(_port_param_ctx(index, row, top))
         )
     )
+    use_param_probe = bool(ctx) and not row.param_ctx_folded
+    if wire_tail_exists_fast(
+        text,
+        net_name,
+        param_ctx=ctx if use_param_probe else None,
+    ):
+        return True
     key = _decl_net_cache_key(row, ctx)
     if cache is not None and key in cache:
         names = cache[key]
@@ -465,6 +511,13 @@ def net_exists_in_module_fast(
     if _net_base_in_port_map_regex_fast(text, base):
         _cache_note_decl_net_hit(cache, key, net_name, base)
         return True
+    if use_param_probe:
+        if net_base_in_assign_probe(text, base, param_map=ctx):
+            _cache_note_decl_net_hit(cache, key, net_name, base)
+            return True
+        if net_base_in_port_map_probe(text, base, param_map=ctx):
+            _cache_note_decl_net_hit(cache, key, net_name, base)
+            return True
     return False
 
 
@@ -674,8 +727,180 @@ def _empty_module_passthrough_ports(
     return None
 
 
+_CONNECT_INDEX_SIDECAR_VERSION = 2
+
+_ModuleIndexKeyMemoEntry = Tuple[str, str, ModuleIndexCacheKey, Tuple[BindRecord, ...]]
+_module_index_key_memo: Dict[
+    Tuple[int, str, str, str, bool, bool, str],
+    _ModuleIndexKeyMemoEntry,
+] = {}
+_module_index_key_memo_guard = threading.Lock()
+
+
+def _clear_module_index_key_memo() -> None:
+    with _module_index_key_memo_guard:
+        _module_index_key_memo.clear()
+
+
+def _resolve_module_index_key(
+    index: DesignIndex,
+    mod_name: str,
+    param_ctx: Mapping[str, str],
+    defines: Mapping[str, str] | None,
+    *,
+    ff_barrier: bool,
+    over_approximate_if: bool,
+) -> Tuple[ModuleIndexCacheKey, List[BindRecord]]:
+    rec = index.get_module(mod_name)
+    body = index.module_body(mod_name) if rec else ""
+    body_digest = _module_body_digest(
+        mod_name,
+        body,
+        rec.file_path if rec else None,
+    )
+    defines_digest = _defines_digest(defines)
+    files_digest = file_modules_bind_digest(index)
+    partial = (
+        id(index),
+        mod_name,
+        _param_ctx_key(param_ctx),
+        defines_digest,
+        ff_barrier,
+        over_approximate_if,
+        files_digest,
+    )
+    with _module_index_key_memo_guard:
+        entry = _module_index_key_memo.get(partial)
+        if entry is not None and entry[0] == body_digest:
+            fresh_binds = collect_bind_records_for_module(index, mod_name)
+            if entry[1] == binds_digest(fresh_binds):
+                return entry[2], fresh_binds
+    binds = collect_bind_records_for_module(index, mod_name)
+    bind_digest = binds_digest(binds)
+    full_key = make_module_index_cache_key(
+        mod_name,
+        param_ctx,
+        body_digest=body_digest,
+        defines_digest=defines_digest,
+        bind_digest=bind_digest,
+        ff_barrier=ff_barrier,
+        over_approximate_if=over_approximate_if,
+    )
+    frozen_binds = tuple(binds)
+    with _module_index_key_memo_guard:
+        _module_index_key_memo[partial] = (
+            body_digest,
+            bind_digest,
+            full_key,
+            frozen_binds,
+        )
+    return full_key, binds
+
+
+@dataclass(frozen=True)
+class _ModuleConnectSidecarMeta:
+    version: int
+    mod_name: str
+    ctx_key: str
+    body_digest: str
+    defines_digest: str
+    bind_digest: str
+    ff_barrier: bool
+    over_approximate_if: bool
+
+
+def _module_body_digest(mod_name: str, body: str, rec_file_path: Optional[str]) -> str:
+    if rec_file_path:
+        digest = path_content_digest(Path(rec_file_path))
+        if digest:
+            return digest[:16]
+    return hashlib.sha256(body.encode("utf-8", errors="surrogateescape")).hexdigest()[:16]
+
+
+def _module_connect_sidecar_root() -> Optional[Path]:
+    active = get_active_work_dir()
+    if active is not None:
+        return active / "connect_index"
+    env = os.environ.get("HIERWALK_CACHE_DIR")
+    if env:
+        return Path(env).expanduser().resolve() / "connect_index"
+    return None
+
+
+def _module_connect_sidecar_path(cache_key: str) -> Path:
+    digest = hashlib.sha256(cache_key.encode("utf-8")).hexdigest()[:24]
+    return _module_connect_sidecar_root() / f"{digest}.mci.pkl"
+
+
+def _module_connect_sidecar_key(
+    *,
+    mod_name: str,
+    ctx_key: str,
+    body_digest: str,
+    defines_digest: str,
+    bind_digest: str,
+    ff_barrier: bool,
+    over_approximate_if: bool,
+) -> str:
+    return (
+        f"v={_CONNECT_INDEX_SIDECAR_VERSION}|{mod_name}|{ctx_key}|"
+        f"{body_digest}|{defines_digest}|{bind_digest}|"
+        f"{int(ff_barrier)}|{int(over_approximate_if)}"
+    )
+
+
+def _load_module_connect_sidecar(
+    cache_key: str,
+    *,
+    meta: _ModuleConnectSidecarMeta,
+) -> Optional[ModuleConnectIndex]:
+    if os.environ.get("HIERWALK_CONNECT_INDEX_SIDECAR", "").lower() in ("0", "off", "false"):
+        return None
+    if _module_connect_sidecar_root() is None:
+        return None
+    path = _module_connect_sidecar_path(cache_key)
+    if not path.is_file():
+        return None
+    try:
+        with path.open("rb") as fh:
+            obj = _pickle_load(fh)
+    except (OSError, pickle.UnpicklingError, EOFError, ValueError):
+        return None
+    if not isinstance(obj, tuple) or len(obj) != 2:
+        return None
+    stored_meta, idx = obj
+    if not isinstance(stored_meta, _ModuleConnectSidecarMeta):
+        return None
+    if stored_meta != meta:
+        return None
+    if not isinstance(idx, ModuleConnectIndex):
+        return None
+    return idx
+
+
+def _save_module_connect_sidecar(
+    cache_key: str,
+    idx: ModuleConnectIndex,
+    *,
+    meta: _ModuleConnectSidecarMeta,
+) -> None:
+    if os.environ.get("HIERWALK_CONNECT_INDEX_SIDECAR", "").lower() in ("0", "off", "false"):
+        return
+    if _module_connect_sidecar_root() is None:
+        return
+    path = _module_connect_sidecar_path(cache_key)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        with tmp.open("wb") as fh:
+            pickle.dump((meta, idx), fh, protocol=pickle.HIGHEST_PROTOCOL)
+        tmp.replace(path)
+    except OSError:
+        return
+
+
 def _module_index(
-    cache: Dict[Tuple[str, str], ModuleConnectIndex],
+    cache: Dict[ModuleIndexCacheKey, ModuleConnectIndex],
     index: DesignIndex,
     mod_name: str,
     param_ctx: Mapping[str, str],
@@ -683,15 +908,21 @@ def _module_index(
     over_approximate_if: bool = True,
     ff_barrier: bool = False,
 ) -> ModuleConnectIndex:
-    ctx_key = "|".join(f"{k}={v}" for k, v in sorted(param_ctx.items()))
-    key = (mod_name, ctx_key)
+    key, binds = _resolve_module_index_key(
+        index,
+        mod_name,
+        param_ctx,
+        defines,
+        ff_barrier=ff_barrier,
+        over_approximate_if=over_approximate_if,
+    )
     hit = cache.get(key)
     if hit is not None:
-        return hit
+        return hit.copy()
     with _mod_cache_lock(cache, key):
         hit = cache.get(key)
         if hit is not None:
-            return hit
+            return hit.copy()
         built = _build_module_index_entry(
             cache,
             index,
@@ -699,6 +930,7 @@ def _module_index(
             param_ctx,
             key=key,
             defines=defines,
+            binds=binds,
             over_approximate_if=over_approximate_if,
             ff_barrier=ff_barrier,
         )
@@ -706,25 +938,58 @@ def _module_index(
 
 
 def _build_module_index_entry(
-    cache: Dict[Tuple[str, str], ModuleConnectIndex],
+    cache: Dict[ModuleIndexCacheKey, ModuleConnectIndex],
     index: DesignIndex,
     mod_name: str,
     param_ctx: Mapping[str, str],
     *,
-    key: Tuple[str, str],
+    key: ModuleIndexCacheKey,
     defines: Mapping[str, str] | None = None,
+    binds: Optional[Sequence[BindRecord]] = None,
     over_approximate_if: bool = True,
     ff_barrier: bool = False,
 ) -> ModuleConnectIndex:
     rec = index.get_module(mod_name)
     body = index.module_body(mod_name) if rec else ""
+    ctx_key = key[1]
+    body_digest = key[2]
+    defines_digest = key[3]
+    bind_digest = key[4]
+    bind_list = (
+        list(binds)
+        if binds is not None
+        else collect_bind_records_for_module(index, mod_name)
+    )
+    sidecar_meta = _ModuleConnectSidecarMeta(
+        version=_CONNECT_INDEX_SIDECAR_VERSION,
+        mod_name=mod_name,
+        ctx_key=ctx_key,
+        body_digest=body_digest,
+        defines_digest=defines_digest,
+        bind_digest=bind_digest,
+        ff_barrier=ff_barrier,
+        over_approximate_if=over_approximate_if,
+    )
+    sidecar_key = _module_connect_sidecar_key(
+        mod_name=mod_name,
+        ctx_key=ctx_key,
+        body_digest=body_digest,
+        defines_digest=defines_digest,
+        bind_digest=bind_digest,
+        ff_barrier=ff_barrier,
+        over_approximate_if=over_approximate_if,
+    )
+    disk_hit = _load_module_connect_sidecar(sidecar_key, meta=sidecar_meta)
+    if disk_hit is not None:
+        cache[key] = disk_hit
+        return disk_hit.copy()
     if not body.strip():
         built = ModuleConnectIndex()
         passthrough = _empty_module_passthrough_ports(index, mod_name, param_ctx)
         if passthrough:
             apply_empty_module_passthrough(built, passthrough[0], passthrough[1])
     else:
-        built = build_module_connect_index(
+        base = build_module_connect_index(
             body,
             param_map=param_ctx,
             defines=defines,
@@ -736,15 +1001,18 @@ def _build_module_index_entry(
                 index, mod_name, param_ctx
             ),
         )
-        binds = collect_bind_records_for_module(index, mod_name)
-        if binds:
+        if bind_list:
+            built = base.copy()
             apply_bind_connectivity(
                 built,
-                binds,
+                bind_list,
                 index,
                 param_map=param_ctx,
                 defines=defines,
                 over_approximate_if=over_approximate_if,
             )
+        else:
+            built = base
     cache[key] = built
-    return built
+    _save_module_connect_sidecar(sidecar_key, built, meta=sidecar_meta)
+    return built.copy()

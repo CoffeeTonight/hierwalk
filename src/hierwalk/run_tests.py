@@ -333,6 +333,14 @@ def _merge_full_index_fields(
     if _mapping_get_ci(spec, "max_depth") is not None:
         out = replace(out, max_depth=int(_mapping_get_ci(spec, "max_depth")))
 
+    from hierwalk.trace_stop import parse_trace_stop_policy
+
+    trace_stop = parse_trace_stop_policy(spec)
+    if trace_stop.ignore_hierarchy:
+        out = replace(out, ignore_hierarchy=trace_stop.ignore_hierarchy)
+    if trace_stop.trace_max_depth is not None:
+        out = replace(out, trace_max_depth=trace_stop.trace_max_depth)
+
     index_cwd = _first_ci(spec, "index_cwd", "index-cwd")
     if index_cwd:
         out = replace(out, index_cwd=_resolve_path(base, str(index_cwd)))
@@ -438,7 +446,7 @@ def run_config_for_test(
     from pathlib import Path
 
     base = base_dir or Path.cwd()
-    cfg = shared
+    cfg = _merge_full_index_fields(shared, spec, base_dir=base)
     if full_index_spec is not None and full_index_enabled:
         cfg = _merge_full_index_fields(cfg, full_index_spec, base_dir=base)
 
@@ -1009,6 +1017,50 @@ def spec_for_test_entry(
             raise ValueError(f"{RUN_ON_FULL_INDEX} block missing")
         return _spec_block(document, key)
     return _spec_block(document, entry.kind)
+
+
+def expand_suite_verification_plan(
+    plan: Sequence[Tuple[RunTestEntry, RunConfig]],
+) -> Sequence[Tuple[RunTestEntry, RunConfig]]:
+    """Flat-suite: index steps, then verification text pass, then logical pass."""
+    index_steps: list[Tuple[RunTestEntry, RunConfig]] = []
+    verify_steps: list[Tuple[RunTestEntry, RunConfig]] = []
+    for entry, run_cfg in plan:
+        if entry is None or entry.kind == RUN_ON_FULL_INDEX:
+            index_steps.append((entry, run_cfg))
+        elif entry.kind in VERIFICATION_KINDS:
+            verify_steps.append((entry, run_cfg))
+        else:
+            index_steps.append((entry, run_cfg))
+    if not verify_steps:
+        return tuple(plan)
+    expanded: list[Tuple[RunTestEntry, RunConfig]] = []
+    expanded.extend(index_steps)
+    for entry, run_cfg in verify_steps:
+        name = run_cfg.verification_step_name or entry.name or f"{entry.kind}[{entry.index}]"
+        expanded.append(
+            (
+                entry,
+                replace(
+                    run_cfg,
+                    verification_phase="text",
+                    verification_step_name=f"{name}:text",
+                ),
+            )
+        )
+    for entry, run_cfg in verify_steps:
+        name = run_cfg.verification_step_name or entry.name or f"{entry.kind}[{entry.index}]"
+        expanded.append(
+            (
+                entry,
+                replace(
+                    run_cfg,
+                    verification_phase="logical",
+                    verification_step_name=f"{name}:logical",
+                ),
+            )
+        )
+    return tuple(expanded)
 
 
 def build_test_run_configs(

@@ -264,7 +264,7 @@ def _connect_pair(
     strict_generate: bool = False,
     ff_barrier: bool = True,
     over_approximate_if: Optional[bool] = None,
-    mod_cache: Dict[Tuple[str, str], ModuleConnectIndex],
+    mod_cache: Dict[Tuple[str, str, str, str, str, bool, bool], ModuleConnectIndex],
     param_ctx_cache: Dict[str, Mapping[str, str]],
     check_id: str = "",
     elab_index: Optional[ElabIndex] = None,
@@ -405,7 +405,9 @@ class ConnectivitySession:
     strict_generate: bool = False
     ff_barrier: bool = True
     over_approximate_if: Optional[bool] = None
-    mod_cache: Dict[Tuple[str, str], ModuleConnectIndex] = field(default_factory=dict)
+    mod_cache: Dict[Tuple[str, str, str, str, str, bool, bool], ModuleConnectIndex] = field(
+        default_factory=dict
+    )
     param_ctx_cache: Dict[str, Mapping[str, str]] = field(default_factory=dict)
     elab_index: Optional[ElabIndex] = None
 
@@ -849,6 +851,7 @@ def format_connect_results_tsv(
 
     leaf_results = flatten_connect_results(results)
     lines = [
+        "# connect results",
         "check_id\tendpoint_a\tendpoint_b\tconnected\tmode\tnote\terrors\thops\t"
         "a_rtl\ta_via_filelist\ta_filelist_chain\t"
         "b_rtl\tb_via_filelist\tb_filelist_chain",

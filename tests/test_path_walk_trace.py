@@ -134,7 +134,7 @@ def test_path_walk_connect_trace_writes_pw_db_to_run_log(tmp_path: Path):
     assert "[hier-walk path-walk]" in text
 
 
-def test_path_walk_connect_execute_writes_tsv_and_report_log(tmp_path: Path):
+def test_path_walk_connect_execute_writes_tsv_and_report_log(tmp_path: Path, monkeypatch):
     """Result TSV + hier-walk report must land in the log before post-verify DB warm."""
     top_v = tmp_path / "top.v"
     top_v.write_text(
@@ -187,7 +187,9 @@ def test_path_walk_connect_execute_writes_tsv_and_report_log(tmp_path: Path):
     rc = execute_run(cfg, _Ap())
     assert rc == 0
     assert out_tsv.is_file()
-    assert "connected" in out_tsv.read_text(encoding="utf-8").lower()
+    tsv_text = out_tsv.read_text(encoding="utf-8")
+    assert "# connect results" in tsv_text
+    assert "connected" in tsv_text.lower()
 
     log_path = out_log
     assert log_path.is_file(), f"missing log at {log_path}"

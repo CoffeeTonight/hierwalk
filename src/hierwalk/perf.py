@@ -116,6 +116,41 @@ def path_walk_recovery_pass_cap() -> int:
     return 32
 
 
+def pw_module_file_cap() -> int:
+    """Max tier-0 module files scanned per path-walk resolve step."""
+    raw = os.environ.get("HIERWALK_PW_MODULE_FILE_CAP", "").strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    return 32
+
+
+def pw_tier0_global_scan_max() -> int:
+    """Max tier-0 files in a recovery global expand."""
+    raw = os.environ.get("HIERWALK_PW_TIER0_GLOBAL_MAX", "").strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    return 128
+
+
+def pw_inst_resolve_tier1_max(policy: str) -> int:
+    """Max tier-1 inst-leaf index files per resolve pass (policy-dependent default)."""
+    raw = os.environ.get("HIERWALK_PW_TIER1_MAX", "").strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    if str(policy).strip().lower() == "recovery":
+        return 24
+    return 12
+
+
 def slow_file_log_threshold_sec() -> Optional[float]:
     """
     Log per-file preprocess/scan timing when a source exceeds this many seconds.

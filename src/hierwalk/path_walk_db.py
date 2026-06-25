@@ -1862,6 +1862,30 @@ class PathWalkModuleDb:
             self._register_inst_edges(name, {}, rec.instances)
         self._snapshot_dirty = True
 
+    def _tier1_file_defines_module(self, fpath: str, module_name: str) -> bool:
+        """True when *fpath* contains a ``module`` definition for *module_name*."""
+        if not fpath or not module_name:
+            return False
+        key = str(Path(fpath).resolve())
+        rec = self._index.get_module(module_name)
+        if (
+            rec is not None
+            and rec.file_path == key
+            and not _is_placeholder_module(rec)
+            and rec.instances
+        ):
+            return True
+        try:
+            text = self._preprocessed_text_for_file(fpath)
+        except OSError:
+            return False
+        from hierwalk.inst_scan import iter_module_blocks
+
+        for block in iter_module_blocks(text):
+            if block["name"] == module_name:
+                return True
+        return False
+
     def _index_has_resolved_module(
         self,
         module_name: str,
@@ -1873,7 +1897,9 @@ class PathWalkModuleDb:
         if _is_placeholder_module(rec):
             return False
         if expect_inst is None:
-            return True
+            if rec is not None and rec.file_path:
+                return self._tier1_file_defines_module(rec.file_path, module_name)
+            return rec is not None
         parent_mod, inst_leaf = expect_inst
         if parent_mod != module_name or rec is None:
             return False
@@ -1917,12 +1943,13 @@ class PathWalkModuleDb:
         avoid = ""
         if rec is not None and rec.file_path and not _is_placeholder_module(rec):
             avoid = str(Path(rec.file_path).resolve())
-            if expect_inst is None and self._ensure_module_light(module_name, avoid):
-                self._trace(
-                    f"pw-db   module light hit {module_name!r} via {Path(avoid).name}"
-                )
-                self._warm_tier1_background(avoid)
-                return True
+            if expect_inst is None and self._tier1_file_defines_module(avoid, module_name):
+                if self._ensure_module_light(module_name, avoid):
+                    self._trace(
+                        f"pw-db   module light hit {module_name!r} via {Path(avoid).name}"
+                    )
+                    self._warm_tier1_background(avoid)
+                    return True
 
         scoped_pool = (
             self._scoped_pool_for_policy(scope_anchor, policy=policy)
