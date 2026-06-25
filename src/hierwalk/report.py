@@ -12,7 +12,7 @@ from hierwalk.coverage_audit import CoverageAuditResult
 from hierwalk.filelist import FilelistResult
 from hierwalk.index import DesignIndex
 from hierwalk.hierarchy_log import format_hierarchy_rows_report
-from hierwalk.models import FlatRow, SearchHit
+from hierwalk.models import ConnectResult, FlatRow, SearchHit
 from hierwalk.path_chain import format_path_chain_report
 from hierwalk.progress import format_duration, format_hierwalk_log
 
@@ -63,6 +63,8 @@ class RunReport:
     filelist_warnings: int = 0
     coverage: Optional[CoverageAuditResult] = None
     hierarchy_rows: Sequence[FlatRow] = ()
+    connect_results: Sequence[ConnectResult] = ()
+    connect_phase: str = ""
 
     def lines(self) -> List[str]:
         out: List[str] = []
@@ -149,6 +151,18 @@ class RunReport:
         if self.search_hits is not None:
             pat = self.search_pattern or ""
             out.append(f"  Search:        {self.search_hits} hits ({pat!r})")
+
+        if self.connect_results:
+            from hierwalk.connectivity import format_connect_results_report
+
+            phase = (self.connect_phase or "logical").strip().lower()
+            if phase not in ("text", "logical", "both"):
+                phase = "logical"
+            out.append("")
+            out.append("Connectivity")
+            if phase in ("text", "logical"):
+                out.append(f"  Phase:         {phase}")
+            out.extend(format_connect_results_report(self.connect_results, phase=phase))
 
         mapped_hits = [h for h in self.search_hit_details if h.path_chain]
         if mapped_hits:

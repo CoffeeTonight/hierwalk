@@ -41,11 +41,11 @@ from hierwalk.inst_scan import (
     scan_hierarchy_instances,
 )
 from hierwalk.params import parse_param_pairs
-from hierwalk.manifest import PathDigests, path_content_digest
+from hierwalk.manifest import LazyPathDigests, PathDigests, path_content_digest
 from hierwalk.models import InstanceEdge, ModuleRecord
 from hierwalk.params import resolve_param_map
 
-PATH_WALK_DB_VERSION = 11
+PATH_WALK_DB_VERSION = 12
 
 _PARALLEL_MIN_TIER0 = 4
 
@@ -105,12 +105,14 @@ def path_walk_db_cache_key(
     """Stable namespace for path-walk DB sidecars (independent of full-index cache)."""
     hasher = hashlib.sha256()
     hasher.update(f"pw-db-v={PATH_WALK_DB_VERSION}".encode())
+    lazy_key = isinstance(path_digests, LazyPathDigests)
     for raw in sorted({str(Path(s).resolve()) for s in sources}):
         hasher.update(raw.encode())
         hasher.update(b"\0")
-        digest = path_content_digest(Path(raw), path_digests=path_digests)
-        if digest is not None:
-            hasher.update(digest.encode())
+        if not lazy_key:
+            digest = path_content_digest(Path(raw), path_digests=path_digests)
+            if digest is not None:
+                hasher.update(digest.encode())
     for raw in sorted({str(Path(p).resolve()) for p in include_dirs}):
         hasher.update(b"inc:")
         hasher.update(raw.encode())
@@ -301,9 +303,12 @@ class PathWalkModuleDb:
         tier1_prefetch: Optional[bool] = None,
     ) -> None:
         self._sources = [str(Path(s).resolve()) for s in sources]
-        self._path_digests: Optional[PathDigests] = (
-            dict(path_digests) if path_digests is not None else None
-        )
+        if path_digests is None:
+            self._path_digests: Optional[Union[PathDigests, LazyPathDigests]] = None
+        elif isinstance(path_digests, LazyPathDigests):
+            self._path_digests = path_digests
+        else:
+            self._path_digests = dict(path_digests)
         self._index = index
         self._include_dirs = [Path(p) for p in include_dirs]
         self._defines = dict(defines or {})
@@ -956,6 +961,115 @@ class PathWalkModuleDb:
         hit = self._sources_by_listing.get(listing_key)
         return set(hit) if hit is not None else set()
 
+    def _descendant_listings(self, listing: str) -> Set[str]:
+        resolved = str(Path(listing).resolve()) if listing else ""
+        if not resolved:
+            return set()
+        out: Set[str] = {resolved}
+        queue = [resolved]
+        while queue:
+            fl = queue.pop()
+            for child in self._filelist_children.get(fl, ()):
+                if child not in out:
+                    out.add(child)
+                    queue.append(child)
+        return out
+
+    def _listing_depth_from(self, ancestor: str, descendant: str) -> int:
+        anc = str(Path(ancestor).resolve())
+        desc = str(Path(descendant).resolve())
+        if anc == desc:
+            return 0
+        queue: List[Tuple[str, int]] = [(anc, 0)]
+        visited = {anc}
+        while queue:
+            fl, depth = queue.pop(0)
+            for child in self._filelist_children.get(fl, ()):
+                if child == desc:
+                    return depth + 1
+                if child not in visited:
+                    visited.add(child)
+                    queue.append((child, depth + 1))
+        return 99
+
+    def _filelist_proximity(self, anchor_rtl: str, candidate_rtl: str) -> int:
+        """Lower score means closer in filelist / hierarchy."""
+        if not anchor_rtl:
+            return 0
+        anchor_key = str(Path(anchor_rtl).resolve())
+        cand_key = str(Path(candidate_rtl).resolve())
+        if anchor_key == cand_key:
+            return 0
+
+        anchor_listing = self._listing_for_rtl(anchor_rtl)
+        cand_listing = self._listing_for_rtl(candidate_rtl)
+        if not anchor_listing:
+            return 500 if cand_listing else 1000
+        if not cand_listing:
+            return 400
+
+        anchor_fl = str(Path(anchor_listing).resolve())
+        cand_fl = str(Path(cand_listing).resolve())
+        if anchor_fl == cand_fl:
+            return 1
+
+        descendants = self._descendant_listings(anchor_fl)
+        if cand_fl in descendants and cand_fl != anchor_fl:
+            return 2 + self._listing_depth_from(anchor_fl, cand_fl)
+
+        ancestors = set(self._ancestor_listings(anchor_fl))
+        if cand_fl in ancestors and cand_fl != anchor_fl:
+            return 10 + self._listing_depth_from(cand_fl, anchor_fl)
+
+        if cand_fl in self._listing_siblings.get(anchor_fl, ()):
+            return 25
+
+        cand_ancestors = set(self._ancestor_listings(cand_fl))
+        shared = ancestors & cand_ancestors
+        if shared:
+            best = 99
+            for lca in shared:
+                dist = self._listing_depth_from(lca, anchor_fl) + self._listing_depth_from(
+                    lca, cand_fl
+                )
+                best = min(best, dist)
+            return 40 + best
+
+        anchor_chain = self._index.filelist_chain_for(anchor_rtl) or ""
+        cand_chain = self._index.filelist_chain_for(candidate_rtl) or ""
+        if anchor_chain and cand_chain:
+            prefix = os.path.commonprefix([anchor_chain, cand_chain])
+            if prefix:
+                return 60 + abs(len(anchor_chain) - len(cand_chain)) - len(prefix)
+
+        return 1000
+
+    def _sort_by_filelist_proximity(
+        self,
+        files: Sequence[str],
+        *,
+        scope_anchor: str,
+    ) -> List[str]:
+        if not scope_anchor:
+            return list(files)
+        prox = lambda f: self._filelist_proximity(scope_anchor, f)
+        return sorted(files, key=prox)
+
+    def _tier0_target_module(
+        self,
+        module_name: str,
+        *,
+        policy: ResolvePolicy,
+    ) -> str:
+        """Recovery keeps scanning after the first decl hit (dup modules)."""
+        if (
+            policy == RESOLVE_RECOVERY
+            and module_name
+            and module_name in self._module_to_files
+        ):
+            return ""
+        return module_name
+
     def should_retry_deferred_recovery(self, scope_anchor: str) -> bool:
         """
         True when recovery policy may succeed where confident resolution could not.
@@ -1302,6 +1416,8 @@ class PathWalkModuleDb:
         sources: Optional[Sequence[str]] = None,
         *,
         target_module: str = "",
+        scope_anchor: str = "",
+        policy: ResolvePolicy = RESOLVE_RECOVERY,
     ) -> int:
         """Tier-0 scan sources not yet regex-indexed (scoped pool or full design)."""
         pool = (
@@ -1309,7 +1425,17 @@ class PathWalkModuleDb:
             if sources is not None
             else list(self._sources)
         )
-        return self._tier0_scan_sources(pool, target_module=target_module)
+        pending = [
+            src
+            for src in pool
+            if src not in self._regex_scanned and src not in self._tier0_inflight
+        ]
+        if scope_anchor and pending:
+            pending = self._sort_by_filelist_proximity(pending, scope_anchor=scope_anchor)
+        return self._tier0_scan_sources(
+            pending,
+            target_module=self._tier0_target_module(target_module, policy=policy),
+        )
 
     def _sort_module_files(
         self,
@@ -1330,6 +1456,8 @@ class PathWalkModuleDb:
             scoped = set(scope_pool)
             in_scope = [f for f in ordered if f in scoped]
             out_scope = [f for f in ordered if f not in scoped]
+            in_scope = self._sort_by_filelist_proximity(in_scope, scope_anchor=scope_anchor)
+            out_scope = self._sort_by_filelist_proximity(out_scope, scope_anchor=scope_anchor)
             ordered = in_scope + out_scope if policy == RESOLVE_RECOVERY else in_scope
         return ordered
 
@@ -1340,11 +1468,19 @@ class PathWalkModuleDb:
         scope_anchor: str = "",
         policy: ResolvePolicy = RESOLVE_CONFIDENT,
     ) -> List[str]:
+        from hierwalk.perf import pw_module_file_cap, pw_tier0_global_scan_max
+
         if scope_anchor:
             scoped_pool = self._scoped_pool_for_policy(scope_anchor, policy=policy)
             if scoped_pool:
-                self._tier0_scan_sources(scoped_pool, target_module=module_name)
-                if module_name in self._module_to_files:
+                self._tier0_scan_sources(
+                    scoped_pool,
+                    target_module=self._tier0_target_module(
+                        module_name,
+                        policy=policy,
+                    ),
+                )
+                if module_name in self._module_to_files and policy == RESOLVE_CONFIDENT:
                     files = list(self._module_to_files.get(module_name, []))
                     return self._sort_module_files(
                         module_name,
@@ -1357,15 +1493,29 @@ class PathWalkModuleDb:
                 return []
 
         if not self._regex_queue:
-            self._regex_queue = [
+            pending = [
                 s
                 for s in self._sources
                 if s not in self._regex_scanned and s not in self._tier0_inflight
             ]
+            if scope_anchor:
+                pending = self._sort_by_filelist_proximity(
+                    pending,
+                    scope_anchor=scope_anchor,
+                )
+            self._regex_queue = pending
 
         workers = _resolve_pw_db_jobs(self._jobs, len(self._sources))
         batch_size = max(workers * 4, _PARALLEL_MIN_TIER0)
-        while module_name not in self._module_to_files and self._regex_queue:
+        scan_cap = (
+            pw_module_file_cap()
+            if policy == RESOLVE_CONFIDENT
+            else pw_tier0_global_scan_max()
+        )
+        files_scanned = 0
+        while self._regex_queue and files_scanned < scan_cap:
+            if policy == RESOLVE_CONFIDENT and module_name in self._module_to_files:
+                break
             batch: List[str] = []
             while self._regex_queue and len(batch) < batch_size:
                 nxt = self._regex_queue.pop(0)
@@ -1378,18 +1528,33 @@ class PathWalkModuleDb:
                 if not self._tier0_inflight:
                     break
                 continue
-            self._tier0_scan_sources(batch, target_module=module_name)
-            if module_name in self._module_to_files:
+            self._tier0_scan_sources(
+                batch,
+                target_module=self._tier0_target_module(module_name, policy=policy),
+            )
+            files_scanned += len(batch)
+            if module_name in self._module_to_files and policy == RESOLVE_CONFIDENT:
                 break
 
-        if module_name not in self._module_to_files:
+        if (
+            module_name not in self._module_to_files
+            and policy == RESOLVE_RECOVERY
+        ):
             remaining = [
                 src
                 for src in self._sources
                 if src not in self._regex_scanned and src not in self._tier0_inflight
             ]
             if remaining:
-                self._tier0_scan_sources(remaining, target_module=module_name)
+                if scope_anchor:
+                    remaining = self._sort_by_filelist_proximity(
+                        remaining,
+                        scope_anchor=scope_anchor,
+                    )
+                self._tier0_scan_sources(
+                    remaining[: pw_tier0_global_scan_max()],
+                    target_module=self._tier0_target_module(module_name, policy=policy),
+                )
 
         files = list(self._module_to_files.get(module_name, []))
         scope_pool = (
@@ -1482,16 +1647,7 @@ class PathWalkModuleDb:
 
             self._set_phase("parsing", detail=Path(key).name)
 
-            from hierwalk.preprocess import apply_ifdef_filter, preprocess_file_for_index
-
             defs: Dict[str, str] = dict(self._defines)
-            text = preprocess_file_for_index(
-                Path(key),
-                self._include_dirs,
-                defs,
-                set(),
-                skip_path_patterns=self._skip,
-            )
             effective_digest = _defines_digest(defs)
             include_digest = self._include_closure_digest(key)
 
@@ -1510,6 +1666,15 @@ class PathWalkModuleDb:
                 self._trace(f"pw-db tier1 cache {Path(key).name} -> {summary or '(none)'}")
                 return disk
 
+            from hierwalk.preprocess import apply_ifdef_filter, preprocess_file_for_index
+
+            text = preprocess_file_for_index(
+                Path(key),
+                self._include_dirs,
+                defs,
+                set(),
+                skip_path_patterns=self._skip,
+            )
             # Tier-1 must honour filelist + in-file defines (ifdef instance names, gated modules).
             text = apply_ifdef_filter(text, defs)
             per_file = scan_preprocessed(text, key)
@@ -2057,6 +2222,7 @@ class PathWalkModuleDb:
                 pending = self._scan_remaining_sources_tier0(
                     None,
                     target_module=module_name,
+                    scope_anchor=scope_anchor,
                 )
                 refreshed = self._recovery_pass1_candidates(
                     module_name,
@@ -2289,6 +2455,7 @@ class PathWalkModuleDb:
                 pending = self._scan_remaining_sources_tier0(
                     None,
                     target_module=parent_module,
+                    scope_anchor=scope_anchor,
                 )
                 refreshed = self._recovery_pass1_candidates(
                     parent_module,

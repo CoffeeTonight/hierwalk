@@ -51,6 +51,7 @@ __all__ = [
     "flatten_connect_results",
     "format_connect_hop",
     "format_connect_result_row",
+    "format_connect_results_report",
     "format_connect_results_tsv",
     "format_connect_trace_report",
     "load_connect_pairs",
@@ -196,6 +197,40 @@ def emit_connect_trace_log(
                 title="",
                 indent="      ",
             )
+
+
+def format_connect_results_report(
+    results: Sequence[ConnectResult],
+    *,
+    phase: str = "logical",
+) -> List[str]:
+    """Compact per-check lines for the end-of-run report (always lists endpoints)."""
+    leaf_results = flatten_connect_results(results)
+    if not leaf_results:
+        return ["  (no checks)"]
+    phase_label = str(phase).strip().lower() or "logical"
+    lines: List[str] = []
+    for result in leaf_results:
+        cid = f" [{result.check_id}]" if result.check_id else ""
+        pair = f"{result.endpoint_a.spec} -> {result.endpoint_b.spec}"
+        text_ok = _connected_text_value(result)
+        logical_ok = _connected_logical_value(result)
+        if phase_label == "text":
+            status = "PASS" if text_ok else "FAIL"
+            lines.append(f"  {status}{cid} {pair}")
+        elif phase_label == "logical":
+            status = "PASS" if logical_ok else "FAIL"
+            lines.append(f"  {status}{cid} {pair}")
+        else:
+            text_s = "PASS" if text_ok else "FAIL"
+            logical_s = "PASS" if logical_ok else "FAIL"
+            lines.append(f"  text={text_s} logical={logical_s}{cid} {pair}")
+        if result.errors:
+            err = " | ".join(result.errors)
+            lines.append(f"         errors: {err}")
+        elif result.note and not (text_ok if phase_label == "text" else logical_ok):
+            lines.append(f"         note: {result.note}")
+    return lines
 
 
 def flatten_connect_results(

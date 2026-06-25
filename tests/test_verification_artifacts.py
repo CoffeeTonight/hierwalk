@@ -130,6 +130,44 @@ def test_suite_logical_step_creates_logical_tsv(tmp_path: Path, monkeypatch):
     assert missing_verification_artifacts(logical_cfg, work) == []
 
 
+def test_suite_log_keeps_text_and_logical_connect_sections(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _minimal_conn_fl(tmp_path)
+    doc = {
+        "filelist": "fl.f",
+        "top": "top",
+        "run_conn_check": {
+            "enable": 1,
+            "mode": "path-walk",
+            "checks": [{"id": "t", "a": "top.clk", "b": "top.u0.clk"}],
+            "output": "conn.tsv",
+        },
+    }
+    suite = parse_flat_run_suite(doc, base_dir=tmp_path)
+    plan = expand_suite_verification_plan(
+        build_test_run_configs(suite, doc, base_dir=tmp_path)
+    )
+
+    class _Ap:
+        def error(self, msg: str) -> None:
+            raise AssertionError(msg)
+
+    for _, cfg in plan:
+        rc = execute_run(cfg, _Ap())
+        assert rc == 0
+
+    log_path = tmp_path / ".db_top" / "conn.hier-walk.log"
+    assert log_path.is_file()
+    log_text = log_path.read_text(encoding="utf-8")
+    assert "connect-text-conn done" in log_text
+    assert "connect-logical-conn done" in log_text
+    assert "# connect results (text)" in log_text
+    assert "# connect results (logical)" in log_text
+    assert "# path-walk trace (text)" in log_text
+    assert "# path-walk trace (logical)" in log_text
+    assert "top.clk -> top.u0.clk" in log_text or "top.u0.clk" in log_text
+
+
 def test_subprocess_text_phase_artifact_before_step_return(tmp_path: Path):
     doc = {
         "filelist": "fl.f",

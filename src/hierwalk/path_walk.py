@@ -2043,6 +2043,8 @@ class PathWalkSuiteSession:
     mod_db: PathWalkModuleDb
     state: PathWalkState
     top_name: str
+    trace_log_fh: Optional[TextIO] = field(default=None, repr=False)
+    trace_log_path: Optional[Path] = None
 
 
 _suite_session: Optional[PathWalkSuiteSession] = None
@@ -2088,6 +2090,9 @@ def path_walk_session_key(
 def clear_path_walk_suite_session() -> None:
     global _suite_session
     if _suite_session is not None:
+        trace_fh = _suite_session.trace_log_fh
+        if trace_fh is not None and not trace_fh.closed:
+            trace_fh.close()
         _suite_session.mod_db.shutdown_workers(wait=True)
         from hierwalk.manifest import clear_digest_scope
         from hierwalk.path_refine import clear_module_chunk_cache
@@ -2095,6 +2100,34 @@ def clear_path_walk_suite_session() -> None:
         clear_digest_scope()
         clear_module_chunk_cache()
     _suite_session = None
+
+
+def _acquire_path_walk_trace_log(
+    log_path: Path,
+    *,
+    phase: str = "",
+    reuse_suite_session: bool = False,
+) -> tuple[Optional[TextIO], bool]:
+    """Open or extend the path-walk trace log (append-only; suite steps share one handle)."""
+    from hierwalk.hierarchy_log import (
+        open_path_walk_trace_log,
+        write_path_walk_trace_section,
+    )
+
+    if reuse_suite_session and _suite_session is not None:
+        fh = _suite_session.trace_log_fh
+        if (
+            fh is not None
+            and not fh.closed
+            and _suite_session.trace_log_path == log_path
+        ):
+            write_path_walk_trace_section(fh, phase=phase)
+            return fh, False
+    fh = open_path_walk_trace_log(log_path, phase=phase)
+    if reuse_suite_session and _suite_session is not None:
+        _suite_session.trace_log_fh = fh
+        _suite_session.trace_log_path = log_path
+    return fh, True
 
 
 def acquire_path_walk_session(
@@ -2114,12 +2147,12 @@ def acquire_path_walk_session(
     jobs: int = 0,
 ) -> PathWalkSuiteSession:
     global _suite_session
-    from hierwalk.manifest import hash_paths_parallel, set_digest_scope
+    from hierwalk.manifest import LazyPathDigests, set_digest_scope
 
     defines = dict(fl.defines)
     defines.update(extra_defines or {})
     sources = [str(Path(p).resolve()) for p in fl.source_files]
-    path_digests = hash_paths_parallel(sources, jobs=jobs)
+    path_digests = LazyPathDigests.for_paths(sources, jobs=jobs)
     session_key = path_walk_session_key(
         fl,
         top=top,
@@ -2506,8 +2539,10 @@ def run_path_walk_index(
     trace_log_fh: Optional[TextIO] = None
     opened_log = False
     if trace_log_path is not None:
-        trace_log_fh = open_path_walk_trace_log(trace_log_path)
-        opened_log = True
+        trace_log_fh, opened_log = _acquire_path_walk_trace_log(
+            trace_log_path,
+            reuse_suite_session=reuse_suite_session,
+        )
     try:
         if reuse_suite_session:
             session = acquire_path_walk_session(
@@ -2592,8 +2627,13 @@ def run_path_walk_index(
         _drain_path_walk_workers(state.mod_db)
         return index, state, top_name
     finally:
-        if opened_log and trace_log_fh is not None:
-            trace_log_fh.close()
+        if trace_log_fh is not None:
+            if reuse_suite_session:
+                if _suite_session is not None:
+                    _suite_session.trace_log_fh = trace_log_fh
+                    _suite_session.trace_log_path = trace_log_path
+            elif opened_log:
+                trace_log_fh.close()
 
 
 _path_walk_phase_emit: Optional[Callable[[str], None]] = None
@@ -2768,7 +2808,7 @@ def create_path_walk_index(
     path_digests: Mapping[str, str] | None = None,
     jobs: int = 0,
 ) -> Tuple[DesignIndex, PathWalkModuleDb]:
-    from hierwalk.manifest import hash_paths_parallel, set_digest_scope
+    from hierwalk.manifest import LazyPathDigests, set_digest_scope
     path_patterns, module_patterns, filelist_patterns = resolve_ignore_path_patterns(
         ignore_paths,
         ignore_path_files=ignore_path_files,
@@ -2804,10 +2844,8 @@ def create_path_walk_index(
     )
     sources = [str(Path(p).resolve()) for p in fl.source_files]
     if path_digests is None:
-        if on_progress:
-            on_progress(f"path-walk: hashing {len(sources)} sources")
-        path_digests = hash_paths_parallel(sources, jobs=jobs)
-        set_digest_scope(path_digests)
+        path_digests = LazyPathDigests.for_paths(sources, jobs=jobs)
+    set_digest_scope(path_digests)
     cache_key = path_walk_db_cache_key(
         sources,
         defines=defines,
@@ -2902,8 +2940,11 @@ def run_path_walk_connect(
     trace_log_fh: Optional[TextIO] = None
     opened_log = False
     if trace_log_path is not None:
-        trace_log_fh = open_path_walk_trace_log(trace_log_path)
-        opened_log = True
+        trace_log_fh, opened_log = _acquire_path_walk_trace_log(
+            trace_log_path,
+            phase=phase,
+            reuse_suite_session=reuse_suite_session,
+        )
     try:
         if reuse_suite_session:
             session_extra = dict(extra_defines or {})
@@ -3169,5 +3210,10 @@ def run_path_walk_connect(
             bind_path_walk_phase_emit(None)
         return batch, index, state
     finally:
-        if opened_log and trace_log_fh is not None:
-            trace_log_fh.close()
+        if trace_log_fh is not None:
+            if reuse_suite_session:
+                if _suite_session is not None:
+                    _suite_session.trace_log_fh = trace_log_fh
+                    _suite_session.trace_log_path = trace_log_path
+            elif opened_log:
+                trace_log_fh.close()

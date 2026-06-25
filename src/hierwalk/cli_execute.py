@@ -463,6 +463,7 @@ def execute_run(cfg: RunConfig, ap) -> int:
                 sys.stdout.write(body)
             if log_path is not None:
                 with open(log_path, "a", encoding="utf-8") as fh:
+                    fh.write(f"\n# connect execution ({stdout_phase})\n")
                     emit_hierarchy_rows_log(
                         pw_state.rows(),
                         stream=fh,
@@ -476,7 +477,7 @@ def execute_run(cfg: RunConfig, ap) -> int:
                                 check_prefix=result.check_id or "",
                                 rows_by_path=endpoint_rows,
                             )
-                    fh.write("\n# connect results\n")
+                    fh.write(f"\n# connect results ({stdout_phase})\n")
                     fh.write(body)
                     if not body.endswith("\n"):
                         fh.write("\n")
@@ -519,6 +520,8 @@ def execute_run(cfg: RunConfig, ap) -> int:
                         else conn_paths.text_tsv
                     ),
                     filelist_warnings=len(fl.errors),
+                    connect_results=connect_results,
+                    connect_phase=stdout_phase,
                 ),
                 log_path=log_path,
             )
@@ -978,6 +981,7 @@ def execute_run(cfg: RunConfig, ap) -> int:
                 output_path=cfg.output,
                 filelist_warnings=len(fl.errors),
                 coverage=coverage,
+                connect_results=connect_results,
             ),
             log_path=log_path,
         )

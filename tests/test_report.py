@@ -7,6 +7,7 @@ from pathlib import Path
 from hierwalk.filelist import parse_filelist
 from hierwalk.index import DesignIndex
 from hierwalk.preprocess import preprocess_file
+from hierwalk.models import ConnectEndpoint, ConnectResult
 from hierwalk.report import RunReport, default_log_path, emit_run_report, write_run_report_log
 
 
@@ -43,6 +44,42 @@ def test_run_report_contains_key_fields(tmp_path):
     assert "Index cache" in body
     assert "Size:" in body
     assert "Instances:" in body
+
+
+def test_run_report_lists_connect_endpoints_on_fail(tmp_path):
+    rtl = tmp_path / "d.v"
+    rtl.write_text("module top; endmodule\n", encoding="utf-8")
+    fl_path = tmp_path / "design.f"
+    fl_path.write_text(f"{rtl}\n", encoding="utf-8")
+    fl = parse_filelist(fl_path)
+    text = preprocess_file(rtl, [], {})
+    index = DesignIndex.build({str(rtl): text})
+    result = ConnectResult(
+        endpoint_a=ConnectEndpoint("top.a", "top", "a", "top"),
+        endpoint_b=ConnectEndpoint("top.b", "top", "b", "top"),
+        connected=False,
+        mode="port-port",
+        connected_text=False,
+        connected_logical=False,
+        note="no path",
+        check_id="chk1",
+    )
+    body = "\n".join(
+        RunReport(
+            filelist_path=str(fl_path),
+            elapsed_sec=0.1,
+            fl=fl,
+            index=index,
+            mode="path-walk",
+            connect_results=[result],
+            connect_phase="text",
+        ).lines()
+    )
+    assert "Connectivity" in body
+    assert "top.a -> top.b" in body
+    assert "FAIL" in body
+    assert "[chk1]" in body
+    assert "no path" in body
 
 
 def test_default_log_path_next_to_output(tmp_path):

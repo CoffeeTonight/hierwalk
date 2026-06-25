@@ -15,6 +15,35 @@ SourceStat = str  # sha256 hex digest of file bytes
 SourceManifest = Dict[str, SourceStat]
 PathDigests = Dict[str, str]
 
+
+class LazyPathDigests(dict):
+    """Path digest map that hashes file bytes on first touch."""
+
+    def __init__(self, *, jobs: int = 0) -> None:
+        super().__init__()
+        self._jobs = jobs
+
+    @classmethod
+    def for_paths(
+        cls,
+        paths: Sequence[str | Path],
+        *,
+        jobs: int = 0,
+    ) -> LazyPathDigests:
+        return cls(jobs=jobs)
+
+    def touch(self, path: str | Path) -> Optional[str]:
+        key = str(Path(path).resolve())
+        cached = super().get(key)
+        if cached is not None:
+            return cached
+        digest = _read_file_digest(Path(key))
+        if digest is not None:
+            self[key] = digest
+            if _active_digests is not None:
+                _active_digests[key] = digest
+        return digest
+
 _CHUNK_BYTES = 1024 * 1024
 _PARALLEL_MIN_FILES = 8
 
@@ -44,17 +73,26 @@ def _read_file_digest(path: Path) -> Optional[str]:
         return None
 
 
+def _digest_mapping_get(
+    mapping: Mapping[str, str],
+    key: str,
+) -> Optional[str]:
+    if isinstance(mapping, LazyPathDigests):
+        return mapping.touch(key)
+    return mapping.get(key)
+
+
 def _lookup_digest(
     path: Path,
     path_digests: Optional[Mapping[str, str]] = None,
 ) -> Optional[str]:
     key = str(path.resolve())
     if path_digests is not None:
-        hit = path_digests.get(key)
+        hit = _digest_mapping_get(path_digests, key)
         if hit is not None:
             return hit
     if _active_digests is not None:
-        hit = _active_digests.get(key)
+        hit = _digest_mapping_get(_active_digests, key)
         if hit is not None:
             return hit
     return None
@@ -77,7 +115,10 @@ def digest_scope(path_digests: Mapping[str, str]) -> Iterator[None]:
     """Reuse digests computed once per hier-walk / path-walk operation."""
     global _active_digests
     prev = _active_digests
-    _active_digests = dict(path_digests)
+    if isinstance(path_digests, LazyPathDigests):
+        _active_digests = path_digests
+    else:
+        _active_digests = dict(path_digests)
     try:
         yield
     finally:
@@ -86,7 +127,10 @@ def digest_scope(path_digests: Mapping[str, str]) -> Iterator[None]:
 
 def set_digest_scope(path_digests: Mapping[str, str]) -> None:
     global _active_digests
-    _active_digests = dict(path_digests)
+    if isinstance(path_digests, LazyPathDigests):
+        _active_digests = path_digests
+    else:
+        _active_digests = dict(path_digests)
 
 
 def clear_digest_scope() -> None:

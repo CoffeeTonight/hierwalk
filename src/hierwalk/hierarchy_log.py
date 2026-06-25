@@ -559,13 +559,27 @@ def path_walk_trace_show_message(message: str) -> bool:
     return True
 
 
-def open_path_walk_trace_log(log_path: Path) -> TextIO:
+def write_path_walk_trace_section(
+    fh: TextIO,
+    *,
+    phase: str = "",
+) -> None:
+    """Append a path-walk trace section header (does not open or close *fh*)."""
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    phase_tag = f" ({phase})" if phase else ""
+    fh.write(f"\n# path-walk trace{phase_tag} {stamp}\n")
+    fh.flush()
+
+
+def open_path_walk_trace_log(
+    log_path: Path,
+    *,
+    phase: str = "",
+) -> TextIO:
     """Append path-walk trace section to the run log file."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
     fh = log_path.open("a", encoding="utf-8")
-    stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    fh.write(f"\n# path-walk trace {stamp}\n")
-    fh.flush()
+    write_path_walk_trace_section(fh, phase=phase)
     return fh
 
 

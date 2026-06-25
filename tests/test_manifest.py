@@ -8,12 +8,15 @@ from pathlib import Path
 
 from hierwalk.filelist import parse_filelist
 from hierwalk.manifest import (
+    LazyPathDigests,
     build_source_manifest,
     collect_index_digest_paths,
     config_cache_key,
     hash_paths_parallel,
     manifest_diff,
     manifest_is_current,
+    path_content_digest,
+    set_digest_scope,
 )
 
 
@@ -106,3 +109,26 @@ def test_single_hash_pass_for_index_cache(tmp_path, monkeypatch):
     )
     build_source_manifest(fl, path_digests=digests)
     assert len(reads) == len(paths)
+
+
+def test_lazy_path_digests_hashes_on_touch_only(tmp_path, monkeypatch):
+    fl_path, rtl = _write_design(tmp_path)
+    key = str(rtl.resolve())
+    reads: list[str] = []
+    real_open = Path.open
+
+    def counting_open(self, *args, **kwargs):
+        resolved = str(self.resolve())
+        if resolved == key:
+            reads.append(resolved)
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", counting_open)
+    lazy = LazyPathDigests.for_paths([key], jobs=1)
+    set_digest_scope(lazy)
+    assert key not in lazy
+    eager = hash_paths_parallel([key], jobs=1)
+    assert reads == [key]
+    reads.clear()
+    assert path_content_digest(Path(key), path_digests=lazy) == eager[key]
+    assert reads == [key]
