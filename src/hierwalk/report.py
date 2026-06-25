@@ -152,7 +152,7 @@ class RunReport:
             pat = self.search_pattern or ""
             out.append(f"  Search:        {self.search_hits} hits ({pat!r})")
 
-        if self.connect_results:
+        if self.connect_results or self.connect_phase:
             from hierwalk.connectivity import format_connect_results_report
 
             phase = (self.connect_phase or "logical").strip().lower()
@@ -189,11 +189,35 @@ class RunReport:
         return edges
 
 
+def _log_basename(stem: str, *, phase: str = "") -> str:
+    phase_label = str(phase).strip().lower()
+    if phase_label == "text":
+        return f"{stem}.text.hier-walk.log"
+    return f"{stem}.hier-walk.log"
+
+
+def phase_log_path(path: Path, *, phase: str = "") -> Path:
+    """Apply text-conn / logical-conn suffix to an explicit log path."""
+    phase_label = str(phase).strip().lower()
+    resolved = path.expanduser().resolve()
+    if phase_label != "text":
+        return resolved
+    name = resolved.name
+    if name.endswith(".hier-walk.log"):
+        return resolved.with_name(
+            name[: -len(".hier-walk.log")] + ".text.hier-walk.log"
+        )
+    if resolved.suffix:
+        return resolved.with_name(f"{resolved.stem}.text{resolved.suffix}")
+    return Path(f"{resolved}.text.log")
+
+
 def default_log_path(
     filelist_path: str,
     output_path: str = "-",
     *,
     work_dir: Optional[Path] = None,
+    phase: str = "",
 ) -> Path:
     """Default report log under per-top work dir, or legacy beside output/filelist."""
     if work_dir is not None:
@@ -202,12 +226,15 @@ def default_log_path(
             if output_path != "-"
             else (Path(filelist_path).stem if filelist_path else "run")
         )
-        return work_dir / f"{stem}.hier-walk.log"
+        return work_dir / _log_basename(stem, phase=phase)
     if output_path != "-":
         out = Path(output_path).resolve()
+        phase_label = str(phase).strip().lower()
+        if phase_label == "text":
+            return out.parent / f"{out.stem}.text.hier-walk.log"
         return out.parent / f"{out.name}.hier-walk.log"
     fl = Path(filelist_path).resolve()
-    return fl.parent / f"{fl.stem}.hier-walk.log"
+    return fl.parent / _log_basename(fl.stem, phase=phase)
 
 
 def write_run_report_log(

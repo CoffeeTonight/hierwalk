@@ -86,6 +86,33 @@ def test_default_log_path_next_to_output(tmp_path):
     out = tmp_path / "hier.tsv"
     fl = tmp_path / "design.f"
     assert default_log_path(str(fl), str(out)) == tmp_path / "hier.tsv.hier-walk.log"
+    assert (
+        default_log_path(str(fl), str(out), phase="text")
+        == tmp_path / "hier.text.hier-walk.log"
+    )
+
+
+def test_run_report_shows_connectivity_when_phase_set_without_results(tmp_path):
+    rtl = tmp_path / "d.v"
+    rtl.write_text("module top; endmodule\n", encoding="utf-8")
+    fl_path = tmp_path / "design.f"
+    fl_path.write_text(f"{rtl}\n", encoding="utf-8")
+    fl = parse_filelist(fl_path)
+    text = preprocess_file(rtl, [], {})
+    index = DesignIndex.build({str(rtl): text})
+    body = "\n".join(
+        RunReport(
+            filelist_path=str(fl_path),
+            elapsed_sec=0.1,
+            fl=fl,
+            index=index,
+            mode="path-walk",
+            connect_phase="text",
+        ).lines()
+    )
+    assert "Connectivity" in body
+    assert "Phase:         text" in body
+    assert "(no checks)" in body
 
 
 def test_emit_run_report_writes_log(tmp_path):

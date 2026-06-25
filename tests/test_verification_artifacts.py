@@ -156,16 +156,24 @@ def test_suite_log_keeps_text_and_logical_connect_sections(tmp_path: Path, monke
         rc = execute_run(cfg, _Ap())
         assert rc == 0
 
-    log_path = tmp_path / ".db_top" / "conn.hier-walk.log"
-    assert log_path.is_file()
-    log_text = log_path.read_text(encoding="utf-8")
-    assert "connect-text-conn done" in log_text
-    assert "connect-logical-conn done" in log_text
-    assert "# connect results (text)" in log_text
-    assert "# connect results (logical)" in log_text
-    assert "# path-walk trace (text)" in log_text
-    assert "# path-walk trace (logical)" in log_text
-    assert "top.clk -> top.u0.clk" in log_text or "top.u0.clk" in log_text
+    text_log = tmp_path / ".db_top" / "conn.text.hier-walk.log"
+    logical_log = tmp_path / ".db_top" / "conn.hier-walk.log"
+    assert text_log.is_file()
+    assert logical_log.is_file()
+    text_log_text = text_log.read_text(encoding="utf-8")
+    logical_log_text = logical_log.read_text(encoding="utf-8")
+    assert "connect-text-conn done" in text_log_text
+    assert "connect-logical-conn done" in logical_log_text
+    assert "# connect results (text)" in text_log_text
+    assert "# connect results (logical)" in logical_log_text
+    assert "# path-walk trace (text)" in text_log_text
+    assert "# path-walk trace (logical)" in logical_log_text
+    assert "top.clk -> top.u0.clk" in text_log_text or "top.u0.clk" in text_log_text
+    assert "top.clk -> top.u0.clk" in logical_log_text or "top.u0.clk" in logical_log_text
+    assert "Connectivity" in text_log_text
+    assert "PASS" in text_log_text or "FAIL" in text_log_text
+    assert "Connectivity" in logical_log_text
+    assert "PASS" in logical_log_text or "FAIL" in logical_log_text
 
 
 def test_subprocess_text_phase_artifact_before_step_return(tmp_path: Path):

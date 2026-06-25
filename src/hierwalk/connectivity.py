@@ -206,6 +206,14 @@ def format_connect_results_report(
 ) -> List[str]:
     """Compact per-check lines for the end-of-run report (always lists endpoints)."""
     leaf_results = flatten_connect_results(results)
+    if not leaf_results and results:
+        leaf_results = [
+            r
+            for r in results
+            if r.endpoint_a.spec or r.endpoint_b.spec or r.check_id
+        ]
+    if not leaf_results and results:
+        leaf_results = list(results)
     if not leaf_results:
         return ["  (no checks)"]
     phase_label = str(phase).strip().lower() or "logical"

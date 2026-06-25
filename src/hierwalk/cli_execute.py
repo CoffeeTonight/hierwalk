@@ -31,7 +31,7 @@ from hierwalk.perf import effective_low_memory
 from hierwalk.filelist import parse_filelist
 from hierwalk.progress import ProgressHeartbeat, ProgressReporter, progress_callback
 from hierwalk.hierarchy_log import emit_hierarchy_rows_log, emit_path_provenance_log, rows_lookup
-from hierwalk.report import RunReport, default_log_path, emit_run_report
+from hierwalk.report import RunReport, default_log_path, emit_run_report, phase_log_path
 from hierwalk.path_chain import attach_path_chains, format_path_chain_compact
 from hierwalk.search_spec import effective_search_spec, execute_search_spec
 from hierwalk.connect_request import ConnectivityCheck, ConnectivityRequest
@@ -203,10 +203,17 @@ def execute_run(cfg: RunConfig, ap) -> int:
 
     log_path: Path | None = None
     if not cfg.no_log_file:
+        phase_for_log = _verification_phase(cfg)
+        log_phase = phase_for_log if phase_for_log in ("text", "logical") else ""
         log_path = (
-            Path(cfg.log_file)
+            phase_log_path(Path(cfg.log_file), phase=log_phase)
             if cfg.log_file
-            else default_log_path(cfg.filelist, cfg.output, work_dir=work_dir)
+            else default_log_path(
+                cfg.filelist,
+                cfg.output,
+                work_dir=work_dir,
+                phase=log_phase,
+            )
         )
     timing_rec = get_active_recorder()
     if timing_rec is not None:
@@ -982,6 +989,11 @@ def execute_run(cfg: RunConfig, ap) -> int:
                 filelist_warnings=len(fl.errors),
                 coverage=coverage,
                 connect_results=connect_results,
+                connect_phase=(
+                    _verification_phase(cfg)
+                    if _verification_phase(cfg) in ("text", "logical", "both")
+                    else "logical"
+                ),
             ),
             log_path=log_path,
         )
