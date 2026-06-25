@@ -98,6 +98,7 @@ class ModuleConnectIndex:
     ff_q_roots: FrozenSet[str] = field(default_factory=frozenset)
     vector_bases: FrozenSet[str] = field(default_factory=frozenset)
     vector_scalar_rep: Dict[str, str] = field(default_factory=dict)
+    resolve_param_dims: bool = True
 
     def copy(self) -> ModuleConnectIndex:
         """Shallow copy of mutable fields (safe before in-place bind folding)."""
@@ -118,6 +119,7 @@ class ModuleConnectIndex:
             ff_q_roots=self.ff_q_roots,
             vector_bases=self.vector_bases,
             vector_scalar_rep=dict(self.vector_scalar_rep),
+            resolve_param_dims=self.resolve_param_dims,
         )
 
 
@@ -3999,6 +4001,22 @@ def module_connect_index_stats() -> Tuple[int, int]:
     return _build_index_uncached_calls, _build_index_mem_hits
 
 
+def _promote_slice_edges_to_bases(adj: Dict[str, Set[str]]) -> None:
+    """Text-conn bloom filter: any slice edge also links the participating base nets."""
+    extra: List[Tuple[str, str]] = []
+    for a, peers in adj.items():
+        a_base, _ = _split_net_base_suffix(a)
+        for b in peers:
+            b_base, _ = _split_net_base_suffix(b)
+            if a_base != a or b_base != b:
+                extra.append((a_base, b))
+                extra.append((a, b_base))
+                if a_base != b_base:
+                    extra.append((a_base, b_base))
+    for a, b in extra:
+        _add_undirected(adj, a, b)
+
+
 def build_module_connect_index(
     body: str,
     *,
@@ -4132,6 +4150,8 @@ def _build_module_connect_index_uncached(
         edge_prov=raw_edge_prov,
         iface_insts=iface_insts,
     )
+    if not resolve_param_dims:
+        _promote_slice_edges_to_bases(assign_adj)
     _expand_hier_bit_links(
         hier_links,
         hier_ref_targets,
@@ -4263,7 +4283,24 @@ def _build_module_connect_index_uncached(
         ff_q_roots=frozenset(ff_q_raw),
         vector_bases=vector_bases_set,
         vector_scalar_rep=vector_scalar_rep,
+        resolve_param_dims=resolve_param_dims,
     )
+
+
+def _coarse_net_representative(mod_idx: ModuleConnectIndex, net: str) -> str:
+    """Text-conn bloom filter: collapse unknown slice selects to base bus rep."""
+    base, _suffix = _split_net_base_suffix(net)
+    if not base or base == net:
+        return net
+    base_hit = mod_idx.net_rep.get(base)
+    if base_hit is not None:
+        return base_hit
+    cached = mod_idx.vector_scalar_rep.get(base)
+    if cached is not None:
+        return cached
+    if base in mod_idx.vector_bases:
+        return mod_idx.net_rep.get(base, base)
+    return mod_idx.net_rep.get(base, base)
 
 
 def net_representative(mod_idx: ModuleConnectIndex, net: str) -> str:
@@ -4274,4 +4311,7 @@ def net_representative(mod_idx: ModuleConnectIndex, net: str) -> str:
         cached = mod_idx.vector_scalar_rep.get(net)
         if cached is not None:
             return cached
+        return net
+    if not mod_idx.resolve_param_dims:
+        return _coarse_net_representative(mod_idx, net)
     return net

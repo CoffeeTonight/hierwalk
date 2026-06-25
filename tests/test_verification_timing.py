@@ -40,7 +40,8 @@ def test_recorder_emits_item_step_and_summary():
     assert "item top.u_a.p -> top.u_b.p" in text
     assert "item id=b top.u_c.p -> top.u_d.p" in text
     assert "step run_conn_check[0] kind=run_conn_check" in text
-    assert "summary total" in text
+    assert "--- summary ---" in text
+    assert "text-conn:" in text or "logical-conn:" in text
     assert "run_conn_check[0] kind=run_conn_check" in text
     assert len(rec.steps) == 1
     assert rec.steps[0].elapsed_sec >= 0.0
@@ -68,7 +69,7 @@ def test_recorder_writes_to_log_path(tmp_path: Path):
     log_text = log_path.read_text(encoding="utf-8")
     assert "verify-timing" in log_text
     assert "top.u_inst" in log_text
-    assert "summary total" in log_text
+    assert "--- summary ---" in log_text
 
 
 def test_cli_check_connect_emits_verify_timing(tmp_path: Path):
@@ -104,5 +105,5 @@ def test_cli_check_connect_emits_verify_timing(tmp_path: Path):
     )
     merged = proc.stderr + proc.stdout
     assert "[hier-walk verify-timing]" in merged
-    assert "summary total" in merged
+    assert "--- summary ---" in merged
     assert "item top.clk -> top.u0.clk" in merged

@@ -3082,6 +3082,7 @@ def run_path_walk_connect(
             merge_refined_connect_results,
             normalize_connect_results,
             prepare_text_connect_request,
+            reorder_connect_results_to_checks,
             require_connect_phase_tsv,
             resolve_connect_output_dir,
             snapshot_connect_text_phase,
@@ -3129,6 +3130,10 @@ def run_path_walk_connect(
                         text_results,
                         conn_session,
                         coi_error=coi_error,
+                    )
+                    text_results = reorder_connect_results_to_checks(
+                        request.checks,
+                        text_results,
                     )
                     if text_results:
                         batch = ConnectivityBatchResult(
@@ -3242,6 +3247,10 @@ def run_path_walk_connect(
                         batch.results,
                         conn_session,
                         coi_error=logical_coi_error,
+                    )
+                    logical_results = reorder_connect_results_to_checks(
+                        request.checks,
+                        logical_results,
                     )
                     batch = ConnectivityBatchResult(
                         results=tuple(logical_results),

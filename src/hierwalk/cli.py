@@ -715,6 +715,19 @@ def main(argv=None) -> int:
         timing_rec = VerificationTimingRecorder(quiet=cfg.quiet)
         bind_suite_recorder(timing_rec)
 
+    if config_path is not None:
+        cfg_src = str(config_path.resolve())
+        test_plan = [
+            (
+                entry,
+                replace(
+                    run_cfg,
+                    run_config_source=run_cfg.run_config_source or cfg_src,
+                ),
+            )
+            for entry, run_cfg in test_plan
+        ]
+
     exit_code = 0
     clear_path_walk_suite_session()
     for test_entry, run_cfg in test_plan:

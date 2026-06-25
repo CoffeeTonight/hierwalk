@@ -76,9 +76,9 @@ def provenance_fields(
         }
     return {
         "module": row.module,
-        "rtl": row.file or "",
-        "via_filelist": row.via_filelist or "",
-        "filelist_chain": row.filelist_chain or "",
+        "rtl": str(row.file or ""),
+        "via_filelist": str(row.via_filelist or ""),
+        "filelist_chain": str(row.filelist_chain or ""),
     }
 
 

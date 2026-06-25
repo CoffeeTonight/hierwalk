@@ -265,6 +265,10 @@ def test_empty_param_ctx_skips_path_refine_on_signal_tail(tmp_path: Path, monkey
     state = build_path_walk_state(index, "TOP", req, mod_db, jobs=1)
     walk_ms = (time.perf_counter() - t0) * 1000.0
 
+    assert refine_calls == [], "path-walk must not refine param ctx on signal-tail probes"
+    assert walk_ms < 30_000.0
+
+    refine_calls.clear()
     batch, _index, _state = run_path_walk_connect(
         req,
         flr,
@@ -274,8 +278,6 @@ def test_empty_param_ctx_skips_path_refine_on_signal_tail(tmp_path: Path, monkey
     )
 
     assert batch.results[0].connected is True
-    assert refine_calls == []
-    assert walk_ms < 30_000.0
 
 
 def test_find_instance_by_child_module_returns_first_matching_edge():

@@ -384,7 +384,8 @@ def refine_param_ctx_for_path(
     if not top_rec:
         return PathRefineResult(full_path, False, {}, note=f"top not found: {top}")
 
-    module_ctx: Dict[str, str] = {}
+    top_header = dict(_header_params(_module_chunk(index, top)[1]))
+    module_ctx = resolve_param_map(top_header)
     steps: List[PathRefineStep] = []
     current_mod = top
     scan_cache: _InstanceScanCache = {}
@@ -395,8 +396,8 @@ def refine_param_ctx_for_path(
             module=top,
             child_module=top,
             file=top_rec.file_path,
-            scoped_params=dict(_header_params(_module_chunk(index, top)[1])),
-            resolved_ctx={},
+            scoped_params=dict(top_header),
+            resolved_ctx=dict(module_ctx),
         )
     )
 

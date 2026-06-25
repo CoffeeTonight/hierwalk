@@ -95,10 +95,16 @@ def _parent_port_map_roots(
     child_net: str,
     parent_idx: ModuleConnectIndex,
     param_map: Mapping[str, str],
+    *,
+    coarse_slices: bool = False,
 ) -> FrozenSet[str]:
     """Resolve parent nets for a child port-bit via instance port map *expr*."""
     text = re.sub(r"\s+", "", expr.strip())
     suffix = _port_select_suffix(port_name, child_net)
+    if coarse_slices and suffix is not None:
+        roots = parent_idx.expr_roots.get(expr)
+        if roots:
+            return roots
     if suffix is not None and re.match(
         r"^(?:\\(?:[A-Za-z_]\w*|\S+)|[A-Za-z_]\w*)\s*$",
         text,
@@ -135,7 +141,12 @@ def _parent_port_map_roots(
         text,
     ):
         return frozenset({f"{text}[{bit_idx}]"})
-    return parent_idx.expr_roots.get(expr) or frozenset()
+    roots = parent_idx.expr_roots.get(expr) or frozenset()
+    if roots:
+        return roots
+    if coarse_slices and "[" in child_net:
+        return parent_idx.expr_roots.get(expr) or frozenset()
+    return frozenset()
 
 
 @dataclass(frozen=True)
@@ -181,7 +192,12 @@ def _cached_param_ctx(ctx: _SearchCtx, row: FlatRow) -> Mapping[str, str]:
         hit = ctx.param_ctx_cache.get(path)
         if hit is not None:
             return hit
-        pmap = _port_param_ctx(ctx.index, row, ctx.top)
+        pmap = _port_param_ctx(
+            ctx.index,
+            row,
+            ctx.top,
+            resolve_param_dims=ctx.resolve_param_dims,
+        )
         ctx.param_ctx_cache[path] = pmap
         return pmap
 
@@ -221,7 +237,12 @@ def _build_search_ctx(
     goal_mod = rows_by_path.get(goal_scope)
     goal_rep = goal_net
     if goal_mod and goal_net:
-        gctx = _port_param_ctx(index, goal_mod, top)
+        gctx = _port_param_ctx(
+            index,
+            goal_mod,
+            top,
+            resolve_param_dims=resolve_param_dims,
+        )
         gidx = _module_index(
             mod_cache,
             index,
@@ -435,6 +456,7 @@ def _expand_state(
                     net,
                     parent_idx,
                     mod_ctx,
+                    coarse_slices=not ctx.resolve_param_dims,
                 )
                 child_lbl = _net_label(scope, net if net != port_name else port_name)
                 if not roots and expr.strip():

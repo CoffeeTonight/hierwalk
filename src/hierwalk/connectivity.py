@@ -730,7 +730,12 @@ class ConnectivitySession:
             with _shared_cache_lock(self.param_ctx_cache, path):
                 hit = self.param_ctx_cache.get(path)
                 if hit is None:
-                    hit = _port_param_ctx(self.index, row, self.top)
+                    hit = _port_param_ctx(
+                        self.index,
+                        row,
+                        self.top,
+                        resolve_param_dims=self.resolve_param_dims,
+                    )
                     self.param_ctx_cache[path] = hit
         pmap = hit
         _module_index(
@@ -757,6 +762,7 @@ def check_connectivity(
     strict_generate: bool = False,
     ff_barrier: bool = True,
     over_approximate_if: Optional[bool] = None,
+    rows_by_path: Optional[Mapping[str, FlatRow]] = None,
 ) -> ConnectResult:
     if not top and rows:
         top = rows[0].full_path.split(".", 1)[0]
@@ -773,6 +779,7 @@ def check_connectivity(
         over_approximate_if=over_approximate_if,
         mod_cache={},
         param_ctx_cache={},
+        rows_by_path=rows_by_path,
     )
 
 

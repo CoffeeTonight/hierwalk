@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -174,6 +175,41 @@ def test_suite_log_keeps_text_and_logical_connect_sections(tmp_path: Path, monke
     assert "PASS" in text_log_text or "FAIL" in text_log_text
     assert "Connectivity" in logical_log_text
     assert "PASS" in logical_log_text or "FAIL" in logical_log_text
+
+
+def test_suite_archives_run_json_in_work_dir(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _minimal_conn_fl(tmp_path)
+    run_json = tmp_path / "suite.run.json"
+    run_json.write_text(
+        json.dumps(
+            {
+                "filelist": "fl.f",
+                "top": "top",
+                "run_conn_check": {
+                    "enable": 1,
+                    "mode": "path-walk",
+                    "checks": [{"id": "t", "a": "top.clk", "b": "top.u0.clk"}],
+                    "output": "conn.tsv",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    suite = parse_flat_run_suite(json.loads(run_json.read_text()), base_dir=tmp_path)
+    plan = expand_suite_verification_plan(
+        build_test_run_configs(suite, json.loads(run_json.read_text()), base_dir=tmp_path)
+    )
+
+    class _Ap:
+        def error(self, msg: str) -> None:
+            raise AssertionError(msg)
+
+    cfg = replace(plan[0][1], run_config_source=str(run_json.resolve()))
+    execute_run(cfg, _Ap())
+    archived = tmp_path / ".db_top" / "suite.run.json"
+    assert archived.is_file(), "run JSON should be copied into work-dir"
+    assert '"run_conn_check"' in archived.read_text(encoding="utf-8")
 
 
 def test_subprocess_text_phase_artifact_before_step_return(tmp_path: Path):

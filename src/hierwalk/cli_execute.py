@@ -195,11 +195,20 @@ def execute_run(cfg: RunConfig, ap) -> int:
     )
     cache_dir = work_dir
     set_active_work_dir(work_dir)
+    from hierwalk.connect_artifacts import archive_run_config_sources
+
+    archived_configs = archive_run_config_sources(work_dir, cfg)
     if not cfg.quiet:
         print(
             f"run: work-dir: {work_dir} (top={top_label})",
             file=sys.stderr,
         )
+        if archived_configs:
+            print(
+                "run: archived run config: "
+                + ", ".join(str(p.name) for p in archived_configs),
+                file=sys.stderr,
+            )
 
     log_path: Path | None = None
     if not cfg.no_log_file:
