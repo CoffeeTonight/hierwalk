@@ -1467,7 +1467,11 @@ class PathWalkState:
                         )
                 if self._is_folded_inst_prefix_miss(miss_leaf, edges):
                     return False
-                if self._is_signal_or_port_tail_miss(cur, remainder, target_path=path):
+                if self._is_terminal_path_segment(remainder) and self._is_signal_or_port_tail_miss(
+                    cur,
+                    remainder,
+                    target_path=path,
+                ):
                     return False
                 raw_source_has_inst = False
                 if row is not None and miss_leaf:
@@ -1566,8 +1570,8 @@ def _walk_target_from_spec(spec: str, state: PathWalkState) -> str:
     """
     Hierarchy path to walk for a connect/endpoint spec.
 
-    Uses the full instance-name chain from *spec*. Does not truncate to the
-    first missing prefix (that truncation is only for error reporting).
+    Instance chain is walked first; only the final spec segment may truncate
+    to a port/wire/reg tail in the parent module.
     """
     text = spec.strip()
     if not text:
@@ -1576,12 +1580,15 @@ def _walk_target_from_spec(spec: str, state: PathWalkState) -> str:
     if text in lookup:
         return text
     parts = text.split(".")
-    for i in range(len(parts) - 1, 0, -1):
+    last_idx = len(parts) - 1
+    for i in range(last_idx, 0, -1):
+        if i != last_idx:
+            continue
         hier = ".".join(parts[:i])
         row = lookup.get(hier)
         if row is None:
             continue
-        port = ".".join(parts[i:])
+        port = parts[-1]
         if net_exists_in_module_fast(
             state.index,
             row,
@@ -1648,7 +1655,7 @@ def _inst_path_from_spec(
         nxt = f"{cur}.{seg}"
         if nxt not in lookup:
             row = lookup.get(cur)
-            if row is not None:
+            if row is not None and "." not in remainder:
                 if net_exists_in_module_fast(
                     state.index,
                     row,
