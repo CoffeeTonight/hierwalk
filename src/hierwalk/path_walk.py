@@ -3114,9 +3114,8 @@ def run_path_walk_connect(
                         f"rows={len(walk_rows)} resolve_param_dims=0"
                     )
                     try:
-                        batch = conn_session.run_request(
+                        batch = conn_session.run_text_request(
                             text_request,
-                            jobs=1,
                             on_progress=on_progress,
                         )
                         text_results = list(batch.results)

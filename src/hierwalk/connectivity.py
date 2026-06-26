@@ -459,6 +459,167 @@ def _connect_pair(
     )
 
 
+def _coarse_text_inst_path(inst_path: str) -> str:
+    if not inst_path:
+        return ""
+    return ".".join(part.split("[", 1)[0] for part in inst_path.split("."))
+
+
+def _coarse_text_port_base(port_name: str) -> str:
+    if not port_name:
+        return ""
+    return port_name.split("[", 1)[0].split(".", 1)[0]
+
+
+def _text_coi_dedup_key(
+    ep_a: ConnectEndpoint,
+    ep_b: ConnectEndpoint,
+    errors: Sequence[str],
+) -> Tuple[Any, ...]:
+    """Coarse text-conn COI key: strip slice/index from inst paths and port names."""
+    mode = _mode(ep_a, ep_b) if ep_a.module and ep_b.module else "unknown"
+    if errors:
+        return (
+            "err",
+            mode,
+            _coarse_text_inst_path(ep_a.inst_path),
+            _coarse_text_port_base(ep_a.port_name or ""),
+            _coarse_text_inst_path(ep_b.inst_path),
+            _coarse_text_port_base(ep_b.port_name or ""),
+            tuple(errors),
+        )
+    if (_has_port(ep_a) and not ep_a.port_found) or (
+        _has_port(ep_b) and not ep_b.port_found
+    ):
+        return (
+            "port-miss",
+            mode,
+            _coarse_text_inst_path(ep_a.inst_path),
+            _coarse_text_port_base(ep_a.port_name or ""),
+            bool(ep_a.port_found),
+            _coarse_text_inst_path(ep_b.inst_path),
+            _coarse_text_port_base(ep_b.port_name or ""),
+            bool(ep_b.port_found),
+        )
+    return (
+        "coi",
+        mode,
+        _coarse_text_inst_path(ep_a.inst_path),
+        _coarse_text_port_base(ep_a.port_name or ""),
+        _coarse_text_inst_path(ep_b.inst_path),
+        _coarse_text_port_base(ep_b.port_name or ""),
+    )
+
+
+def _fanout_text_coi_result(
+    template: ConnectResult,
+    *,
+    spec_a: str,
+    spec_b: str,
+    ep_a: ConnectEndpoint,
+    ep_b: ConnectEndpoint,
+    check_id: str,
+) -> ConnectResult:
+    """Copy a deduped text COI verdict onto a leaf check (original specs/endpoints)."""
+    return ConnectResult(
+        ConnectEndpoint(
+            spec_a,
+            ep_a.inst_path,
+            ep_a.port_name,
+            ep_a.module,
+            ep_a.port_found,
+        ),
+        ConnectEndpoint(
+            spec_b,
+            ep_b.inst_path,
+            ep_b.port_name,
+            ep_b.module,
+            ep_b.port_found,
+        ),
+        template.connected,
+        template.mode,
+        hops=list(template.hops),
+        errors=list(template.errors),
+        note=template.note,
+        check_id=check_id,
+        walk_notes=list(template.walk_notes),
+        coi_walk=template.coi_walk,
+    )
+
+
+def _connect_pair_text_deduped(
+    endpoint_a: str,
+    endpoint_b: str,
+    *,
+    rows: Sequence[FlatRow],
+    index: DesignIndex,
+    top: str,
+    effective_defines: Mapping[str, str],
+    trace: bool,
+    strict_generate: bool,
+    ff_barrier: bool,
+    over_approximate_if: Optional[bool],
+    mod_cache: Dict[Tuple[str, str, str, str, str, bool, bool, bool], ModuleConnectIndex],
+    param_ctx_cache: Dict[str, Mapping[str, str]],
+    check_id: str,
+    elab_index: Optional[ElabIndex],
+    rows_by_path: Mapping[str, FlatRow],
+    dedup_cache: Dict[Tuple[Any, ...], ConnectResult],
+    dedup_stats: List[int],
+) -> ConnectResult:
+    lookup = rows_by_path
+    ep_a, err_a = resolve_endpoint(
+        endpoint_a,
+        rows,
+        index,
+        top=top,
+        require_port=False,
+        rows_by_path=lookup,
+    )
+    ep_b, err_b = resolve_endpoint(
+        endpoint_b,
+        rows,
+        index,
+        top=top,
+        require_port=False,
+        rows_by_path=lookup,
+    )
+    errors = list(err_a) + list(err_b)
+    key = _text_coi_dedup_key(ep_a, ep_b, errors)
+    dedup_stats[0] += 1
+    hit = dedup_cache.get(key)
+    if hit is not None:
+        return _fanout_text_coi_result(
+            hit,
+            spec_a=endpoint_a,
+            spec_b=endpoint_b,
+            ep_a=ep_a,
+            ep_b=ep_b,
+            check_id=check_id,
+        )
+    dedup_stats[1] += 1
+    result = _connect_pair(
+        endpoint_a,
+        endpoint_b,
+        rows=rows,
+        index=index,
+        top=top,
+        effective_defines=effective_defines,
+        trace=trace,
+        strict_generate=strict_generate,
+        ff_barrier=ff_barrier,
+        over_approximate_if=over_approximate_if,
+        mod_cache=mod_cache,
+        param_ctx_cache=param_ctx_cache,
+        check_id=check_id,
+        elab_index=elab_index,
+        rows_by_path=rows_by_path,
+        resolve_param_dims=False,
+    )
+    dedup_cache[key] = result
+    return result
+
+
 @dataclass
 class ConnectivitySession:
     """
@@ -731,6 +892,118 @@ class ConnectivitySession:
             perf_warnings=perf_notes,
         )
 
+    def run_text_request(
+        self,
+        request: ConnectivityRequest,
+        *,
+        trace: Optional[bool] = None,
+        on_progress: Optional[Any] = None,
+    ) -> ConnectivityBatchResult:
+        """
+        Text-conn batch: coarse COI dedup across slice-expanded leaf checks.
+
+        Use only for the text phase (``resolve_param_dims=False``). Logical conn
+        must call :meth:`run_request` so each leaf keeps its own COI search.
+        """
+        from hierwalk.validate_connect import waypoint_perf_warnings
+
+        use_trace = request.trace if trace is None else trace
+        perf_notes = tuple(waypoint_perf_warnings(request))
+        dedup_cache: Dict[Tuple[Any, ...], ConnectResult] = {}
+        dedup_stats = [0, 0]
+        results: List[ConnectResult] = []
+        lookup = self.rows_by_path
+
+        for chk in request.checks:
+            if chk.expand is not None and chk.expand.map_kind == "waypoint-fanout":
+                results.append(self.check_entry(chk, trace=use_trace))
+                continue
+
+            pairs = expand_check_to_pairs(
+                chk.endpoint_a,
+                chk.endpoint_b,
+                check_id=chk.check_id,
+                expand=chk.expand,
+            )
+            if len(pairs) == 1 and not pairs[0].sub_id:
+                pair = pairs[0]
+                sub_id = chk.check_id or pair.sub_id.strip("[]->")
+                results.append(
+                    _connect_pair_text_deduped(
+                        pair.endpoint_a,
+                        pair.endpoint_b,
+                        rows=self.rows,
+                        index=self.index,
+                        top=self.top,
+                        effective_defines=self._effective_defines,
+                        trace=use_trace,
+                        strict_generate=self.strict_generate,
+                        ff_barrier=self.ff_barrier,
+                        over_approximate_if=self.over_approximate_if,
+                        mod_cache=self.mod_cache,
+                        param_ctx_cache=self.param_ctx_cache,
+                        check_id=sub_id,
+                        elab_index=self.elab_index,
+                        rows_by_path=lookup,
+                        dedup_cache=dedup_cache,
+                        dedup_stats=dedup_stats,
+                    )
+                )
+                continue
+
+            fanout_mode = chk.expand.fanout_mode if chk.expand is not None else "all"
+            sub_results: List[ConnectResult] = []
+            for pair in pairs:
+                sub_id = (
+                    f"{chk.check_id}{pair.sub_id}"
+                    if chk.check_id
+                    else pair.sub_id.strip("[]->")
+                )
+                sub_results.append(
+                    _connect_pair_text_deduped(
+                        pair.endpoint_a,
+                        pair.endpoint_b,
+                        rows=self.rows,
+                        index=self.index,
+                        top=self.top,
+                        effective_defines=self._effective_defines,
+                        trace=use_trace,
+                        strict_generate=self.strict_generate,
+                        ff_barrier=self.ff_barrier,
+                        over_approximate_if=self.over_approximate_if,
+                        mod_cache=self.mod_cache,
+                        param_ctx_cache=self.param_ctx_cache,
+                        check_id=sub_id,
+                        elab_index=self.elab_index,
+                        rows_by_path=lookup,
+                        dedup_cache=dedup_cache,
+                        dedup_stats=dedup_stats,
+                    )
+                )
+            results.append(
+                aggregate_connect_results(
+                    chk.endpoint_a,
+                    chk.endpoint_b,
+                    sub_results,
+                    check_id=chk.check_id,
+                    fanout_mode=fanout_mode,
+                )
+            )
+
+        leaves, unique = dedup_stats[0], dedup_stats[1]
+        if on_progress is not None and leaves > unique:
+            on_progress(
+                f"connect: text-coi dedup leaves={leaves} unique={unique} "
+                f"saved={leaves - unique}"
+            )
+        return ConnectivityBatchResult(
+            results=tuple(results),
+            modules_cached=self.modules_cached,
+            perf_warnings=perf_notes,
+            text_coi_leaves=leaves,
+            text_coi_unique=unique,
+        )
+
     def prewarm_inst(self, inst_path: str) -> bool:
         """Build ``ModuleConnectIndex`` for the module at *inst_path* (if known)."""
         row = self.rows_by_path.get(inst_path)
@@ -808,6 +1081,8 @@ class ConnectivityBatchResult:
     results: Tuple[ConnectResult, ...]
     modules_cached: int
     perf_warnings: Tuple[str, ...] = ()
+    text_coi_leaves: int = 0
+    text_coi_unique: int = 0
 
 
 def _session_from_options(
