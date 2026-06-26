@@ -778,6 +778,13 @@ class PathWalkState:
         return bool(text) and "." not in text
 
     @staticmethod
+    def _is_target_terminal_tail(cur: str, remainder: str, path: str) -> bool:
+        """True when *remainder* is the final spec segment (port/wire/reg), not a mid-hop inst."""
+        if not PathWalkState._is_terminal_path_segment(remainder):
+            return False
+        return path == f"{cur}.{remainder}"
+
+    @staticmethod
     def _is_folded_inst_prefix_miss(
         miss_leaf: str,
         edges: Sequence[InstanceEdge],
@@ -1430,14 +1437,6 @@ class PathWalkState:
                 cur = nxt
                 remainder = ""
                 break
-            if self._is_terminal_path_segment(remainder):
-                row = self.rows_by_path.get(cur)
-                if row is not None and self._is_signal_or_port_tail_miss(
-                    cur,
-                    remainder,
-                    target_path=path,
-                ):
-                    return False
             inst_name, edge = self._resolve_child_step(
                 cur,
                 remainder,
@@ -1471,7 +1470,9 @@ class PathWalkState:
                         )
                 if self._is_folded_inst_prefix_miss(miss_leaf, edges):
                     return False
-                if self._is_terminal_path_segment(remainder) and self._is_signal_or_port_tail_miss(
+                if self._is_target_terminal_tail(
+                    cur, remainder, path
+                ) and self._is_signal_or_port_tail_miss(
                     cur,
                     remainder,
                     target_path=path,
