@@ -29,6 +29,7 @@ from hierwalk.zigzag_torture_gen import (
     DEEP_D3,
     DEEP_D5,
     DEEP_DEPTH,
+    DW_VENDOR_RTL,
     SHALLOW_ARM,
     SHALLOW_DEPTH,
     SHALLOW_R4,
@@ -54,6 +55,7 @@ def test_torture_design_shape():
     assert len(design.checks) >= 18
     assert len(design.files) >= DEEP_DEPTH + SHALLOW_DEPTH + 6
     assert "zz_fake_deep.v" in design.files
+    assert DW_VENDOR_RTL in design.files
     assert "zz_torture_top.v" in design.files
     assert "d1_shadow" in design.files["zz_deep_d1.v"]
     assert "u_next_decoy" in design.files["zz_deep_d1.v"]

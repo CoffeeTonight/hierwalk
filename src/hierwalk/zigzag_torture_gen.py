@@ -32,6 +32,9 @@ COLLISION = f"{TOP}.u_collision"
 BLACKBOX = f"{HUB}.u_bb"
 ZZ_COMMON_RTL = "zz_common.v"
 ZZ_FAKE_DEEP_RTL = "zz_fake_deep.v"
+DW_VENDOR_RTL = "DW_zz_vendor.v"
+DW_VENDOR_CELL = "DW_zz_vendor_cell"
+DW_VENDOR_INST = f"{TOP}.u_dw_vendor"
 CONE_FANOUT = f"{DEEP_ARM}.mid_tap[1][2]"
 CONE_FANIN = f"{SHALLOW_R4}.leaf_in"
 
@@ -701,6 +704,18 @@ def _zigzag_hub() -> str:
     ).strip()
 
 
+def _dw_vendor_module() -> str:
+    """Vendor-named RTL (DW_*.v): must be dropped by ignore-path glob in path-walk."""
+    return textwrap.dedent(
+        f"""
+        module {DW_VENDOR_CELL} (input logic in);
+          wire noise;
+          assign noise = in;
+        endmodule
+        """
+    ).strip()
+
+
 def _top_module() -> str:
     return textwrap.dedent(
         f"""
@@ -819,6 +834,7 @@ def _build_checks() -> Tuple[ConnectivityCheck, ...]:
 def generate_zigzag_torture_design() -> ZigzagTortureDesign:
     preamble = _defines_preamble()
     files: Dict[str, str] = {
+        DW_VENDOR_RTL: _dw_vendor_module(),
         "zz_common.v": "\n\n".join(
             [
                 preamble,
@@ -1029,6 +1045,11 @@ def _suite_conn_checks() -> List[Dict[str, Any]]:
             "b": f"{TOP}.data[0][0]",
             "expect_connected": False,
         },
+        {
+            "id": "zz_dw_vendor_ignored",
+            "a": f"{TOP}.clk",
+            "b": f"{TOP}.clk",
+        },
     ]
 
 
@@ -1048,6 +1069,7 @@ def build_flat_suite_document(design: ZigzagTortureDesign) -> Dict[str, Any]:
                     "mode": "path-walk",
                     "connect_phase": "text",
                     "include_ff": True,
+                    "ignore-path": ["DW_*"],
                     "checks": checks,
                     "output": "zz_conn.tsv",
                 },
@@ -1059,6 +1081,7 @@ def build_flat_suite_document(design: ZigzagTortureDesign) -> Dict[str, Any]:
                     "mode": "path-walk",
                     "connect_phase": "logical",
                     "include_ff": True,
+                    "ignore-path": ["DW_*"],
                     "checks": checks,
                     "output": "zz_conn.tsv",
                 },

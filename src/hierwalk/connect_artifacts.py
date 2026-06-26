@@ -774,19 +774,21 @@ def _provenance_for_evidence_path(
     rows_by_path: Mapping[str, FlatRow],
 ) -> tuple[str, str, str]:
     from hierwalk.hierarchy_log import provenance_fields
-    from hierwalk.lazy_scope import hierarchy_prefixes
 
-    if path in rows_by_path:
-        prov = provenance_fields(path, rows_by_path)
-        return prov.get("rtl", ""), prov.get("via_filelist", ""), prov.get("filelist_chain", "")
-    for prefix in reversed(list(hierarchy_prefixes([path]))):
-        if prefix in rows_by_path:
-            prov = provenance_fields(prefix, rows_by_path)
-            return (
-                prov.get("rtl", ""),
-                prov.get("via_filelist", ""),
-                prov.get("filelist_chain", ""),
-            )
+    text = (path or "").strip()
+    if not text:
+        return "", "", ""
+    parts = text.split(".")
+    for depth in range(len(parts), 0, -1):
+        prefix = ".".join(parts[:depth])
+        if prefix not in rows_by_path:
+            continue
+        prov = provenance_fields(prefix, rows_by_path)
+        return (
+            prov.get("rtl", ""),
+            prov.get("via_filelist", ""),
+            prov.get("filelist_chain", ""),
+        )
     return "", "", ""
 
 

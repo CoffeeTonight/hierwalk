@@ -10,6 +10,7 @@ import pytest
 from hierwalk.connect_artifacts import connect_output_paths
 from hierwalk.connect_expand import hierarchy_endpoint_specs, parse_list_display_spec
 from hierwalk.run_tests import (
+    RUN_CONN_CHECK,
     build_test_run_configs,
     expand_suite_verification_plan,
     parse_run_test_suite,
@@ -23,6 +24,7 @@ from hierwalk.zigzag_torture_gen import (
     COLLISION,
     D1_SHADOW,
     DEEP_D5,
+    DW_VENDOR_RTL,
     R3_ALT,
     SHALLOW_R4,
     TOP,
@@ -61,6 +63,9 @@ def test_flat_suite_document_has_text_and_logical_conn(suite_bundle):
     assert "zz_common_inst_display" in ids
     assert "zz_bridge_d2_bus" in ids
     assert "zz_fake_deep_not_on_spine" in ids
+    assert "zz_dw_vendor_ignored" in ids
+    for step in conn_steps:
+        assert step["ignore-path"] == ["DW_*"]
     batch = next(c for c in checks if c["id"] == "zz_common_inst_batch")
     assert len(batch["expect_hierarchy"]) == 3
     cone_steps = [t for t in doc["tests"] if "run_cone_trace" in t]
@@ -86,6 +91,65 @@ def test_parse_suite_expands_conn_phases_not_cone_io(suite_bundle):
     io_count = sum(1 for entry, _ in plan if entry and entry.kind == "run_io_trace")
     assert cone_count == 9  # includes cone_fanout_common_decoy (zz_common.v decoy)
     assert io_count == 7
+
+
+def test_conn_ignore_path_dw_glob_merge_and_pw_db(suite_bundle):
+    """run_conn_check ignore-path DW_* must survive run_on_full_index ignore-path: []."""
+    suite_path, design, root = suite_bundle
+    doc = json.loads(suite_path.read_text(encoding="utf-8"))
+    merge_doc = {
+        **doc,
+        "run_on_full_index": {
+            "enable": 1,
+            "mode": "hierarchy",
+            "ignore-path": [],
+            "output": "zz_instances.tsv",
+        },
+    }
+    suite = parse_run_test_suite(merge_doc, base_dir=root)
+    conn_cfg = next(
+        cfg
+        for ent, cfg in build_test_run_configs(suite, merge_doc, base_dir=root)
+        if ent.kind == RUN_CONN_CHECK
+    )
+    assert conn_cfg.ignore_path == ("DW_*",)
+
+    suite = parse_run_test_suite(doc, base_dir=root)
+    conn_cfg = next(
+        cfg
+        for ent, cfg in build_test_run_configs(suite, doc, base_dir=root)
+        if ent.kind == RUN_CONN_CHECK
+    )
+    assert conn_cfg.ignore_path == ("DW_*",)
+
+    from hierwalk.filelist import parse_filelist
+    from hierwalk.connect_request import ConnectivityCheck, ConnectivityRequest
+    from hierwalk.path_walk import run_path_walk_connect
+
+    flr = parse_filelist(str(root / "filelist.f"), index_cwd=str(root))
+    req = ConnectivityRequest(
+        checks=(ConnectivityCheck(f"{TOP}.clk", f"{TOP}.clk", check_id="zz_dw_vendor_ignored"),),
+        top=design.top,
+        defines=doc.get("defines") or {},
+    )
+    import io
+
+    trace = io.StringIO()
+    _batch, _index, state = run_path_walk_connect(
+        req,
+        flr,
+        top=design.top,
+        extra_defines=req.defines,
+        no_cache=True,
+        ignore_paths=list(conn_cfg.ignore_path),
+        trace_stream=trace,
+    )
+    dw_vendor = str((root / DW_VENDOR_RTL).resolve())
+    assert dw_vendor not in state.mod_db._sources
+    assert DW_VENDOR_RTL not in [Path(p).name for p in state.mod_db._regex_scanned]
+    trace_text = trace.getvalue()
+    assert "tier0 cache DW_" not in trace_text
+    assert "tier0 scan DW_" not in trace_text
 
 
 def test_run_and_verify_zigzag_suite(suite_bundle):

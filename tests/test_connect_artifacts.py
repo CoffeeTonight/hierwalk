@@ -215,6 +215,61 @@ def test_path_walk_writes_text_and_logical_tsv(tmp_path: Path):
     assert any(row["kind"] in ("port", "wire", "signal") for row in hier_rows)
 
 
+def test_hierarchy_port_rtl_uses_longest_walked_inst_prefix(tmp_path: Path):
+    """Sliced port paths must inherit RTL from the parent inst row, not top."""
+    top_v = tmp_path / "top.v"
+    mid_v = tmp_path / "mid.v"
+    top_v.write_text(
+        "module top;\n"
+        "  mid u ();\n"
+        "endmodule\n",
+        encoding="utf-8",
+    )
+    mid_v.write_text(
+        "module mid(input logic [3:0] chain_in);\n"
+        "  assign chain_in[0] = chain_in[1];\n"
+        "endmodule\n",
+        encoding="utf-8",
+    )
+    fl = tmp_path / "design.f"
+    fl.write_text(f"{top_v.resolve()}\n{mid_v.resolve()}\n", encoding="utf-8")
+    flr = parse_filelist(str(fl), index_cwd=str(tmp_path))
+    req = ConnectivityRequest(
+        checks=(
+            ConnectivityCheck(
+                "top.u.chain_in[0]",
+                "top.u.chain_in[1]",
+                check_id="bus",
+            ),
+        ),
+        top="top",
+    )
+    batch, index, state = run_path_walk_connect(
+        req,
+        flr,
+        top="top",
+        no_cache=True,
+        connect_phase="text",
+    )
+    body = format_connect_hierarchy_tsv(
+        batch.results,
+        state.rows_by_path,
+        phase="text",
+        index=index,
+        top="top",
+    )
+    rows = _tsv_rows(body)
+    port_hits = [
+        r
+        for r in rows
+        if r["check_id"] == "bus" and r["kind"] == "port" and r["status"] == "hit"
+    ]
+    assert len(port_hits) == 2
+    for row in port_hits:
+        assert Path(row["rtl"]).name == "mid.v"
+        assert row["module"] == "mid"
+
+
 def test_compact_hierarchy_evidence_drops_redundant_inst_hits():
     from hierwalk.connect_artifacts import (
         HierarchyEvidenceRow,

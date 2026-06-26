@@ -1441,6 +1441,29 @@ class PathWalkState:
                 cur = nxt
                 remainder = ""
                 break
+            if self._is_target_terminal_tail(cur, remainder, path):
+                row = self.rows_by_path.get(cur)
+                if row is not None:
+                    from hierwalk.connect_endpoints import _port_exists
+
+                    seg = self._inst_leaf_prefix(remainder)
+                    body = self._cached_module_body(row)
+                    port_hit = _port_exists(
+                        self.index, row, remainder, top=self.top
+                    )
+                    inst_hit = bool(
+                        seg and body and probe_inst_leaf_regex_fast(body, seg)
+                    )
+                    if (
+                        port_hit
+                        and inst_hit
+                        and self._resolve_signal_tail(
+                            cur,
+                            remainder,
+                            target_path=path,
+                        )
+                    ):
+                        return False
             inst_name, edge = self._resolve_child_step(
                 cur,
                 remainder,
