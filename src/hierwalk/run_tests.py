@@ -335,6 +335,16 @@ def _merge_full_index_fields(
     if jobs_raw is not None:
         out = replace(out, jobs=_parse_jobs(jobs_raw))
 
+    connect_jobs_raw = _first_ci(
+        spec,
+        "connect_jobs",
+        "connect-jobs",
+        "conn_jobs",
+        "conn-jobs",
+    )
+    if connect_jobs_raw is not None:
+        out = replace(out, connect_jobs=_parse_jobs(connect_jobs_raw))
+
     if _mapping_get_ci(spec, "low_memory") is not None:
         out = replace(out, low_memory=bool(_mapping_get_ci(spec, "low_memory")))
 

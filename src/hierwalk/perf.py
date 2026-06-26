@@ -151,6 +151,40 @@ def pw_inst_resolve_tier1_max(policy: str) -> int:
     return 12
 
 
+def pw_trace_verbose() -> bool:
+    """Emit tier0/tier1/resolve/miss pw-db trace lines (``HIERWALK_PW_TRACE_VERBOSE=1``)."""
+    raw = os.environ.get("HIERWALK_PW_TRACE_VERBOSE", "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def pw_heartbeat_interval_sec() -> Optional[float]:
+    """
+    Periodic pw-db heartbeat on stderr/log during long resolves.
+
+    ``HIERWALK_PW_HEARTBEAT=1`` uses 30s; ``=60`` uses 60s; unset/0 disables.
+    """
+    raw = os.environ.get("HIERWALK_PW_HEARTBEAT", "").strip().lower()
+    if raw in ("", "0", "off", "false", "no", "disable", "disabled"):
+        return None
+    if raw in ("1", "true", "yes", "on"):
+        return 30.0
+    try:
+        return max(5.0, float(raw))
+    except ValueError:
+        return 30.0
+
+
+def connect_jobs_from_env() -> int:
+    """``HIERWALK_CONNECT_JOBS`` override for path-walk connect-COI parallelism (0=auto)."""
+    raw = os.environ.get("HIERWALK_CONNECT_JOBS", "").strip()
+    if not raw:
+        return 0
+    try:
+        return int(raw)
+    except ValueError:
+        return 0
+
+
 def slow_file_log_threshold_sec() -> Optional[float]:
     """
     Log per-file preprocess/scan timing when a source exceeds this many seconds.

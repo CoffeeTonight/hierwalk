@@ -5,8 +5,9 @@ from __future__ import annotations
 import math
 import os
 import sys
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, Dict, IO, List, Mapping, Optional, Sequence, Tuple, Union
 
@@ -566,6 +567,7 @@ def _connect_pair_text_deduped(
     rows_by_path: Mapping[str, FlatRow],
     dedup_cache: Dict[Tuple[Any, ...], ConnectResult],
     dedup_stats: List[int],
+    dedup_lock: Optional[threading.Lock] = None,
 ) -> ConnectResult:
     lookup = rows_by_path
     ep_a, err_a = resolve_endpoint(
@@ -586,38 +588,45 @@ def _connect_pair_text_deduped(
     )
     errors = list(err_a) + list(err_b)
     key = _text_coi_dedup_key(ep_a, ep_b, errors)
-    dedup_stats[0] += 1
-    hit = dedup_cache.get(key)
-    if hit is not None:
-        return _fanout_text_coi_result(
-            hit,
-            spec_a=endpoint_a,
-            spec_b=endpoint_b,
-            ep_a=ep_a,
-            ep_b=ep_b,
+
+    def _run() -> ConnectResult:
+        dedup_stats[0] += 1
+        hit = dedup_cache.get(key)
+        if hit is not None:
+            return _fanout_text_coi_result(
+                hit,
+                spec_a=endpoint_a,
+                spec_b=endpoint_b,
+                ep_a=ep_a,
+                ep_b=ep_b,
+                check_id=check_id,
+            )
+        dedup_stats[1] += 1
+        result = _connect_pair(
+            endpoint_a,
+            endpoint_b,
+            rows=rows,
+            index=index,
+            top=top,
+            effective_defines=effective_defines,
+            trace=trace,
+            strict_generate=strict_generate,
+            ff_barrier=ff_barrier,
+            over_approximate_if=over_approximate_if,
+            mod_cache=mod_cache,
+            param_ctx_cache=param_ctx_cache,
             check_id=check_id,
+            elab_index=elab_index,
+            rows_by_path=rows_by_path,
+            resolve_param_dims=False,
         )
-    dedup_stats[1] += 1
-    result = _connect_pair(
-        endpoint_a,
-        endpoint_b,
-        rows=rows,
-        index=index,
-        top=top,
-        effective_defines=effective_defines,
-        trace=trace,
-        strict_generate=strict_generate,
-        ff_barrier=ff_barrier,
-        over_approximate_if=over_approximate_if,
-        mod_cache=mod_cache,
-        param_ctx_cache=param_ctx_cache,
-        check_id=check_id,
-        elab_index=elab_index,
-        rows_by_path=rows_by_path,
-        resolve_param_dims=False,
-    )
-    dedup_cache[key] = result
-    return result
+        dedup_cache[key] = result
+        return result
+
+    if dedup_lock is not None:
+        with dedup_lock:
+            return _run()
+    return _run()
 
 
 @dataclass
@@ -892,12 +901,96 @@ class ConnectivitySession:
             perf_warnings=perf_notes,
         )
 
+    def text_check_entry(
+        self,
+        chk: ConnectivityCheck,
+        *,
+        trace: bool,
+        dedup_cache: Dict[Tuple[Any, ...], ConnectResult],
+        dedup_stats: List[int],
+        dedup_lock: Optional[threading.Lock] = None,
+    ) -> ConnectResult:
+        """Single text-phase check with shared coarse COI dedup cache."""
+        lookup = self.rows_by_path
+        if chk.expand is not None and chk.expand.map_kind == "waypoint-fanout":
+            return self.check_entry(chk, trace=trace)
+
+        pairs = expand_check_to_pairs(
+            chk.endpoint_a,
+            chk.endpoint_b,
+            check_id=chk.check_id,
+            expand=chk.expand,
+        )
+        if len(pairs) == 1 and not pairs[0].sub_id:
+            pair = pairs[0]
+            sub_id = chk.check_id or pair.sub_id.strip("[]->")
+            return _connect_pair_text_deduped(
+                pair.endpoint_a,
+                pair.endpoint_b,
+                rows=self.rows,
+                index=self.index,
+                top=self.top,
+                effective_defines=self._effective_defines,
+                trace=trace,
+                strict_generate=self.strict_generate,
+                ff_barrier=self.ff_barrier,
+                over_approximate_if=self.over_approximate_if,
+                mod_cache=self.mod_cache,
+                param_ctx_cache=self.param_ctx_cache,
+                check_id=sub_id,
+                elab_index=self.elab_index,
+                rows_by_path=lookup,
+                dedup_cache=dedup_cache,
+                dedup_stats=dedup_stats,
+                dedup_lock=dedup_lock,
+            )
+
+        fanout_mode = chk.expand.fanout_mode if chk.expand is not None else "all"
+        sub_results: List[ConnectResult] = []
+        for pair in pairs:
+            sub_id = (
+                f"{chk.check_id}{pair.sub_id}"
+                if chk.check_id
+                else pair.sub_id.strip("[]->")
+            )
+            sub_results.append(
+                _connect_pair_text_deduped(
+                    pair.endpoint_a,
+                    pair.endpoint_b,
+                    rows=self.rows,
+                    index=self.index,
+                    top=self.top,
+                    effective_defines=self._effective_defines,
+                    trace=trace,
+                    strict_generate=self.strict_generate,
+                    ff_barrier=self.ff_barrier,
+                    over_approximate_if=self.over_approximate_if,
+                    mod_cache=self.mod_cache,
+                    param_ctx_cache=self.param_ctx_cache,
+                    check_id=sub_id,
+                    elab_index=self.elab_index,
+                    rows_by_path=lookup,
+                    dedup_cache=dedup_cache,
+                    dedup_stats=dedup_stats,
+                    dedup_lock=dedup_lock,
+                )
+            )
+        return aggregate_connect_results(
+            chk.endpoint_a,
+            chk.endpoint_b,
+            sub_results,
+            check_id=chk.check_id,
+            fanout_mode=fanout_mode,
+        )
+
     def run_text_request(
         self,
         request: ConnectivityRequest,
         *,
         trace: Optional[bool] = None,
         on_progress: Optional[Any] = None,
+        jobs: int = 0,
+        record_timing: bool = False,
     ) -> ConnectivityBatchResult:
         """
         Text-conn batch: coarse COI dedup across slice-expanded leaf checks.
@@ -911,84 +1004,41 @@ class ConnectivitySession:
         perf_notes = tuple(waypoint_perf_warnings(request))
         dedup_cache: Dict[Tuple[Any, ...], ConnectResult] = {}
         dedup_stats = [0, 0]
-        results: List[ConnectResult] = []
-        lookup = self.rows_by_path
+        checks = list(request.checks)
+        workers = _resolve_connect_jobs(jobs, len(checks))
+        dedup_lock = threading.Lock() if workers > 1 else None
 
-        for chk in request.checks:
-            if chk.expand is not None and chk.expand.map_kind == "waypoint-fanout":
-                results.append(self.check_entry(chk, trace=use_trace))
-                continue
-
-            pairs = expand_check_to_pairs(
-                chk.endpoint_a,
-                chk.endpoint_b,
-                check_id=chk.check_id,
-                expand=chk.expand,
+        def _one(chk: ConnectivityCheck) -> ConnectResult:
+            t0 = time.perf_counter()
+            result = self.text_check_entry(
+                chk,
+                trace=use_trace,
+                dedup_cache=dedup_cache,
+                dedup_stats=dedup_stats,
+                dedup_lock=dedup_lock,
             )
-            if len(pairs) == 1 and not pairs[0].sub_id:
-                pair = pairs[0]
-                sub_id = chk.check_id or pair.sub_id.strip("[]->")
-                results.append(
-                    _connect_pair_text_deduped(
-                        pair.endpoint_a,
-                        pair.endpoint_b,
-                        rows=self.rows,
-                        index=self.index,
-                        top=self.top,
-                        effective_defines=self._effective_defines,
-                        trace=use_trace,
-                        strict_generate=self.strict_generate,
-                        ff_barrier=self.ff_barrier,
-                        over_approximate_if=self.over_approximate_if,
-                        mod_cache=self.mod_cache,
-                        param_ctx_cache=self.param_ctx_cache,
-                        check_id=sub_id,
-                        elab_index=self.elab_index,
-                        rows_by_path=lookup,
-                        dedup_cache=dedup_cache,
-                        dedup_stats=dedup_stats,
-                    )
-                )
-                continue
+            if record_timing:
+                from hierwalk.verification_timing import record_connect_check
 
-            fanout_mode = chk.expand.fanout_mode if chk.expand is not None else "all"
-            sub_results: List[ConnectResult] = []
-            for pair in pairs:
-                sub_id = (
-                    f"{chk.check_id}{pair.sub_id}"
-                    if chk.check_id
-                    else pair.sub_id.strip("[]->")
-                )
-                sub_results.append(
-                    _connect_pair_text_deduped(
-                        pair.endpoint_a,
-                        pair.endpoint_b,
-                        rows=self.rows,
-                        index=self.index,
-                        top=self.top,
-                        effective_defines=self._effective_defines,
-                        trace=use_trace,
-                        strict_generate=self.strict_generate,
-                        ff_barrier=self.ff_barrier,
-                        over_approximate_if=self.over_approximate_if,
-                        mod_cache=self.mod_cache,
-                        param_ctx_cache=self.param_ctx_cache,
-                        check_id=sub_id,
-                        elab_index=self.elab_index,
-                        rows_by_path=lookup,
-                        dedup_cache=dedup_cache,
-                        dedup_stats=dedup_stats,
-                    )
-                )
-            results.append(
-                aggregate_connect_results(
-                    chk.endpoint_a,
-                    chk.endpoint_b,
-                    sub_results,
+                record_connect_check(
                     check_id=chk.check_id,
-                    fanout_mode=fanout_mode,
+                    endpoint_a=str(chk.endpoint_a),
+                    endpoint_b=str(chk.endpoint_b),
+                    elapsed_sec=time.perf_counter() - t0,
                 )
-            )
+            return result
+
+        if workers <= 1 or len(checks) < 4:
+            results = [_one(chk) for chk in checks]
+        else:
+            ordered: List[Optional[ConnectResult]] = [None] * len(checks)
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {
+                    pool.submit(_one, chk): idx for idx, chk in enumerate(checks)
+                }
+                for fut in as_completed(futures):
+                    ordered[futures[fut]] = fut.result()
+            results = [r for r in ordered if r is not None]
 
         leaves, unique = dedup_stats[0], dedup_stats[1]
         if on_progress is not None and leaves > unique:
@@ -996,6 +1046,8 @@ class ConnectivitySession:
                 f"connect: text-coi dedup leaves={leaves} unique={unique} "
                 f"saved={leaves - unique}"
             )
+        if on_progress is not None and workers > 1:
+            on_progress(f"connect: text-coi parallel workers={workers}")
         return ConnectivityBatchResult(
             results=tuple(results),
             modules_cached=self.modules_cached,

@@ -549,7 +549,10 @@ def path_walk_trace_show_message(message: str) -> bool:
 
     Search steps (tier0/tier1 scans, candidate tries, expands) are suppressed;
     resolved nodes and pw-db hits are kept. Miss lines are kept on failure.
+    ``HIERWALK_PW_TRACE_VERBOSE=1`` shows all pw-db search steps.
     """
+    from hierwalk.perf import pw_trace_verbose
+
     msg = message.strip()
     if not msg:
         return False
@@ -559,11 +562,17 @@ def path_walk_trace_show_message(message: str) -> bool:
         return True
     if msg.startswith("recovery-pass "):
         return True
+    if msg.startswith("pw-db heartbeat "):
+        return True
+    if msg.startswith("connect-pipeline "):
+        return True
     if msg.startswith("walk target="):
         return False
     if msg.startswith("pw-db v"):
         return False
     if msg.startswith("pw-db "):
+        if pw_trace_verbose():
+            return True
         if " load failed " in msg:
             return True
         return " edge hit " in msg or msg.startswith("pw-db   hit ")

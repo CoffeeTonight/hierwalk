@@ -224,6 +224,7 @@ class RunConfig:
     ignore_hierarchy: Tuple[str, ...] = ()
     trace_max_depth: Optional[int] = None
     jobs: int = 0
+    connect_jobs: int = 0
     low_memory: bool = False
     cache_dir: Optional[str] = None
     no_cache: bool = False

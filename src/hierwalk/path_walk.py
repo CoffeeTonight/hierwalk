@@ -37,7 +37,11 @@ from hierwalk.filelist import FilelistResult
 from hierwalk.ignore_path import resolve_ignore_path_patterns, source_path_matches
 from hierwalk.index import DesignIndex, _ctx_key
 from hierwalk.inst_scan import expand_inst_names, probe_inst_leaf_regex_fast
-from hierwalk.lazy_scope import endpoint_specs_from_request, hierarchy_prefixes
+from hierwalk.lazy_scope import (
+    endpoint_specs_from_checks,
+    endpoint_specs_from_request,
+    hierarchy_prefixes,
+)
 from hierwalk.library_scan import scan_library_modules
 from hierwalk.models import FlatRow, InstanceEdge
 from hierwalk.params import resolve_param_map
@@ -2414,6 +2418,29 @@ def _extend_path_walk_for_specs(
     state.flush_pending_misses()
 
 
+def _walk_hierarchy_for_check(
+    state: PathWalkState,
+    chk,
+    *,
+    jobs: int = 0,
+    seen_lca: Optional[Set[Tuple[str, str]]] = None,
+) -> None:
+    """Per-check hierarchy walk + deduped LCA subtree (J-003)."""
+    specs = endpoint_specs_from_checks([chk])
+    if specs:
+        _walk_specs_with_recovery(state, specs, jobs=jobs)
+    a = _cached_walk_target_from_spec(chk.endpoint_a, state)
+    b = _cached_walk_target_from_spec(chk.endpoint_b, state)
+    key = (a, b)
+    if seen_lca is not None:
+        if key in seen_lca:
+            return
+        seen_lca.add(key)
+    if state._is_walk_blocked(a) and state._is_walk_blocked(b):
+        return
+    state.ensure_lca_subtree(a, b)
+
+
 def _extend_path_walk_connect(
     state: PathWalkState,
     request: ConnectivityRequest,
@@ -2426,22 +2453,124 @@ def _extend_path_walk_connect(
     if on_progress:
         jobs_note = "off" if jobs <= 1 else str(jobs)
         on_progress(
-            f"path-walk: {len(specs)} endpoint spec(s)"
-            f" ({unique_n} unique, trie walk, jobs={jobs_note})"
+            f"path-walk: {len(request.checks)} check(s), {len(specs)} endpoint spec(s)"
+            f" ({unique_n} unique, per-check walk, jobs={jobs_note})"
         )
-    _walk_specs_with_recovery(state, specs, jobs=jobs)
     seen_lca: Set[Tuple[str, str]] = set()
     for chk in request.checks:
-        a = _cached_walk_target_from_spec(chk.endpoint_a, state)
-        b = _cached_walk_target_from_spec(chk.endpoint_b, state)
-        key = (a, b)
-        if key in seen_lca:
-            continue
-        seen_lca.add(key)
-        if state._is_walk_blocked(a) and state._is_walk_blocked(b):
-            continue
-        state.ensure_lca_subtree(a, b)
+        _walk_hierarchy_for_check(state, chk, jobs=jobs, seen_lca=seen_lca)
     state.flush_pending_misses()
+
+
+def _init_path_walk_state_shell(
+    index: DesignIndex,
+    top: str,
+    mod_db,
+    *,
+    on_progress: Optional[Callable[[str], None]] = None,
+    trace_stream: Optional[TextIO] = None,
+    trace_log_fh: Optional[TextIO] = None,
+) -> PathWalkState:
+    state = PathWalkState(
+        index=index,
+        top=top,
+        mod_db=mod_db,
+        on_progress=on_progress,
+        trace_stream=trace_stream,
+        _trace_log=trace_log_fh,
+    )
+    _wire_db_trace_to_state(mod_db, state)
+    state.ensure_root()
+    return state
+
+
+def _pipeline_path_walk_text_conn(
+    state: PathWalkState,
+    request: ConnectivityRequest,
+    conn_session: ConnectivitySession,
+    *,
+    hierarchy_jobs: int = 0,
+    connect_jobs: int = 0,
+    on_progress: Optional[Callable[[str], None]] = None,
+) -> ConnectivityBatchResult:
+    """Interleave per-check hierarchy walk with parallel text-COI workers (J-003/J-004)."""
+    from hierwalk.connect_artifacts import prepare_text_connect_request
+    from hierwalk.connectivity import _resolve_connect_jobs
+    from hierwalk.verification_timing import record_connect_check
+
+    text_request = prepare_text_connect_request(request)
+    workers = _resolve_connect_jobs(connect_jobs, len(request.checks))
+    use_trace = text_request.trace
+    dedup_cache: Dict = {}
+    dedup_stats = [0, 0]
+    dedup_lock = threading.Lock()
+    seen_lca: Set[Tuple[str, str]] = set()
+    results: List = [None] * len(request.checks)
+
+    state._emit_walk(
+        f"connect-pipeline begin checks={len(request.checks)} "
+        f"hierarchy_jobs={hierarchy_jobs} connect_jobs={workers}"
+    )
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {}
+        for idx, chk in enumerate(request.checks):
+            t_walk = time.perf_counter()
+            _walk_hierarchy_for_check(
+                state,
+                chk,
+                jobs=hierarchy_jobs,
+                seen_lca=seen_lca,
+            )
+            walk_ms = (time.perf_counter() - t_walk) * 1000.0
+            state._emit_walk(
+                f"connect-pipeline hierarchy-ready check={chk.check_id or idx} "
+                f"ms={walk_ms:.1f}"
+            )
+            t0 = time.perf_counter()
+
+            def _run_check(
+                _chk=chk,
+                _idx=idx,
+                _t0=t0,
+            ):
+                conn_session.resolve_param_dims = False
+                result = conn_session.text_check_entry(
+                    _chk,
+                    trace=use_trace,
+                    dedup_cache=dedup_cache,
+                    dedup_stats=dedup_stats,
+                    dedup_lock=dedup_lock,
+                )
+                record_connect_check(
+                    check_id=_chk.check_id,
+                    endpoint_a=str(_chk.endpoint_a),
+                    endpoint_b=str(_chk.endpoint_b),
+                    elapsed_sec=time.perf_counter() - _t0,
+                )
+                return _idx, result
+
+            futures[pool.submit(_run_check)] = idx
+        for fut in as_completed(futures):
+            idx, result = fut.result()
+            results[idx] = result
+
+    state.flush_pending_misses()
+    leaves, unique = dedup_stats[0], dedup_stats[1]
+    if on_progress is not None and leaves > unique:
+        on_progress(
+            f"connect: text-coi dedup leaves={leaves} unique={unique} "
+            f"saved={leaves - unique}"
+        )
+    state._emit_walk(
+        f"connect-pipeline done checks={len(results)} workers={workers}"
+    )
+    return ConnectivityBatchResult(
+        results=tuple(results),
+        modules_cached=conn_session.modules_cached,
+        text_coi_leaves=leaves,
+        text_coi_unique=unique,
+    )
 
 
 def _path_walk_trace_emit(
@@ -2951,6 +3080,7 @@ def run_path_walk_connect(
     trace_log_path: Optional[Path] = None,
     reuse_suite_session: bool = False,
     jobs: int = 0,
+    connect_jobs: int = 0,
     connect_output_dir: Optional[Path] = None,
     connect_output_name: str = "conn.tsv",
     connect_phase: str = "both",
@@ -2958,15 +3088,25 @@ def run_path_walk_connect(
     """
     Path-walk batch connectivity: on-demand RTL + shared :class:`ConnectivitySession`.
 
-    Hierarchy walk honors ``jobs`` at trie branch points; connect COI checks
-    still use ``jobs=1`` so ``mod_cache`` is shared across all checks.
+    Hierarchy walk honors ``jobs`` at trie branch points. ``connect_jobs`` runs
+    text-COI in parallel (shared ``mod_cache``); pipeline mode interleaves
+    per-check hierarchy with connect workers when ``connect_jobs`` > 1.
     """
+    from hierwalk.connectivity import _resolve_connect_jobs
+    from hierwalk.perf import connect_jobs_from_env
     defines = dict(fl.defines)
     defines.update(extra_defines or {})
     defines.update(request.defines)
     phase = connect_phase if connect_phase in ("text", "logical", "both") else "both"
     do_text = phase in ("text", "both")
     do_logical = phase in ("logical", "both")
+    effective_connect_jobs = connect_jobs if connect_jobs != 0 else connect_jobs_from_env()
+    conn_workers = _resolve_connect_jobs(effective_connect_jobs, len(request.checks))
+    use_connect_pipeline = (
+        do_text
+        and conn_workers > 1
+        and len(request.checks) >= 2
+    )
 
     trace_log_fh: Optional[TextIO] = None
     opened_log = False
@@ -3035,17 +3175,27 @@ def run_path_walk_connect(
             tops = resolve_top_modules(index, top=top, filelist_tops=fl.top_modules)
             top_name = tops[0]
 
-            state = build_path_walk_state(
-                index,
-                top_name,
-                request,
-                mod_db,
-                on_progress=on_progress,
-                trace_stream=trace_stream,
-                trace_log_fh=trace_log_fh,
-                close_trace_log=False,
-                jobs=jobs,
-            )
+            if use_connect_pipeline and not reuse_suite_session:
+                state = _init_path_walk_state_shell(
+                    index,
+                    top_name,
+                    mod_db,
+                    on_progress=on_progress,
+                    trace_stream=trace_stream,
+                    trace_log_fh=trace_log_fh,
+                )
+            else:
+                state = build_path_walk_state(
+                    index,
+                    top_name,
+                    request,
+                    mod_db,
+                    on_progress=on_progress,
+                    trace_stream=trace_stream,
+                    trace_log_fh=trace_log_fh,
+                    close_trace_log=False,
+                    jobs=jobs,
+                )
         state._sync_db_stats()
         if on_progress:
             on_progress(
@@ -3118,13 +3268,26 @@ def run_path_walk_connect(
                 try:
                     state._emit_walk(
                         f"connect-coi begin checks={len(text_request.checks)} "
-                        f"rows={len(walk_rows)} resolve_param_dims=0"
+                        f"rows={len(walk_rows)} resolve_param_dims=0 "
+                        f"connect_jobs={conn_workers}"
                     )
                     try:
-                        batch = conn_session.run_text_request(
-                            text_request,
-                            on_progress=on_progress,
-                        )
+                        if use_connect_pipeline and not reuse_suite_session:
+                            batch = _pipeline_path_walk_text_conn(
+                                state,
+                                request,
+                                conn_session,
+                                hierarchy_jobs=jobs,
+                                connect_jobs=effective_connect_jobs,
+                                on_progress=on_progress,
+                            )
+                        else:
+                            batch = conn_session.run_text_request(
+                                text_request,
+                                on_progress=on_progress,
+                                jobs=effective_connect_jobs,
+                                record_timing=True,
+                            )
                         text_results = list(batch.results)
                         text_modules_cached = batch.modules_cached
                     except Exception as exc:
@@ -3210,7 +3373,7 @@ def run_path_walk_connect(
                     try:
                         refined_batch = conn_session.run_request(
                             request,
-                            jobs=1,
+                            jobs=effective_connect_jobs,
                             on_progress=on_progress,
                         )
                     except Exception as exc:

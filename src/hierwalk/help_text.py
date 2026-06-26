@@ -50,6 +50,9 @@ environment:
   HIERWALK_PW_DB_PREFETCH    legacy alias: 1 => after_verify
   HIERWALK_PW_DB_PREFETCH_WAIT  wait for post-verify DB build (default 1; 0=detach)
   HIERWALK_PW_DB_PREFETCH_MAX   cap post-verify DB files per run (0 = no limit)
+  HIERWALK_PW_TRACE_VERBOSE  show tier0/tier1 pw-db search steps on stderr (1=on)
+  HIERWALK_PW_HEARTBEAT      periodic pw-db progress during long resolves (1=30s)
+  HIERWALK_CONNECT_JOBS      path-walk text/logical COI worker count (0=auto)
   HIERWALK_LOG_SLOW_FILES    log per-file preprocess/scan timing (1=10s, or seconds)
   HIERWALK_LOW_MEMORY_AUTO   auto fused index above N sources (default 1500; 0=off)
   HCH_INDEX_CWD               default --index-cwd for -F filelists"""
@@ -211,9 +214,10 @@ Example
 Path-walk connect (on-demand index)
 -----------------------------------
   mode: path-walk | path_walk
-      Skips full filelist index. Walks endpoint instance paths, loads RTL files
-      on demand, expands LCA subtrees per check, then runs connect batch with a
-      shared module graph cache (jobs forced to 1 for cache reuse).
+      Skips full filelist index. Per-check hierarchy walk (jobs for trie branches),
+      then text/logical COI with shared mod_cache. connect_jobs (JSON or
+      HIERWALK_CONNECT_JOBS) parallelizes COI; pipeline overlaps hierarchy of
+      check N+1 with COI of check N when connect_jobs > 1.
 
   Requires connect / check-connect-batch / check-connect plus top.
 

@@ -429,6 +429,7 @@ def execute_run(cfg: RunConfig, ap) -> int:
                     extra_defines=extra_defines,
                     reuse_suite_session=cfg.flat_suite_step,
                     jobs=cfg.jobs,
+                    connect_jobs=cfg.connect_jobs,
                     connect_output_dir=work_dir,
                     connect_output_name=cfg.output,
                     connect_phase=phase,
