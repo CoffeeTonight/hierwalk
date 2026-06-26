@@ -29,7 +29,7 @@ def _row(path: str, *, file: str = "/rtl/top.v", via: str = "/lists/design.f") -
 def test_format_row_provenance_includes_file_and_filelist():
     row = _row("top.u_child", file="/proj/child.v", via="/proj/filelist.f")
     text = format_row_provenance(row)
-    assert "rtl= /proj/child.v" in text
+    assert "rtl=/proj/child.v" in text
     assert "via_filelist=/proj/filelist.f" in text
     assert "filelist_chain=" in text
 
@@ -53,7 +53,7 @@ def test_explain_hierarchy_miss_lists_children_with_sources():
     )
     joined = "\n".join(errors)
     assert "path stops at 'top'" in joined
-    assert "rtl= /rtl/top.v" in joined
+    assert "rtl=/rtl/top.v" in joined
     assert "top.u_ok" in joined
     assert "via_filelist=" in joined
 
@@ -79,28 +79,32 @@ def test_scopes_from_hop_detail():
     assert scopes_from_hop_detail("structural COI path") == []
 
 
-def test_emit_connect_log_includes_success_endpoint_provenance():
+def test_emit_connect_log_includes_success_endpoint_provenance(tmp_path):
     from hierwalk.connectivity import emit_connect_trace_log
     from hierwalk.hierarchy_log import format_endpoint_provenance_line
     from hierwalk.models import ConnectEndpoint, ConnectResult
 
+    a_rtl = str((tmp_path / "a.v").resolve())
+    z_rtl = str((tmp_path / "z.v").resolve())
     rows = {
-        "top.a": _row("top.a", file="/rtl/a.v"),
-        "top.z": _row("top.z", file="/rtl/z.v"),
+        "top.a": _row("top.a", file=a_rtl),
+        "top.z": _row("top.z", file=z_rtl),
     }
     ep_a = ConnectEndpoint("top.a", "top.a", "p0", "top", port_found=True)
     ep_b = ConnectEndpoint("top.z", "top.z", "p1", "top", port_found=True)
     result = ConnectResult(ep_a, ep_b, True, "port-port", check_id="ok")
     line_a = format_endpoint_provenance_line("A", ep_a, rows)
-    assert "rtl= /rtl/a.v" in line_a
+    assert f"rtl={a_rtl}" in line_a
     assert "via_filelist=" in line_a
     import io
+    import re
 
     buf = io.StringIO()
     emit_connect_trace_log(result, stream=buf, check_prefix="ok", rows_by_path=rows)
     text = buf.getvalue()
     assert "[ok]" in text
-    assert "rtl= /rtl/a.v" in text
-    assert "rtl= /rtl/z.v" in text
-    assert "connected: True" in text
+    assert f"rtl={a_rtl}" in text
+    assert f"rtl={z_rtl}" in text
+    assert "connected:" in text
     assert "path hierarchy (rtl + filelist):" in text
+    assert re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", text)

@@ -15,6 +15,7 @@ from hierwalk.connect_scan import (
     net_representative,
 )
 from hierwalk.index import DesignIndex
+from hierwalk.connect_walk_log import CoiWalkDiagnostic
 from hierwalk.models import ConnectHop, ElabIndex, FlatRow
 from hierwalk.params import resolve_param_expr
 
@@ -179,6 +180,71 @@ class _SearchCtx:
 
 def _heuristic_distance(ctx: _SearchCtx, scope: str) -> int:
     return ctx.dist_to_goal.get(scope, 10**9)
+
+
+def _distance_to_scope(ctx: _SearchCtx, scope: str, target_scope: str) -> int:
+    if scope == target_scope:
+        return 0
+    depth_a = ctx.depth_by_path.get(scope, 10**9)
+    depth_b = ctx.depth_by_path.get(target_scope, 10**9)
+    return abs(depth_a - depth_b) + _heuristic_distance(ctx, scope)
+
+
+def _pick_nearest_state(
+    seen: Set[NetState],
+    target_scope: str,
+    ctx: _SearchCtx,
+) -> Optional[NetState]:
+    if not seen:
+        return None
+    return min(
+        seen,
+        key=lambda s: (
+            _distance_to_scope(ctx, s[0], target_scope),
+            len(s[0]),
+            s[0],
+            s[1],
+        ),
+    )
+
+
+def _scopes_from_search(
+    seen_f: Set[NetState],
+    seen_b: Set[NetState],
+    ctx: _SearchCtx,
+) -> Tuple[str, ...]:
+    scopes = {s[0] for s in seen_f} | {s[0] for s in seen_b}
+    return tuple(sorted(scopes, key=lambda p: (ctx.depth_by_path.get(p, 10**9), p)))
+
+
+def _failure_walk_diagnostic(
+    *,
+    seen_f: Set[NetState],
+    seen_b: Set[NetState],
+    prev_f: Mapping[NetState, PrevStep],
+    prev_b: Mapping[NetState, PrevStep],
+    start_key: NetState,
+    goal_key: NetState,
+    ctx: _SearchCtx,
+    trace: bool,
+    modules_parsed: int,
+) -> CoiWalkDiagnostic:
+    nearest_a = _pick_nearest_state(seen_f, goal_key[0], ctx) or start_key
+    nearest_b = _pick_nearest_state(seen_b, start_key[0], ctx) or goal_key
+    hops_a: List[ConnectHop] = []
+    hops_b: List[ConnectHop] = []
+    if nearest_a != start_key and nearest_a in prev_f:
+        hops_a = _reconstruct_forward(start_key, nearest_a, prev_f)
+    if nearest_b != goal_key and nearest_b in prev_b:
+        hops_b = _reconstruct_forward(goal_key, nearest_b, prev_b)
+    return CoiWalkDiagnostic(
+        nearest_from_a=nearest_a,
+        nearest_from_b=nearest_b,
+        hops_from_a=tuple(hops_a),
+        hops_from_b=tuple(hops_b),
+        scopes_visited=_scopes_from_search(seen_f, seen_b, ctx),
+        modules_parsed=modules_parsed,
+    )
 
 
 def _cached_param_ctx(ctx: _SearchCtx, row: FlatRow) -> Mapping[str, str]:
@@ -572,7 +638,7 @@ def _bidirectional_coi(
     param_ctx_cache: Optional[Dict[str, Mapping[str, str]]] = None,
     elab_index: Optional[ElabIndex] = None,
     resolve_param_dims: bool = True,
-) -> Tuple[bool, List[ConnectHop], int]:
+) -> Tuple[bool, List[ConnectHop], int, Optional[CoiWalkDiagnostic]]:
     over_approx = _resolve_over_approximate_if(strict_generate, over_approximate_if)
     cache = mod_cache if mod_cache is not None else {}
     ctx = _build_search_ctx(
@@ -592,7 +658,7 @@ def _bidirectional_coi(
 
     start_row = ctx.rows_by_path.get(start[0])
     if start_row is None:
-        return False, [], 0
+        return False, [], 0, None
     start_ctx = _cached_param_ctx(ctx, start_row)
     start_idx = _module_index(
         cache,
@@ -612,14 +678,14 @@ def _bidirectional_coi(
     )
 
     if _goal_match(ctx, start_key):
-        return True, [], len(cache)
+        return True, [], len(cache), None
 
     if goal_scope_only:
         goal_key = (goal[0], "")
     else:
         goal_row = ctx.rows_by_path.get(goal[0])
         if goal_row is None:
-            return False, [], len(cache)
+            return False, [], len(cache), None
         goal_ctx = _cached_param_ctx(ctx, goal_row)
         goal_idx = _module_index(
             cache,
@@ -676,8 +742,13 @@ def _bidirectional_coi(
 
     mod_n = len(cache)
 
-    def _done(ok: bool, hops: List[ConnectHop]) -> Tuple[bool, List[ConnectHop], int]:
-        return ok, hops, len(cache)
+    def _done(
+        ok: bool,
+        hops: List[ConnectHop],
+        *,
+        diag: Optional[CoiWalkDiagnostic] = None,
+    ) -> Tuple[bool, List[ConnectHop], int, Optional[CoiWalkDiagnostic]]:
+        return ok, hops, len(cache), diag
 
     while front_f or front_b:
         hit = _meet(front_f, seen_b, ctx)
@@ -725,7 +796,18 @@ def _bidirectional_coi(
             _reconstruct_bidirectional(hit, prev_f, prev_b, start_key, goal_key, trace),
         )
 
-    return False, [], len(cache)
+    diag = _failure_walk_diagnostic(
+        seen_f=seen_f,
+        seen_b=seen_b,
+        prev_f=prev_f,
+        prev_b=prev_b,
+        start_key=start_key,
+        goal_key=goal_key,
+        ctx=ctx,
+        trace=trace,
+        modules_parsed=len(cache),
+    )
+    return False, [], len(cache), diag
 
 
 def _forward_coi_to_scope(
@@ -744,7 +826,7 @@ def _forward_coi_to_scope(
     param_ctx_cache: Optional[Dict[str, Mapping[str, str]]] = None,
     elab_index: Optional[ElabIndex] = None,
     resolve_param_dims: bool = True,
-) -> Tuple[bool, List[ConnectHop], int]:
+) -> Tuple[bool, List[ConnectHop], int, Optional[CoiWalkDiagnostic]]:
     over_approx = _resolve_over_approximate_if(strict_generate, over_approximate_if)
     cache = mod_cache if mod_cache is not None else {}
     ctx = _build_search_ctx(
@@ -763,7 +845,7 @@ def _forward_coi_to_scope(
     )
     start_row = ctx.rows_by_path.get(start[0])
     if start_row is None:
-        return False, [], 0
+        return False, [], 0, None
     start_ctx = _cached_param_ctx(ctx, start_row)
     start_idx = _module_index(
         cache,
@@ -782,7 +864,7 @@ def _forward_coi_to_scope(
         net_rep_cache=ctx.net_rep_cache,
     )
     if start_key[0] == goal_scope:
-        return True, [], len(cache)
+        return True, [], len(cache), None
 
     seen: Set[NetState] = {start_key}
     front: Set[NetState] = {start_key}
@@ -805,11 +887,31 @@ def _forward_coi_to_scope(
                     mod_n = len(cache)
                     if trace:
                         hops = _reconstruct_forward(start_key, nxt, prev)
-                        return True, hops, mod_n
-                    return True, [ConnectHop(kind="coi", detail="structural COI path")], mod_n
+                        return True, hops, mod_n, None
+                    return (
+                        True,
+                        [ConnectHop(kind="coi", detail="structural COI path")],
+                        mod_n,
+                        None,
+                    )
                 next_front.add(nxt)
         front = next_front
-    return False, [], len(cache)
+    goal_key = (goal_scope, "")
+    nearest = _pick_nearest_state(seen, goal_scope, ctx) or start_key
+    hops_a: List[ConnectHop] = []
+    if nearest != start_key and nearest in prev:
+        hops_a = _reconstruct_forward(start_key, nearest, prev)
+    diag = CoiWalkDiagnostic(
+        nearest_from_a=nearest,
+        nearest_from_b=goal_key,
+        hops_from_a=tuple(hops_a),
+        hops_from_b=(),
+        scopes_visited=tuple(
+            sorted({s[0] for s in seen}, key=lambda p: (ctx.depth_by_path.get(p, 10**9), p))
+        ),
+        modules_parsed=len(cache),
+    )
+    return False, [], len(cache), diag
 
 
 def _reconstruct_forward(

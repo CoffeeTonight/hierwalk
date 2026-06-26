@@ -61,6 +61,16 @@ def colorize_path_walk_miss_reason(message: str, *, enable: bool = True) -> str:
     )
 
 
+def resolve_absolute_rtl_path(file_path: str) -> str:
+    """Normalize an RTL path string to an absolute filesystem path."""
+    if not file_path:
+        return ""
+    try:
+        return str(Path(file_path).expanduser().resolve())
+    except (OSError, RuntimeError):
+        return file_path
+
+
 def provenance_fields(
     scope: str,
     rows_by_path: Mapping[str, FlatRow],
@@ -76,7 +86,7 @@ def provenance_fields(
         }
     return {
         "module": row.module,
-        "rtl": str(row.file or ""),
+        "rtl": resolve_absolute_rtl_path(row.file or ""),
         "via_filelist": str(row.via_filelist or ""),
         "filelist_chain": str(row.filelist_chain or ""),
     }
@@ -101,7 +111,8 @@ def format_row_provenance(row: FlatRow, *, compact: bool = False) -> str:
     """RTL file + filelist chain for one elaborated instance row."""
     parts = [f"module={row.module}"]
     if row.file:
-        parts.append(f"rtl={row.file}" if not compact else f"rtl={Path(row.file).name}")
+        rtl = resolve_absolute_rtl_path(row.file) if not compact else Path(row.file).name
+        parts.append(f"rtl={rtl}")
     if row.via_filelist:
         via = row.via_filelist if not compact else Path(row.via_filelist).name
         parts.append(f"via_filelist={via}")

@@ -543,6 +543,8 @@ def _merge_one_connect_result(orig: ConnectResult, ref: ConnectResult) -> None:
     orig.note = ref.note
     orig.errors = list(ref.errors)
     orig.hops = list(ref.hops)
+    orig.walk_notes = list(ref.walk_notes)
+    orig.coi_walk = ref.coi_walk
     orig.endpoint_a = ref.endpoint_a
     orig.endpoint_b = ref.endpoint_b
     if text_flag is not None:

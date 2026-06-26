@@ -72,50 +72,62 @@ def format_connect_trace_report(
     rows_by_path: Optional[Mapping[str, FlatRow]] = None,
 ) -> str:
     """Multi-line evidence report for a connectivity result."""
-    from hierwalk.hierarchy_log import (
-        format_endpoint_provenance_line,
-        format_scopes_provenance_lines,
-        hierarchy_spine_between,
-        scopes_from_hop_detail,
-    )
+    import io
 
-    lines = [
-        f"check: {result.endpoint_a.spec} -> {result.endpoint_b.spec}",
-        f"connected: {result.connected}  mode: {result.mode}  note: {result.note}",
-    ]
-    if rows_by_path is not None:
-        lines.append(format_endpoint_provenance_line("A", result.endpoint_a, rows_by_path))
-        lines.append(format_endpoint_provenance_line("B", result.endpoint_b, rows_by_path))
-    if result.errors:
-        lines.append("errors:")
-        lines.extend(f"  - {e}" for e in result.errors)
-    if result.connected and rows_by_path is not None:
-        spine = hierarchy_spine_between(
-            result.endpoint_a.inst_path,
-            result.endpoint_b.inst_path,
+    from hierwalk.connect_walk_log import emit_connect_walk_report, format_connect_log_line
+    from hierwalk.hierarchy_log import format_endpoint_provenance_line
+
+    buf = io.StringIO()
+    prefix = "[hier-walk connect]"
+    if result.check_id:
+        prefix = f"{prefix} [{result.check_id}]"
+    buf.write(
+        format_connect_log_line(
+            f"{result.endpoint_a.spec} -> {result.endpoint_b.spec}",
+            prefix=prefix,
         )
-        if spine:
-            lines.append("path hierarchy (rtl + filelist):")
-            lines.extend(
-                format_scopes_provenance_lines(spine, rows_by_path, indent="  ")
+        + "\n"
+    )
+    if rows_by_path is not None:
+        buf.write(
+            format_connect_log_line(
+                format_endpoint_provenance_line("A", result.endpoint_a, rows_by_path),
+                prefix=f"{prefix}  ",
             )
-    if result.connected and result.hops:
-        lines.append("path evidence:")
-        for i, hop in enumerate(result.hops, 1):
-            lines.append(f"  {i}. {format_connect_hop(hop)}")
-            if rows_by_path is not None:
-                hop_scopes = scopes_from_hop_detail(hop.detail)
-                if hop_scopes:
-                    lines.extend(
-                        format_scopes_provenance_lines(
-                            hop_scopes,
-                            rows_by_path,
-                            indent="    ",
-                        )
-                    )
-    elif result.connected:
-        lines.append("path evidence: (no hop detail; enable connect_trace / connect_log)")
-    return "\n".join(lines) + "\n"
+            + "\n"
+        )
+        buf.write(
+            format_connect_log_line(
+                format_endpoint_provenance_line("B", result.endpoint_b, rows_by_path),
+                prefix=f"{prefix}  ",
+            )
+            + "\n"
+        )
+    if result.errors:
+        for err in result.errors:
+            buf.write(format_connect_log_line(f"error: {err}", prefix=f"{prefix}  ") + "\n")
+    if result.connected:
+        buf.write(
+            format_connect_log_line(
+                f"connected: {result.connected}  mode: {result.mode}  note: {result.note}",
+                prefix=f"{prefix}  ",
+            )
+            + "\n"
+        )
+    else:
+        buf.write(
+            format_connect_log_line(f"not connected ({result.note})", prefix=f"{prefix}  ")
+            + "\n"
+        )
+    if rows_by_path is not None:
+        emit_connect_walk_report(
+            result,
+            stream=buf,
+            prefix=prefix,
+            rows_by_path=rows_by_path,
+            diagnostic=result.coi_walk,
+        )
+    return buf.getvalue()
 
 
 def emit_connect_trace_log(
@@ -125,7 +137,7 @@ def emit_connect_trace_log(
     check_prefix: str = "",
     rows_by_path: Optional[Mapping[str, FlatRow]] = None,
 ) -> None:
-    """Emit endpoint provenance and path evidence for one connect result."""
+    """Emit endpoint provenance and COI walk evidence for one connect result."""
     if result.sub_results:
         for sub in result.sub_results:
             emit_connect_trace_log(
@@ -135,68 +147,50 @@ def emit_connect_trace_log(
                 rows_by_path=rows_by_path,
             )
         return
-    from hierwalk.hierarchy_log import (
-        emit_scopes_provenance_log,
-        format_endpoint_provenance_line,
-        hierarchy_spine_between,
-        scopes_from_hop_detail,
+    from hierwalk.connect_walk_log import (
+        _emit_line,
+        emit_connect_walk_report,
     )
+    from hierwalk.hierarchy_log import format_endpoint_provenance_line
 
     prefix = "[hier-walk connect]"
     if check_prefix:
         prefix = f"{prefix} [{check_prefix}]"
-    header = f"{prefix} {result.endpoint_a.spec} -> {result.endpoint_b.spec}"
-    print(header, file=stream, flush=True)
+    _emit_line(
+        stream,
+        f"{result.endpoint_a.spec} -> {result.endpoint_b.spec}",
+        prefix=prefix,
+    )
     if rows_by_path is not None:
-        print(
-            f"{prefix}   {format_endpoint_provenance_line('A', result.endpoint_a, rows_by_path)}",
-            file=stream,
-            flush=True,
+        _emit_line(
+            stream,
+            format_endpoint_provenance_line("A", result.endpoint_a, rows_by_path),
+            prefix=f"{prefix}  ",
         )
-        print(
-            f"{prefix}   {format_endpoint_provenance_line('B', result.endpoint_b, rows_by_path)}",
-            file=stream,
-            flush=True,
+        _emit_line(
+            stream,
+            format_endpoint_provenance_line("B", result.endpoint_b, rows_by_path),
+            prefix=f"{prefix}  ",
         )
     if result.errors:
         for err in result.errors:
-            print(f"{prefix}   error: {err}", file=stream, flush=True)
+            _emit_line(stream, f"error: {err}", prefix=f"{prefix}  ")
     if not result.connected:
-        print(f"{prefix}   not connected ({result.note})", file=stream, flush=True)
-        return
-    print(
-        f"{prefix}   connected: {result.connected}  mode: {result.mode}  note: {result.note}",
-        file=stream,
-        flush=True,
-    )
-    if rows_by_path is not None:
-        spine = hierarchy_spine_between(
-            result.endpoint_a.inst_path,
-            result.endpoint_b.inst_path,
+        _emit_line(stream, f"not connected ({result.note})", prefix=f"{prefix}  ")
+    else:
+        _emit_line(
+            stream,
+            f"connected: {result.connected}  mode: {result.mode}  note: {result.note}",
+            prefix=f"{prefix}  ",
         )
-        emit_scopes_provenance_log(
-            spine,
-            rows_by_path,
+    if rows_by_path is not None:
+        emit_connect_walk_report(
+            result,
             stream=stream,
             prefix=prefix,
-            title="path hierarchy (rtl + filelist):",
-            indent="    ",
+            rows_by_path=rows_by_path,
+            diagnostic=result.coi_walk,
         )
-    if not result.hops:
-        print(f"{prefix}   path evidence: (no hop detail; use connect_trace)", file=stream, flush=True)
-        return
-    for i, hop in enumerate(result.hops, 1):
-        print(f"{prefix}   {i}. {format_connect_hop(hop)}", file=stream, flush=True)
-        if rows_by_path is not None:
-            hop_scopes = scopes_from_hop_detail(hop.detail)
-            emit_scopes_provenance_log(
-                hop_scopes,
-                rows_by_path,
-                stream=stream,
-                prefix=prefix,
-                title="",
-                indent="      ",
-            )
 
 
 def format_connect_results_report(
@@ -370,7 +364,7 @@ def _connect_pair(
     if mode == "port-port":
         start = (ep_a.inst_path, ep_a.port_name or "")
         goal = (ep_b.inst_path, ep_b.port_name or "")
-        ok, hops, mod_n = _bidirectional_coi(
+        ok, hops, mod_n, diag = _bidirectional_coi(
             start,
             goal,
             rows=pruned,
@@ -386,6 +380,16 @@ def _connect_pair(
             elab_index=elab_index,
             resolve_param_dims=resolve_param_dims,
         )
+        walk_notes: List[str] = []
+        if not ok and diag is not None:
+            from hierwalk.connect_walk_log import build_walk_notes
+
+            walk_notes = build_walk_notes(
+                diag,
+                rows_by_path=lookup or {},
+                start=start,
+                goal=goal,
+            )
         return ConnectResult(
             ep_a,
             ep_b,
@@ -395,13 +399,15 @@ def _connect_pair(
             errors=errors,
             note=_connect_note(ok, mod_n),
             check_id=check_id,
+            walk_notes=walk_notes,
+            coi_walk=diag,
         )
 
     if mode == "port-hierarchy":
         port_ep = ep_a if _has_port(ep_a) else ep_b
         hier_ep = ep_b if _has_port(ep_a) else ep_a
         start = (port_ep.inst_path, port_ep.port_name or "")
-        ok, hops, mod_n = _forward_coi_to_scope(
+        ok, hops, mod_n, diag = _forward_coi_to_scope(
             start,
             hier_ep.inst_path,
             rows=pruned,
@@ -417,6 +423,16 @@ def _connect_pair(
             elab_index=elab_index,
             resolve_param_dims=resolve_param_dims,
         )
+        walk_notes: List[str] = []
+        if not ok and diag is not None:
+            from hierwalk.connect_walk_log import build_walk_notes
+
+            walk_notes = build_walk_notes(
+                diag,
+                rows_by_path=lookup or {},
+                start=start,
+                goal=(hier_ep.inst_path, ""),
+            )
         return ConnectResult(
             ep_a,
             ep_b,
@@ -426,6 +442,8 @@ def _connect_pair(
             errors=errors,
             note=_connect_note(ok, mod_n, hier=True),
             check_id=check_id,
+            walk_notes=walk_notes,
+            coi_walk=diag,
         )
 
     return ConnectResult(
