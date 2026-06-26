@@ -34,7 +34,11 @@ from hierwalk.connect_scan import (
 from hierwalk.connect_request import ConnectivityRequest
 from hierwalk.connectivity import ConnectivityBatchResult, ConnectivitySession
 from hierwalk.filelist import FilelistResult
-from hierwalk.ignore_path import resolve_ignore_path_patterns, source_path_matches
+from hierwalk.ignore_path import (
+    partition_sources,
+    resolve_ignore_path_patterns,
+    source_path_matches,
+)
 from hierwalk.index import DesignIndex, _ctx_key
 from hierwalk.inst_scan import expand_inst_names, probe_inst_leaf_regex_fast
 from hierwalk.lazy_scope import (
@@ -3003,9 +3007,22 @@ def create_path_walk_index(
         preprocess_include_dirs=[str(p) for p in fl.include_dirs],
         preprocess_defines=dict(defines),
     )
-    sources = [str(Path(p).resolve()) for p in fl.source_files]
+    all_sources = [str(Path(p).resolve()) for p in fl.source_files]
+    sources, _ignored_sources = partition_sources(
+        all_sources,
+        path_patterns,
+        filelist_patterns=filelist_patterns,
+        file_via_filelist={
+            str(Path(k).resolve()): v
+            for k, v in (fl.source_via_filelist or {}).items()
+        },
+        file_filelist_chain={
+            str(Path(k).resolve()): v
+            for k, v in (fl.source_filelist_chain or {}).items()
+        },
+    )
     if path_digests is None:
-        path_digests = LazyPathDigests.for_paths(sources, jobs=jobs)
+        path_digests = LazyPathDigests.for_paths(all_sources, jobs=jobs)
     set_digest_scope(path_digests)
     cache_key = path_walk_db_cache_key(
         sources,
@@ -3031,6 +3048,7 @@ def create_path_walk_index(
         include_dirs=[str(p) for p in fl.include_dirs],
         defines=dict(defines),
         skip_path_patterns=path_patterns,
+        ignore_module_patterns=module_patterns,
         cache_dir=cache_dir,
         cache_key=cache_key,
         no_cache=no_cache,

@@ -298,38 +298,34 @@ def _merge_full_index_fields(
 
     ignore_raw = _first_ci(spec, "ignore_path", "ignore-path")
     if ignore_raw is not None:
-        out = replace(
-            out,
-            ignore_path=tuple(_parse_string_list(ignore_raw, field="ignore_path")),
-        )
+        ignore_path = tuple(_parse_string_list(ignore_raw, field="ignore_path"))
+        if ignore_path:
+            out = replace(out, ignore_path=ignore_path)
 
     ignore_file_raw = _first_ci(spec, "ignore_path_file", "ignore-path-file")
     if ignore_file_raw is not None:
-        out = replace(
-            out,
-            ignore_path_file=tuple(
-                _resolve_path(base, p) or p
-                for p in _parse_string_list(ignore_file_raw, field="ignore_path_file")
-            ),
+        ignore_path_file = tuple(
+            _resolve_path(base, p) or p
+            for p in _parse_string_list(ignore_file_raw, field="ignore_path_file")
         )
+        if ignore_path_file:
+            out = replace(out, ignore_path_file=ignore_path_file)
 
     ignore_mod_raw = _first_ci(spec, "ignore_module", "ignore-module")
     if ignore_mod_raw is not None:
-        out = replace(
-            out,
-            ignore_module=tuple(
-                _parse_string_list(ignore_mod_raw, field="ignore_module")
-            ),
+        ignore_module = tuple(
+            _parse_string_list(ignore_mod_raw, field="ignore_module")
         )
+        if ignore_module:
+            out = replace(out, ignore_module=ignore_module)
 
     ignore_fl_raw = _first_ci(spec, "ignore_filelist", "ignore-filelist")
     if ignore_fl_raw is not None:
-        out = replace(
-            out,
-            ignore_filelist=tuple(
-                _parse_string_list(ignore_fl_raw, field="ignore_filelist")
-            ),
+        ignore_filelist = tuple(
+            _parse_string_list(ignore_fl_raw, field="ignore_filelist")
         )
+        if ignore_filelist:
+            out = replace(out, ignore_filelist=ignore_filelist)
 
     jobs_raw = _first_ci(spec, "jobs", "j", "job", "workers")
     if jobs_raw is not None:

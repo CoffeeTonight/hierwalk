@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple, Union
 
 from hierwalk.ignore_path import source_path_matches
+from hierwalk.index import _module_name_ignored
 from hierwalk.index import (
     DesignIndex,
     _ctx_key,
@@ -292,6 +293,7 @@ class PathWalkModuleDb:
         include_dirs: Sequence[str | Path] = (),
         defines: Optional[Mapping[str, str]] = None,
         skip_path_patterns: Sequence[str] = (),
+        ignore_module_patterns: Sequence[str] = (),
         cache_dir: Optional[Path] = None,
         cache_key: Optional[str] = None,
         no_cache: bool = False,
@@ -314,6 +316,7 @@ class PathWalkModuleDb:
         self._include_dirs = [Path(p) for p in include_dirs]
         self._defines = dict(defines or {})
         self._skip = tuple(skip_path_patterns)
+        self._ignore_modules = tuple(ignore_module_patterns)
         self._no_cache = no_cache
         self._defines_digest = _defines_digest(self._defines)
         self._on_trace = on_trace
@@ -452,8 +455,23 @@ class PathWalkModuleDb:
     def flush_module_index_snapshot(self) -> Optional[Path]:
         return self.write_module_index_snapshot(force=True)
 
+    def _is_ignored_module(self, module_name: str) -> bool:
+        if not module_name:
+            return False
+        if self._ignore_modules and _module_name_ignored(
+            module_name,
+            list(self._ignore_modules),
+        ):
+            return True
+        if self._index.module_stop_reason(module_name) == "ignorePath":
+            return True
+        rec = self._index.get_module(module_name)
+        return rec is not None and bool(rec.stop_reason)
+
     def remember_index_modules(self) -> None:
         for name, rec in self._index.modules.items():
+            if self._is_ignored_module(name):
+                continue
             if rec.file_path and not _is_placeholder_module(rec):
                 self._note_regex_modules(rec.file_path, [name])
                 self._prefer_file.setdefault(name, str(Path(rec.file_path).resolve()))
@@ -791,7 +809,7 @@ class PathWalkModuleDb:
         key = str(Path(path).resolve())
         file_names = self._file_to_modules.setdefault(key, [])
         for name in names:
-            if not name:
+            if not name or self._is_ignored_module(name):
                 continue
             if name not in file_names:
                 file_names.append(name)
@@ -1474,14 +1492,16 @@ class PathWalkModuleDb:
 
     def _tier0_scan_file(self, path: str) -> List[str]:
         key = str(Path(path).resolve())
+        if self._skip and source_path_matches(key, self._skip):
+            if key not in self._regex_scanned:
+                self._regex_scanned.add(key)
+                self.files_regex_scanned += 1
+                self._trace(f"pw-db tier0 skip {Path(key).name}")
+            return []
         if key in self._regex_scanned:
             return list(self._file_to_modules.get(key, []))
         self._set_phase("mapping", detail=Path(key).name)
         self._regex_scanned.add(key)
-        if self._skip and source_path_matches(key, self._skip):
-            self.files_regex_scanned += 1
-            self._trace(f"pw-db tier0 skip {Path(key).name}")
-            return []
 
         hit = self._load_regex_sidecar(key)
         if hit is not None:
@@ -1589,6 +1609,9 @@ class PathWalkModuleDb:
         inst_leaf: str = "",
     ) -> List[str]:
         from hierwalk.perf import pw_module_file_cap, pw_tier0_global_scan_max
+
+        if self._is_ignored_module(module_name):
+            return []
 
         if scope_anchor:
             scoped_pool = self._scoped_pool_for_policy(scope_anchor, policy=policy)
@@ -2223,6 +2246,9 @@ class PathWalkModuleDb:
         *policy=confident* searches direct child filelists only and defers on miss.
         *policy=recovery* may expand subtree/global pools to finish deferred work.
         """
+        if self._is_ignored_module(module_name):
+            return False
+
         if self._index_has_resolved_module(
             module_name,
             expect_inst=expect_inst,
