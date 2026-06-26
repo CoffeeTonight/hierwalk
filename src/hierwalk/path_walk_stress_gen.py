@@ -15,8 +15,18 @@ from typing import Dict, List, Tuple
 from hierwalk.connect_request import ConnectivityCheck, ConnectivityRequest
 
 SET_IDS: Tuple[str, ...] = ("A", "B", "C", "D")
+CROSS_ARMS: Tuple[str, ...] = ("A", "B")
 DEPTH: int = 10
 BUS_WIDTH: int = 10
+BRIDGE_LEVEL: int = 5
+
+_DRIVE_STYLES: Tuple[str, ...] = (
+    "wire_assign",
+    "reg_ff",
+    "always_comb",
+    "array_stash",
+    "reg_assign",
+)
 
 _INST_DECOY_STYLES: Tuple[str, ...] = (
     "comma_chain",
@@ -57,6 +67,174 @@ class PathWalkStressDesign:
 
 def _leaf_path(set_id: str) -> str:
     return "pw_top.u_set_" + set_id + ".u_next" + ".u_next" * (DEPTH - 1)
+
+
+def _mid_inst_path(set_id: str, level: int = BRIDGE_LEVEL) -> str:
+    hops = max(0, min(level, DEPTH - 1))
+    return "pw_top.u_set_" + set_id + ".u_next" + ".u_next" * hops
+
+
+def _is_cross_arm(set_id: str) -> bool:
+    return set_id in CROSS_ARMS
+
+
+def _link_port_decls() -> str:
+    return textwrap.dedent(
+        """
+          input  logic [9:0] link_in,
+          output logic [9:0] link_out,
+        """
+    ).strip()
+
+
+def _drive_chain_body(chain_src: str) -> str:
+    """Main chain stays combinational; FF/always patterns live in side noise."""
+    return textwrap.dedent(
+        f"""
+          logic [9:0] chain_local;
+          assign chain_local = {chain_src};
+        """
+    ).strip()
+
+
+def _drive_noise_body(style: str, chain_src: str, lvl: int) -> str:
+    if style == "reg_ff":
+        return textwrap.dedent(
+            f"""
+              logic [9:0] noise_ff_{lvl};
+              always_ff @(posedge clk) begin
+                if (!rst_n)
+                  noise_ff_{lvl} <= 10'b0;
+                else
+                  noise_ff_{lvl} <= {chain_src};
+              end
+            """
+        ).strip()
+    if style == "always_comb":
+        return textwrap.dedent(
+            f"""
+              logic [9:0] noise_comb_{lvl};
+              always_comb noise_comb_{lvl} = {chain_src} ^ 10'b0;
+            """
+        ).strip()
+    if style == "array_stash":
+        return textwrap.dedent(
+            f"""
+              logic [9:0] stash_arr_{lvl} [0:1];
+              logic [9:0] noise_arr_{lvl};
+              assign stash_arr_{lvl}[0] = {chain_src};
+              assign stash_arr_{lvl}[1] = stash_arr_{lvl}[0];
+              assign noise_arr_{lvl} = stash_arr_{lvl}[1];
+            """
+        ).strip()
+    if style == "reg_assign":
+        return textwrap.dedent(
+            f"""
+              reg [9:0] noise_reg_{lvl};
+              logic [9:0] noise_alias_{lvl};
+              always @(posedge clk) noise_reg_{lvl} <= {chain_src};
+              assign noise_alias_{lvl} = noise_reg_{lvl};
+            """
+        ).strip()
+    return textwrap.dedent(
+        f"""
+          wire noise_wire_{lvl};
+          assign noise_wire_{lvl} = ^{chain_src};
+        """
+    ).strip()
+
+
+def _similar_name_trap(lvl: int) -> str:
+    return textwrap.dedent(
+        f"""
+          wire [9:0] u_next_shadow;
+          wire [9:0] chain_in_alias;
+          assign u_next_shadow = chain_in[9:0];
+          assign chain_in_alias = u_next_shadow;
+        """
+    ).strip()
+
+
+def _bridge_module() -> str:
+    return textwrap.dedent(
+        """
+        module pw_bridge (
+          input  logic        clk,
+          input  logic        rst_n,
+          input  logic [9:0]  from_a,
+          input  logic [9:0]  from_b,
+          output logic [9:0]  to_a,
+          output logic [9:0]  to_b
+        );
+          logic [9:0] stash;
+          logic [9:0] u_next;
+          wire  [9:0] chain_in;
+          assign chain_in = from_a;
+          assign to_b = from_a;
+          assign to_a = from_b;
+          always_ff @(posedge clk) begin
+            if (!rst_n)
+              stash <= 10'b0;
+            else
+              stash <= chain_in;
+          end
+          assign u_next = stash;
+          wire [9:0] trap_drop_a, trap_drop_b;
+          pw_decoy u_d_bridge (.clk(clk), .rst_n(rst_n));
+          pw_clutter_trap u_trap_a (.clk(clk), .rst_n(rst_n), .din(from_a), .dout(trap_drop_a));
+          pw_clutter_trap u_trap_b (.clk(clk), .rst_n(rst_n), .din(from_b), .dout(trap_drop_b));
+        endmodule
+        """
+    ).strip()
+
+
+def _clutter_modules() -> Dict[str, str]:
+    trap = textwrap.dedent(
+        """
+        module pw_clutter_trap (
+          input  logic        clk,
+          input  logic        rst_n,
+          input  logic [9:0]  din,
+          output logic [9:0]  dout
+        );
+          wire [9:0] u_next;
+          wire [9:0] chain_in;
+          assign chain_in = din;
+          assign u_next = chain_in;
+          pw_decoy u_d0 (.clk(clk), .rst_n(rst_n)),
+          pw_decoy u_d1 (.clk(clk), .rst_n(rst_n));
+          `ifdef PW_STRESS_CLUTTER
+            assign dout = u_next;
+          `else
+            assign dout = din;
+          `endif
+        endmodule
+        """
+    ).strip()
+    noise = textwrap.dedent(
+        """
+        module pw_clutter_noise #(
+          parameter int IDX = 0
+        ) (
+          input logic clk,
+          input logic rst_n
+        );
+          generate
+            for (genvar gi = 0; gi < 1; gi++) begin : g_noise
+              if (IDX >= 0) begin : g_if_noise
+                pw_decoy u_d (.clk(clk), .rst_n(rst_n));
+              end
+            end
+          endgenerate
+          wire [3:0] n;
+          assign n = {clk, rst_n, clk, rst_n} ^ IDX;
+        endmodule
+        """
+    ).strip()
+    return {
+        "pw_clutter_trap.v": trap,
+        "pw_clutter_noise.v": noise,
+    }
 
 
 def _port_block(style: str, lvl: int) -> Tuple[str, str, str, str]:
@@ -297,15 +475,25 @@ def _main_child(lvl: int, set_id: str, leaf: bool) -> str:
         return ""
     child = f"pw_zig_{set_id}_{lvl + 1}"
     ovr = f"#(.LVL({lvl + 1})) " if lvl % 3 == 0 else ""
+    link_ports = ""
+    if _is_cross_arm(set_id) and lvl < BRIDGE_LEVEL:
+        link_ports = textwrap.dedent(
+            """
+            ,
+            .link_in(link_in),
+            .link_out(link_out)
+            """
+        ).strip()
+    chain_net = "chain_child" if (_is_cross_arm(set_id) and lvl == BRIDGE_LEVEL) else "chain_vec"
     return textwrap.dedent(
         f"""
           {child} {ovr}u_next (
             .clk(clk),
             .rst_n(rst_n),
             .src_vec(src_vec),
-            .chain_in(chain_vec),
+            .chain_in({chain_net}),
             .chain_out(chain_out),
-            .arr(arr)
+            .arr(arr){link_ports}
           );
         """
     ).strip()
@@ -315,10 +503,21 @@ def _level_body(set_id: str, lvl: int) -> str:
     leaf = lvl == DEPTH - 1
     port_style = _PORT_STYLES[lvl % len(_PORT_STYLES)]
     decoy_style = _INST_DECOY_STYLES[lvl % len(_INST_DECOY_STYLES)]
+    drive_style = _DRIVE_STYLES[lvl % len(_DRIVE_STYLES)]
     mod_open, body_decls, arr_alias, _ = _port_block(port_style, lvl)
     mod_open = mod_open.replace("{set}", set_id)
+    cross_link_level = _is_cross_arm(set_id) and lvl <= BRIDGE_LEVEL
+    if cross_link_level:
+        port_style = "ansi_full"
+        mod_open, body_decls, arr_alias, _ = _port_block(port_style, lvl)
+        mod_open = mod_open.replace("{set}", set_id)
+        link_ansi = ",\n          " + _link_port_decls().replace("\n", "\n          ")
+        if "\n        );" in mod_open:
+            mod_open = mod_open.replace("\n        );", link_ansi + "\n        );", 1)
+        else:
+            link_body = _link_port_decls().replace(",", ";\n          ") + ";"
+            body_decls = (body_decls + "\n          " + link_body) if body_decls else link_body
     zig_pre = ""
-    zig_post = ""
     if lvl % 2 == 1:
         zig_pre = textwrap.dedent(
             f"""
@@ -334,12 +533,43 @@ def _level_body(set_id: str, lvl: int) -> str:
         chain_src = "zig_pre"
     else:
         chain_src = "chain_in[9:0]"
+    drive = _drive_chain_body(chain_src)
+    noise_drv = _drive_noise_body(drive_style, chain_src, lvl)
+    similar = _similar_name_trap(lvl) if lvl % 3 == 1 else ""
+    link_merge = ""
+    if cross_link_level and lvl == BRIDGE_LEVEL:
+        hi = BRIDGE_LEVEL + 1
+        lo = BRIDGE_LEVEL
+        link_merge = textwrap.dedent(
+            f"""
+              logic [9:0] chain_vec;
+              logic [9:0] chain_child;
+              assign link_out = chain_local;
+              assign chain_vec = chain_local;
+              assign chain_child = {{chain_local[9:{hi}], link_in[{lo}], chain_local[{lo}-1:0]}};
+            """
+        ).strip()
+    elif cross_link_level:
+        link_merge = textwrap.dedent(
+            """
+              logic [9:0] chain_vec;
+              assign chain_vec = chain_local;
+            """
+        ).strip()
+    else:
+        link_merge = textwrap.dedent(
+            """
+              logic [9:0] chain_vec;
+              assign chain_vec = chain_local;
+            """
+        ).strip()
+    src_inject = f"assign chain_local[{lvl}] = src_vec[{lvl}];"
     if leaf:
         arr_drv = textwrap.dedent(
             f"""
-              logic [9:0] chain_vec;
-              assign chain_vec = {chain_src};
-              assign chain_vec[{lvl}] = src_vec[{lvl}];
+              {drive}
+              {src_inject}
+              {link_merge}
               assign arr = chain_vec[9:0];
               assign chain_out = chain_vec;
             """
@@ -348,9 +578,9 @@ def _level_body(set_id: str, lvl: int) -> str:
     else:
         arr_drv = textwrap.dedent(
             f"""
-              logic [9:0] chain_vec;
-              assign chain_vec = {chain_src};
-              assign chain_vec[{lvl}] = src_vec[{lvl}];
+              {drive}
+              {src_inject}
+              {link_merge}
               assign chain_out = chain_vec;
             """
         ).strip()
@@ -369,6 +599,8 @@ def _level_body(set_id: str, lvl: int) -> str:
         mod_open,
         body_decls,
         zig_pre,
+        similar,
+        noise_drv,
         arr_drv,
         arr_alias,
         child,
@@ -379,47 +611,103 @@ def _level_body(set_id: str, lvl: int) -> str:
 
 
 def _set_wrapper(set_id: str) -> str:
+    link_hdr = ""
+    link_wire = ""
+    link_conn = ""
+    if _is_cross_arm(set_id):
+        link_hdr = _link_port_decls() + "\n          "
+        link_wire = "logic [9:0] link_drop;\n          "
+        link_conn = textwrap.dedent(
+            """
+            ,
+            .link_in(link_in),
+            .link_out(link_out)
+            """
+        ).strip()
     return textwrap.dedent(
         f"""
         module pw_set_{set_id} (
           input  logic        clk,
           input  logic        rst_n,
           input  logic [9:0]  src_vec,
-          output logic [9:0]  arr_view
+          output logic [9:0]  arr_view,
+          {link_hdr}
         );
           logic [9:0] chain_zero;
           assign chain_zero = 10'b0;
           logic [9:0] chain_drop;
-          pw_zig_{set_id}_0 u_next (
+          {link_wire}pw_zig_{set_id}_0 u_next (
             .clk(clk),
             .rst_n(rst_n),
             .src_vec(src_vec),
             .chain_in(chain_zero),
             .chain_out(chain_drop),
-            .arr(arr_view)
+            .arr(arr_view){link_conn}
           );
         endmodule
         """
     ).strip()
 
 
+def _top_src_vec(set_id: str) -> str:
+    if set_id not in CROSS_ARMS:
+        return "{ " + ", ".join(f"set{set_id}_a{j}" for j in range(BUS_WIDTH)) + " }"
+    peer = CROSS_ARMS[1] if set_id == CROSS_ARMS[0] else CROSS_ARMS[0]
+    bits: List[str] = []
+    for j in range(BUS_WIDTH):
+        if j == BRIDGE_LEVEL:
+            bits.append(f"set{peer}_a{j}")
+        else:
+            bits.append(f"set{set_id}_a{j}")
+    return "{ " + ", ".join(bits) + " }"
+
+
 def _top_module() -> str:
     ports: List[str] = ["input logic clk", "input logic rst_n"]
+    decls: List[str] = []
     insts: List[str] = []
     for sid in SET_IDS:
         for i in range(BUS_WIDTH):
             ports.append(f"input logic set{sid}_a{i}")
+        link_conn = ""
+        src_vec = _top_src_vec(sid)
+        if _is_cross_arm(sid):
+            decls.append(f"wire [9:0] cross_{sid.lower()}_out;")
+            decls.append(f"wire [9:0] cross_{sid.lower()}_in;")
+            link_conn = textwrap.dedent(
+                f"""
+                ,
+                .link_out(cross_{sid.lower()}_out),
+                .link_in(cross_{sid.lower()}_in)
+                """
+            ).strip()
         insts.append(
             textwrap.dedent(
                 f"""
                 pw_set_{sid} u_set_{sid} (
                   .clk(clk),
                   .rst_n(rst_n),
-                  .src_vec({{ {", ".join(f"set{sid}_a{j}" for j in range(BUS_WIDTH))} }})
+                  .src_vec({src_vec}){link_conn}
                 );
                 """
             ).strip()
         )
+    bridge = ""
+    if len(CROSS_ARMS) == 2:
+        bridge = textwrap.dedent(
+            """
+            pw_bridge u_cross_bridge (
+              .clk(clk),
+              .rst_n(rst_n),
+              .from_a(cross_a_out),
+              .from_b(cross_b_out),
+              .to_a(cross_a_in),
+              .to_b(cross_b_in)
+            );
+            pw_clutter_noise #(.IDX(0)) u_clutter_top (.clk(clk), .rst_n(rst_n));
+            """
+        ).strip()
+    decl_block = "\n          ".join(decls)
     return textwrap.dedent(
         f"""
         `define PW_STRESS_TOP 1
@@ -428,10 +716,13 @@ def _top_module() -> str:
         `define PW_STRESS_B 1
         `define PW_STRESS_C 1
         `define PW_STRESS_D 1
+        `define PW_STRESS_CLUTTER 1
         module pw_top (
           {", ".join(ports)}
         );
+          {decl_block}
           {chr(10).join(insts)}
+          {bridge}
         endmodule
         """
     ).strip()
@@ -471,6 +762,8 @@ def _build_checks() -> Tuple[ConnectivityCheck, ...]:
     for sid in SET_IDS:
         base = _leaf_path(sid)
         for bit in range(BUS_WIDTH):
+            if sid in CROSS_ARMS and bit == BRIDGE_LEVEL:
+                continue
             checks.append(
                 ConnectivityCheck(
                     f"{base}.arr[{bit}]",
@@ -478,14 +771,35 @@ def _build_checks() -> Tuple[ConnectivityCheck, ...]:
                     f"{sid}_b{bit}",
                 )
             )
+    if len(CROSS_ARMS) == 2:
+        arm_a, arm_b = CROSS_ARMS
+        leaf_a = _leaf_path(arm_a)
+        leaf_b = _leaf_path(arm_b)
+        bit = BRIDGE_LEVEL
+        checks.append(
+            ConnectivityCheck(
+                f"pw_top.set{arm_a}_a{bit}",
+                f"{leaf_b}.arr[{bit}]",
+                f"cross_port_{arm_a}_to_{arm_b}",
+            )
+        )
+        checks.append(
+            ConnectivityCheck(
+                f"pw_top.set{arm_b}_a{bit}",
+                f"{leaf_a}.arr[{bit}]",
+                f"cross_{arm_a}{arm_b}_rev{bit}",
+            )
+        )
     return tuple(checks)
 
 
 def generate_path_walk_stress_design() -> PathWalkStressDesign:
     files: Dict[str, str] = {
         "pw_decoy.v": _decoy_module(),
+        "pw_bridge.v": _bridge_module(),
         "pw_top.v": _top_module(),
     }
+    files.update(_clutter_modules())
     for sid in SET_IDS:
         for lvl in range(DEPTH):
             files[f"pw_zig_{sid}_{lvl}.v"] = _level_body(sid, lvl)
@@ -506,6 +820,7 @@ def build_connect_request(design: PathWalkStressDesign) -> ConnectivityRequest:
     return ConnectivityRequest(
         checks=design.checks,
         top=design.top,
+        include_ff=False,
         defines={
             "PW_STRESS_INST": "1",
             "PW_STRESS_TOP": "1",
@@ -513,6 +828,7 @@ def build_connect_request(design: PathWalkStressDesign) -> ConnectivityRequest:
             "PW_STRESS_B": "1",
             "PW_STRESS_C": "1",
             "PW_STRESS_D": "1",
+            "PW_STRESS_CLUTTER": "1",
         },
     )
 

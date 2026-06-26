@@ -172,6 +172,8 @@ class ConnectResult:
     connected_text: Optional[bool] = None
     connected_logical: Optional[bool] = None
     logical_notes: List[str] = field(default_factory=list)
+    walk_notes: List[str] = field(default_factory=list)
+    coi_walk: Any = None
 
 
 @dataclass

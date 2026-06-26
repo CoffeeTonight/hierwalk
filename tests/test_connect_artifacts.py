@@ -231,6 +231,44 @@ def test_compact_hierarchy_evidence_drops_redundant_inst_hits():
     assert any(r.kind == "wire" for r in compact)
 
 
+def test_format_connect_hierarchy_tsv_includes_absolute_rtl_path(tmp_path: Path):
+    rtl = tmp_path / "leaf.v"
+    rtl.write_text("module leaf(); endmodule\n", encoding="utf-8")
+    rtl_abs = str(rtl.resolve())
+    rows_by_path = {
+        "top": FlatRow(
+            full_path="top",
+            inst_leaf="top",
+            module="TOP",
+            depth=0,
+            parent_path=None,
+            file=str(tmp_path / "top.v"),
+        ),
+        "top.u_leaf": FlatRow(
+            full_path="top.u_leaf",
+            inst_leaf="u_leaf",
+            module="leaf",
+            depth=1,
+            parent_path="top",
+            file=rtl_abs,
+        ),
+    }
+    result = ConnectResult(
+        check_id="rtl",
+        endpoint_a=ConnectEndpoint("top.u_leaf.sig", "top.u_leaf", "sig", "leaf"),
+        endpoint_b=ConnectEndpoint("top.clk", "top", "clk", "TOP", port_found=True),
+        connected=False,
+        mode="port-port",
+    )
+    tsv = format_connect_hierarchy_tsv([result], rows_by_path, phase="text")
+    parsed = _tsv_rows(tsv)
+    assert "rtl_path" in parsed[0]
+    leaf_rows = [row for row in parsed if row["path"] == "top.u_leaf"]
+    assert leaf_rows and leaf_rows[0]["rtl_path"] == rtl_abs
+    sig_rows = [row for row in parsed if row["path"] == "top.u_leaf.sig"]
+    assert sig_rows and sig_rows[0]["rtl_path"] == rtl_abs
+
+
 def test_format_connect_hierarchy_tsv_marks_miss_prefixes():
     rows_by_path = {
         "top": FlatRow(

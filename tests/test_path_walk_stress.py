@@ -28,7 +28,9 @@ def test_stress_design_shape():
     design = generate_path_walk_stress_design()
     assert design.depth == DEPTH
     assert design.sets == SET_IDS
-    assert len(design.checks) == 4 * 10
+    assert len(design.checks) == 4 * 10 - 2 + 2  # A/B skip bridge bit + 2 cross-arm checks
+    assert "pw_bridge.v" in design.files
+    assert "pw_clutter_trap.v" in design.files
     assert "pw_top.v" in design.files
     assert "pw_zig_A_0.v" in design.files
     zig_mods = [n for n in design.files if re.match(r"pw_zig_[ABCD]_\d+\.v$", n)]
