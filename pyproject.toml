@@ -20,4 +20,5 @@ where = ["src"]
 testpaths = ["tests"]
 markers = [
     "stress: deep hierarchy connectivity stress trials (slower)",
+    "slow: full zigzag suite verification (tens of minutes)",
 ]

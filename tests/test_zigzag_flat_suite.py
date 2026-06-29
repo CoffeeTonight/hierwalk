@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from hierwalk.connect_artifacts import connect_output_paths
-from hierwalk.connect_expand import hierarchy_endpoint_specs, parse_list_display_spec
+from hierwalk.connect_expand import (
+    build_expand_meta,
+    hierarchy_endpoint_specs,
+    parse_list_display_spec,
+)
 from hierwalk.run_tests import (
     RUN_CONN_CHECK,
     build_test_run_configs,
@@ -23,6 +31,8 @@ from hierwalk.suite_report_verify import (
 from hierwalk.zigzag_torture_gen import (
     COLLISION,
     D1_SHADOW,
+    DEEP_D2,
+    DEEP_D4,
     DEEP_D5,
     DW_VENDOR_RTL,
     R3_ALT,
@@ -64,6 +74,22 @@ def test_flat_suite_document_has_text_and_logical_conn(suite_bundle):
     assert "zz_bridge_d2_bus" in ids
     assert "zz_fake_deep_not_on_spine" in ids
     assert "zz_dw_vendor_ignored" in ids
+    assert "zz_fanin_merge" in ids
+    assert "zz_fanin_merge_decoy" in ids
+    assert "zz_port_expr_xor" in ids
+    assert "zz_casex_route" in ids
+    assert "zz_loop_range" in ids
+    assert "zz_bb_through" in ids
+    assert "zz_ifdef_inactive" in ids
+    assert "zz_gen_tap1" in ids
+    assert "zz_pong_replicate" in ids
+    assert "zz_ff_barrier_tap" in ids
+    assert "zz_multi_g3_empty" in ids
+    assert "zz_dw_vendor_inst" not in ids
+    multi_g3 = next(c for c in checks if c["id"] == "zz_multi_g3_empty")
+    assert multi_g3.get("expect_connected") is False
+    assert len(checks) == 58
+    assert sum(1 for c in checks if c.get("expect_connected") is True) >= 45
     for step in conn_steps:
         assert step["ignore-path"] == ["DW_*"]
     batch = next(c for c in checks if c["id"] == "zz_common_inst_batch")
@@ -72,6 +98,47 @@ def test_flat_suite_document_has_text_and_logical_conn(suite_bundle):
     assert len(cone_steps) >= 4
     io_steps = [t for t in doc["tests"] if "run_io_trace" in t]
     assert len(io_steps) >= 5
+
+
+def test_round17_conn_check_shapes(suite_bundle):
+    """회차17: fan-in merge + port-expr XOR check JSON semantics."""
+    suite_path, _design, root = suite_bundle
+    doc = json.loads(suite_path.read_text(encoding="utf-8"))
+    checks = doc["tests"][0]["run_conn_check"]["checks"]
+    by_id = {c["id"]: c for c in checks}
+
+    fanin = by_id["zz_fanin_merge"]
+    assert fanin["expect_connected"] is True
+    ep_a = tuple(fanin["a"])
+    ep_b = fanin["b"]
+    assert build_expand_meta(ep_a, ep_b).map_kind == "fanout"
+
+    decoy = by_id["zz_fanin_merge_decoy"]
+    assert decoy["expect_connected"] is False
+    assert decoy["a"] == f"{DEEP_D4}.fork_decoy[1][2]"
+    assert decoy["b"] == f"{DEEP_D4}.merge_tap"
+
+    xor_chk = by_id["zz_port_expr_xor"]
+    assert xor_chk["expect_connected"] is True
+    assert tuple(xor_chk["a"]) == (
+        f"{DEEP_D2}.chain_in[1][2]",
+        f"{DEEP_D2}.shallow_return[1][2]",
+    )
+    assert xor_chk["b"] == f"{DEEP_D2}.u_bridge_expr.din[1][2]"
+    assert build_expand_meta(tuple(xor_chk["a"]), xor_chk["b"]).map_kind == "fanout"
+    assert f"{DEEP_D4}.chain_in[1][2]" not in fanin["a"]
+
+
+def test_round18_rtl_probes_in_generated_files(suite_bundle):
+    suite_path, design, _root = suite_bundle
+    assert "u_bridge_expr" in design.files["zz_deep_d2.v"]
+    assert "chain_in ^ shallow_return" in design.files["zz_deep_d2.v"]
+    assert "assign merge_tap" in design.files["zz_deep_d4.v"]
+    assert "u_bridge_concat" in design.files["zz_deep_d2.v"]
+    assert "gen_pass_flat" in design.files["zz_deep_d5.v"]
+    assert "gen_tap0" in design.files["zz_deep_d1.v"]
+    assert "u_dw_vendor" in design.files["zz_torture_top.v"]
+    assert "assign dout = din" in design.files["zz_common.v"]
 
 
 def test_parse_suite_expands_conn_phases_not_cone_io(suite_bundle):
@@ -89,8 +156,8 @@ def test_parse_suite_expands_conn_phases_not_cone_io(suite_bundle):
     assert conn_phases == ["text", "logical"]
     cone_count = sum(1 for entry, _ in plan if entry and entry.kind == "run_cone_trace")
     io_count = sum(1 for entry, _ in plan if entry and entry.kind == "run_io_trace")
-    assert cone_count == 9  # includes cone_fanout_common_decoy (zz_common.v decoy)
-    assert io_count == 7
+    assert cone_count == 18
+    assert io_count == 13
 
 
 def test_conn_ignore_path_dw_glob_merge_and_pw_db(suite_bundle):
@@ -152,6 +219,7 @@ def test_conn_ignore_path_dw_glob_merge_and_pw_db(suite_bundle):
     assert "tier0 scan DW_" not in trace_text
 
 
+@pytest.mark.slow
 def test_run_and_verify_zigzag_suite(suite_bundle):
     suite_path, design, root = suite_bundle
     report = run_and_verify_suite(suite_path, base_dir=root)
@@ -179,30 +247,10 @@ def test_run_and_verify_zigzag_suite(suite_bundle):
         if status == "hit" and cols[2] == "inst":
             assert rtl.endswith(".v") or rtl.startswith("/")
 
-
-def test_list_display_hierarchy_paths_not_bracket_blob(suite_bundle):
-    suite_path, _design, root = suite_bundle
-    doc = json.loads(suite_path.read_text(encoding="utf-8"))
-    display = f"[{DEEP_D5}, {SHALLOW_R4}]"
-    parsed = parse_list_display_spec(display)
-    assert parsed == (DEEP_D5, SHALLOW_R4)
-    for ep in parsed:
-        specs = hierarchy_endpoint_specs(ep)
-        assert specs == (ep,)
-        assert not ep.startswith("[")
-
-
-def test_multi_common_module_hierarchy_rtl(suite_bundle):
-    """zz_common.v hosts multiple modules; hierarchy must map each inst correctly."""
-    suite_path, design, root = suite_bundle
-    report = run_and_verify_suite(suite_path, base_dir=root)
-    hier_path = report.work_dir / "zz_hierarchy.text.tsv"
-    assert hier_path.is_file()
-    hier_text = hier_path.read_text(encoding="utf-8")
-    headers = hier_text.splitlines()[0].split("\t")
+    headers = hier_body.splitlines()[0].split("\t")
     parsed = [
         dict(zip(headers, line.split("\t")))
-        for line in hier_text.splitlines()[1:]
+        for line in hier_body.splitlines()[1:]
         if line.strip()
     ]
     common_hits = {
@@ -217,6 +265,53 @@ def test_multi_common_module_hierarchy_rtl(suite_bundle):
     assert (R3_ALT, "zz_decoy") in common_hits
     multi_module_issues = [i for i in report.issues if i.kind == "multi_module"]
     assert not multi_module_issues, multi_module_issues
+
+    if os.environ.get("HIERWALK_ARCHIVE_SUITE", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    ):
+        archive_root = Path.home() / "tools" / "zz_suite_artifacts"
+        archive_root.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        dest = archive_root / f"run_{stamp}"
+        shutil.copytree(work, dest, dirs_exist_ok=False)
+        for name in (
+            "zz_conn.text.tsv",
+            "zz_conn.tsv",
+            "zz_hierarchy.text.tsv",
+            "zz_hierarchy.tsv",
+            "zz_conn.text.hier-walk.log",
+            "zz_conn.hier-walk.log",
+        ):
+            assert (dest / name).is_file(), name
+        log_path = archive_root / f"run_{stamp}.meta.json"
+        log_path.write_text(
+            json.dumps(
+                {
+                    "python": sys.executable,
+                    "elapsed_sec": report.elapsed_sec,
+                    "steps_run": report.steps_run,
+                    "issues": len(report.issues),
+                    "work_dir": str(dest),
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+
+def test_list_display_hierarchy_paths_not_bracket_blob(suite_bundle):
+    suite_path, _design, root = suite_bundle
+    doc = json.loads(suite_path.read_text(encoding="utf-8"))
+    display = f"[{DEEP_D5}, {SHALLOW_R4}]"
+    parsed = parse_list_display_spec(display)
+    assert parsed == (DEEP_D5, SHALLOW_R4)
+    for ep in parsed:
+        specs = hierarchy_endpoint_specs(ep)
+        assert specs == (ep,)
+        assert not ep.startswith("[")
 
 
 def test_hierarchy_rtl_on_hit_nodes(suite_bundle):

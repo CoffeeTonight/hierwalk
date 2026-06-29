@@ -148,10 +148,62 @@ def _regex_net_in_assign(clean: str, target: str) -> bool:
 
 ---
 
-## J-005 — (슬롯) 추가 항목
+## J-005 — zigzag 종합 검증 무한 루프
 
-**상태:** queued  
+**상태:** in_progress  
+**우선순위:** high  
+**작업 경로:** `~/tools/hierwalk` (프로젝트 `.venv` — `./scripts/dev-setup.sh`)
 
-기타 회사/GLM 피드백 이어서 적기:
+### 명제 (매 회차 반복)
 
--
+1. **hierarchy TSV RTL 확장** — hit 노드에 RTL 절대경로·provenance
+1-1. **설계 패턴 보강** — ROI 큰 / 실사용 패턴을 `zigzag_torture_gen.py` RTL·suite에 반영
+2. **JSON conn phase 선택** — `connect_phase: "text"` / `"logical"` per-test
+3. **복잡 conn JSON** — wire/ref/port/inst, 배열·list expand, fanout, intentional fail
+4. **fanin/out + cone + io_trace** — blackbox, depth, ff/reg, cone decoy
+
+**루프:** 패턴 추가 → suite verify → pytest → 이슈 수정 → PASS여도 1-1 미커버 있으면 다음 회차
+
+### 1-1 패턴 표 (발췌)
+
+| 패턴 | ROI | RTL / check | 상태 |
+|------|-----|-------------|------|
+| many→one fan-in merge | 높음 | `zz_fanin_merge` @ d4 (`merge_tap`) | done (회차17) |
+| fan-in decoy | 중간 | `zz_fanin_merge_decoy` @ d4 | done (회차17) |
+| inst port XOR expr | 높음 | `zz_port_expr_xor` @ d2 (`u_bridge_expr.din`) | done (회차17) |
+| casex/casez route | 중간 | `zz_casex_route` / `zz_casez_route` @ d1/d3 | done (회차18) |
+| ifdef/gen pass | 중간 | `zz_ifdef_pass` / `zz_gen_pass` @ d4/d5 | done (회차18) |
+| bridge/merge probes | 중간 | `zz_zig_*`, `zz_merge_dummy`, `zz_expr_mapped` | done (회차18) |
+| blackbox through | 중간 | `zz_bb_through` (hub `u_bb`) | done (회차18) |
+| loop/concat expand | 높음 | `zz_loop_*`, `zz_literal_concat` | done (회차18) |
+| inst port concat/OR | 높음 | `zz_port_concat`, `zz_port_expr_or` | done (회차18) |
+| 4-signal fan-in | 높음 | `zz_fanin_merge4` @ d4 | done (회차18) |
+| gen-for / mid-ifdef | 중간 | `zz_gen_for_unroll`, `zz_mid_ifdef_child` | done (회차18) |
+| ifdef inactive (neg) | 중간 | `zz_ifdef_inactive` @ d4 | done (회차18) |
+
+### 회차17 (1-1) — verify clean
+
+- **RTL:** d2 `u_bridge_expr(.din(chain_in ^ shallow_return))`; d4 `merge_tap = fork_main[1][2] \| shallow_return[1][2]`
+- **conn:** `zz_fanin_merge` — `shallow_return` + `fork_main` → `merge_tap` (`chain_in` 제외: text-conn fork 경로 한계)
+- **검증:** `test_run_and_verify_zigzag_suite` PASS; `_build_checks()` / `_suite_conn_checks()` 동기화
+- **개발 환경:** `~/tools/hierwalk/.venv` (이동 시 `./scripts/dev-setup.sh` 재실행)
+
+### 회차19 (1-1) — subagent 피드백 반영
+
+- **verifier:** logical phase 기본 `expect_connected: true` (display/hierarchy-only skip); text phase explicit False만 verdict 검증; `CONN_VERDICT_SKIP_IDS` 단일화 (`suite_conn_policy.py`)
+- **RTL/check:** `zz_gen_tap1`, `zz_pong_replicate`, `zz_ff_barrier_tap`, `zz_multi_g3_empty`; `DESIGN_SUITE_CHECK_ALIASES`; suite `expect_connected` 일괄 부여; `zz_dw_vendor_inst` design-only (suite `zz_dw_vendor_ignored`)
+- **cone/io:** merge_quad, literal_bus, mid_ifdef + io_trace 3종
+- **규모:** design **46**, suite **58**, cone **18**, io **13**
+- **아티팩트:** `HIERWALK_ARCHIVE_SUITE=1` 시 full suite PASS 후 `~/tools/zz_suite_artifacts/run_*` 보존
+- **보강:** `_hierarchy_covers_path` check_id 무관 inst hit 제거; text summary skip-ID·positive/negative disconnect 노이즈 필터; round19 flat-suite 회귀 assert
+
+### 회차18 (1-1) — gap-fill verify
+
+- **RTL:** d1 `gen_tap0`+generate-for; d2 `u_bridge_concat`/`u_bridge_or`; d3 `u_mid_ifdef`; d4 `merge_quad`+`ifdef_else_net`; d5 `gen_pass_flat`; top loop ties+`literal_bus`+`u_dw_vendor`; blackbox `dout=din`
+- **conn:** design **42** + suite **55** (+20); cone **15** + io **10**
+- **검증:** fast pytest PASS → `test_run_and_verify_zigzag_suite` (full)
+
+### 다음 1-1 후보
+
+- generate hierarchy path (`g_real_d5.gen_pass`) when fold enabled
+- 회차13~16 패턴 복원 (`zz_ifdef_else`, `zz_ff_barrier`, …)

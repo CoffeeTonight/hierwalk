@@ -26,18 +26,81 @@ from hierwalk.path_walk import (
 from hierwalk.zigzag_torture_gen import (
     COLLISION,
     DEEP_ARM,
+    DEEP_D2,
     DEEP_D3,
+    DEEP_D4,
     DEEP_D5,
     DEEP_DEPTH,
+    DESIGN_SUITE_CHECK_ALIASES,
     DW_VENDOR_RTL,
     SHALLOW_ARM,
     SHALLOW_DEPTH,
     SHALLOW_R4,
     TOP,
     ZigzagTortureDesign,
+    _suite_conn_checks,
     build_connect_request,
     generate_zigzag_torture_design,
     write_stress_artifacts,
+)
+
+ROUND17_CHECK_IDS = (
+    "zz_fanin_merge",
+    "zz_fanin_merge_decoy",
+    "zz_port_expr_xor",
+)
+
+ROUND18_EXPAND_CHECK_IDS = (
+    "zz_fanin_merge",
+    "zz_fanin_merge_decoy",
+    "zz_port_expr_xor",
+    "zz_expr_mapped",
+    "zz_port_concat",
+    "zz_port_expr_or",
+    "zz_fanin_merge4",
+    "zz_loop_range",
+    "zz_loop_list",
+    "zz_loop_csv",
+    "zz_literal_concat",
+    "zz_list_endpoints",
+)
+
+ROUND18_NEGATIVE_CHECK_IDS = (
+    "zz_missing_hierarchy",
+    "zz_fanin_merge_decoy",
+    "zz_ifdef_inactive",
+    "zz_multi_g3_empty",
+)
+
+ROUND19_NEW_CHECK_IDS = (
+    "zz_gen_tap1",
+    "zz_pong_replicate",
+    "zz_ff_barrier_tap",
+    "zz_multi_g3_empty",
+)
+
+ROUND18_NEW_CHECK_IDS = (
+    "zz_casex_route",
+    "zz_casez_route",
+    "zz_ifdef_pass",
+    "zz_gen_pass",
+    "zz_expr_mapped",
+    "zz_zig_to_shallow",
+    "zz_zig_decoy",
+    "zz_merge_dummy",
+    "zz_bb_through",
+    "zz_dw_vendor_inst",
+    "zz_loop_range",
+    "zz_loop_list",
+    "zz_loop_csv",
+    "zz_port_concat",
+    "zz_port_expr_or",
+    "zz_fanin_merge4",
+    "zz_gen_for_unroll",
+    "zz_ifdef_inactive",
+    "zz_literal_concat",
+    "zz_mid_ifdef_child",
+    *ROUND19_NEW_CHECK_IDS,
 )
 
 
@@ -52,7 +115,24 @@ def test_torture_design_shape():
     assert design.top == TOP
     assert design.deep_path == DEEP_D5
     assert design.shallow_path == SHALLOW_R4
-    assert len(design.checks) >= 18
+    assert len(design.checks) == 46
+    check_ids = {c.check_id for c in design.checks}
+    assert "zz_fanin_merge" in check_ids
+    assert "zz_fanin_merge_decoy" in check_ids
+    assert "zz_port_expr_xor" in check_ids
+    assert "zz_casex_route" in check_ids
+    assert "zz_loop_range" in check_ids
+    assert "zz_bb_through" in check_ids
+    assert "u_bridge_concat" in design.files["zz_deep_d2.v"]
+    assert "gen_pass_flat" in design.files["zz_deep_d5.v"]
+    assert "gen_tap0" in design.files["zz_deep_d1.v"]
+    assert "u_dw_vendor" in design.files["zz_torture_top.v"]
+    assert "ff_barrier_tap" in design.files["zz_deep_d1.v"]
+    assert "u_empty_multi" in design.files["zz_zigzag.v"]
+    assert "gen_tap1" in design.files["zz_deep_d1.v"]
+    assert "u_bridge_expr" in design.files["zz_deep_d2.v"]
+    assert "chain_in ^ shallow_return" in design.files["zz_deep_d2.v"]
+    assert "assign merge_tap" in design.files["zz_deep_d4.v"]
     assert len(design.files) >= DEEP_DEPTH + SHALLOW_DEPTH + 6
     assert "zz_fake_deep.v" in design.files
     assert DW_VENDOR_RTL in design.files
@@ -64,6 +144,55 @@ def test_torture_design_shape():
     assert "casex" in design.files["zz_deep_d1.v"]
     assert "casez" in design.files["zz_deep_d3.v"]
     assert "STRB_MAX" in design.files["zz_torture_top.v"]
+
+
+def test_dw_vendor_inst_design_only_not_in_suite():
+    design = generate_zigzag_torture_design()
+    assert any(c.check_id == "zz_dw_vendor_inst" for c in design.checks)
+    suite_ids = {c["id"] for c in _suite_conn_checks()}
+    assert "zz_dw_vendor_inst" not in suite_ids
+    assert "zz_dw_vendor_ignored" in suite_ids
+
+
+def test_round18_design_suite_check_parity():
+    """_build_checks() and _suite_conn_checks() must agree on round18 endpoints."""
+    design = generate_zigzag_torture_design()
+    design_by_id = {c.check_id: c for c in design.checks}
+    suite_by_id = {c["id"]: c for c in _suite_conn_checks()}
+
+    for design_id, suite_id in DESIGN_SUITE_CHECK_ALIASES.items():
+        dc = design_by_id[design_id]
+        sc = suite_by_id[suite_id]
+        suite_meta = build_expand_meta(sc["a"], sc["b"], loop=sc.get("loop"))
+        if dc.expand is not None:
+            assert suite_meta.elements_a == dc.expand.elements_a, design_id
+            assert suite_meta.elements_b == dc.expand.elements_b, design_id
+        else:
+            assert dc.endpoint_a == sc["a"], design_id
+            assert dc.endpoint_b == sc["b"], design_id
+
+    for cid in (*ROUND17_CHECK_IDS, *ROUND18_NEW_CHECK_IDS):
+        if cid not in suite_by_id:
+            continue
+        dc = design_by_id[cid]
+        sc = suite_by_id[cid]
+        raw_a = sc["a"] if isinstance(sc["a"], list) else sc["a"]
+        raw_b = sc["b"]
+        if dc.expand is not None:
+            suite_meta = build_expand_meta(
+                raw_a,
+                raw_b,
+                loop=sc.get("loop"),
+            )
+            assert suite_meta.map_kind == dc.expand.map_kind, cid
+            assert suite_meta.elements_a == dc.expand.elements_a, (cid, "a")
+            assert suite_meta.elements_b == dc.expand.elements_b, (cid, "b")
+        else:
+            assert dc.endpoint_a == sc["a"], cid
+            assert dc.endpoint_b == sc["b"], cid
+
+    fanin_a = suite_by_id["zz_fanin_merge"]["a"]
+    assert f"{DEEP_D4}.chain_in[1][2]" not in fanin_a
 
 
 def test_path_walk_index_all_hierarchy_specs(torture_bundle, tmp_path: Path):
@@ -117,6 +246,32 @@ def test_path_walk_connect_all_checks(torture_bundle, tmp_path: Path):
             elif not any("hierarchy" in e.lower() for e in result.errors):
                 failures.append(f"{chk.check_id}: expected hierarchy error")
             continue
+        if chk.check_id in ROUND18_NEGATIVE_CHECK_IDS:
+            if result.connected:
+                failures.append(f"{chk.check_id}: expected disconnected")
+            elif chk.check_id == "zz_fanin_merge_decoy" and any(
+                "hierarchy" in e.lower() for e in result.errors
+            ):
+                failures.append(f"{chk.check_id}: expected connectivity miss, not hierarchy")
+            continue
+        if chk.check_id in ROUND18_EXPAND_CHECK_IDS:
+            if not result.sub_results or not all(
+                sr.connected for sr in result.sub_results
+            ):
+                failures.append(f"{chk.check_id}: expand sub-check failed")
+            continue
+        if chk.check_id == "zz_fanin_merge":
+            if not result.sub_results or not all(
+                sr.connected for sr in result.sub_results
+            ):
+                failures.append(f"{chk.check_id}: fan-in merge expand failed")
+            continue
+        if chk.check_id == "zz_port_expr_xor":
+            if not result.sub_results or not all(
+                sr.connected for sr in result.sub_results
+            ):
+                failures.append(f"{chk.check_id}: port-expr xor expand failed")
+            continue
         if chk.check_id == "zz_list_endpoints":
             if not result.sub_results or not all(
                 sr.connected for sr in result.sub_results
@@ -149,10 +304,10 @@ def test_path_walk_connect_batch_preserves_check_ids(torture_bundle, tmp_path: P
     expected = {c.check_id: c for c in req.checks}
     for result, chk in zip(batch.results, req.checks):
         assert result.check_id == chk.check_id
-        if chk.check_id == "zz_missing_hierarchy":
+        if chk.check_id in ROUND18_NEGATIVE_CHECK_IDS:
             assert result.connected is False
             continue
-        if chk.check_id == "zz_list_endpoints":
+        if chk.check_id in ROUND18_EXPAND_CHECK_IDS:
             assert result.sub_results and all(sr.connected for sr in result.sub_results)
             continue
         assert result.endpoint_a.spec == str(chk.endpoint_a)

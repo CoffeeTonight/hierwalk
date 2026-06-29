@@ -24,6 +24,7 @@ from hierwalk.connect_artifacts import (
 from hierwalk.connect_expand import hierarchy_endpoint_specs, parse_list_display_spec
 from hierwalk.cache import resolve_run_work_dir, work_base_dir
 from hierwalk.run_request import RUN_CONE_TRACE, RUN_CONN_CHECK, RUN_IO_TRACE, RunConfig
+from hierwalk.suite_conn_policy import CONN_VERDICT_SKIP_IDS
 from hierwalk.report_provenance import (
     connect_phase_timings,
     report_command_line,
@@ -149,26 +150,51 @@ def _hierarchy_path_for_conn(work_dir: Path, cfg: RunConfig, *, phase: str) -> P
     return work_dir / hier_name
 
 
-def _expected_conn_outcomes(spec: Mapping[str, Any]) -> Dict[str, bool]:
+def _parse_expect_connected(item: Mapping[str, Any]) -> Optional[bool]:
+    expect = item.get("expect_connected")
+    if expect is None:
+        expect = item.get("expect")
+    if isinstance(expect, dict):
+        val = expect.get("connected")
+        return bool(val) if val is not None else None
+    if expect is not None:
+        return bool(expect)
+    return None
+
+
+def _expected_conn_outcomes(
+    spec: Mapping[str, Any],
+    *,
+    phase: str = "logical",
+) -> Dict[str, bool]:
+    """Expected connectivity per parent check_id.
+
+    Logical phase: default ``True`` unless explicit ``expect_connected: false``
+    or check is in ``CONN_VERDICT_SKIP_IDS``.
+    Text phase: only explicit expectations (negatives remain logical-only).
+    """
     out: Dict[str, bool] = {}
     checks = spec.get("checks") or []
     if not isinstance(checks, list):
         return out
+    phase_norm = (phase or "logical").strip().lower()
     for item in checks:
         if not isinstance(item, dict):
             continue
         cid = str(item.get("id") or item.get("name") or "").strip()
         if not cid:
             continue
-        expect = item.get("expect_connected")
-        if expect is None:
-            expect = item.get("expect")
-        if isinstance(expect, dict):
-            val = expect.get("connected")
-            if val is not None:
-                out[cid] = bool(val)
-        elif expect is not None:
-            out[cid] = bool(expect)
+        explicit = _parse_expect_connected(item)
+        if phase_norm == "text":
+            if explicit is False:
+                out[cid] = False
+            continue
+        if explicit is not None:
+            out[cid] = explicit
+            continue
+        if cid in CONN_VERDICT_SKIP_IDS:
+            continue
+        out[cid] = True
     return out
 
 
@@ -333,8 +359,6 @@ def _hierarchy_covers_path(
         if row_side not in (side, "-", "?"):
             continue
         if _check_id_matches(check_id, row_cid):
-            return True
-        if row.get("kind") == "inst" and row.get("status") == "hit":
             return True
     return False
 
@@ -640,11 +664,13 @@ def _summarize_conn_outcomes(
         )
         return stats, errors
     rows = _tsv_rows(path.read_text(encoding="utf-8"))
-    expected = _expected_conn_outcomes(spec)
+    expected = _expected_conn_outcomes(spec, phase=phase)
     expect_false = {k for k, v in expected.items() if v is False}
     for row in rows:
         cid = row.get("check_id", "")
         if not cid:
+            continue
+        if any(_check_id_matches(skip, cid) for skip in CONN_VERDICT_SKIP_IDS):
             continue
         stats.total += 1
         connected = _conn_row_connected(row, phase=phase)
@@ -665,10 +691,10 @@ def _summarize_conn_outcomes(
             )
             continue
         if not connected:
+            if phase == "text":
+                continue
             stats.issues += 1
-            if phase == "text" and is_expected:
-                tag = "expected in logical only"
-            elif is_expected:
+            if is_expected:
                 tag = "expected disconnect"
             else:
                 tag = "review (JSON typo / RTL / endpoint?)"
@@ -827,7 +853,7 @@ def verify_suite_step_artifacts(
             _validate_conn_tsv(
                 art,
                 phase=phase,
-                expected=_expected_conn_outcomes(spec),
+                expected=_expected_conn_outcomes(spec, phase=phase),
                 step_label=label,
             )
         )
