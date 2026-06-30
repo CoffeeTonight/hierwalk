@@ -128,6 +128,15 @@ def _clean_body(body: str) -> str:
     return _BIND_LINE_RE.sub("", clean)
 
 
+def _clean_body_for_connect_scan(body: str) -> str:
+    """Strip comments/ifdef directive lines before statement splitting (align with inst_scan)."""
+    from hierwalk.inst_scan import slim_body_for_instance_scan
+    from hierwalk.preprocess import strip_comments_for_instance_scan
+
+    work = slim_body_for_instance_scan(strip_comments_for_instance_scan(body))
+    return _clean_body(work)
+
+
 _SELECT_NODE_RE = re.compile(
     r"((?:\\(?:[A-Za-z_]\w*|\S+)|[A-Za-z_]\w*)(?:\s*\[[^\]]+\])+)"
 )
@@ -2621,7 +2630,7 @@ def _stmt_offset(body: str, stmt: str, search_from: int = 0) -> int:
 
 
 def _iter_connect_statements_with_lines(body: str) -> Iterable[Tuple[str, int]]:
-    clean = _clean_body(body)
+    clean = _clean_body_for_connect_scan(body)
     search_from = 0
     for stmt in _merge_split_else_stmts(split_statements(clean)):
         pieces = _flatten_connect_statements(stmt)

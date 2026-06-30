@@ -19,7 +19,7 @@ _IGNORE_PATH_STUB = "/* hierwalk: ignore-path skipped */"
 _IFDEF_RE = re.compile(
     r"`(?:ifdef|ifndef)\s+([A-Za-z_]\w*)"
     r"|`elsif\s+([A-Za-z_]\w*)"
-    r"|`(?:else|endif)\b",
+    r"|`(?:else|endif|end)\b",
     re.IGNORECASE,
 )
 _DEFINE_LINE_RE = re.compile(
@@ -39,7 +39,7 @@ _BIND_LINE_RE = re.compile(r"^\s*bind\b", re.IGNORECASE | re.MULTILINE)
 _INCLUDE_LINE_RE = re.compile(r"^\s*`include\b", re.IGNORECASE)
 _LINE_COMMENT_RE = re.compile(r"//[^\n]*")
 _ENDIF_LABEL_COMMENT_RE = re.compile(
-    r"^(\s*`(?:endif|else))\s*//\s*[A-Za-z_]\w*\s*(.*)$",
+    r"^(\s*`(?:endif|else|end))\s*//\s*[A-Za-z_]\w*\s*(.*)$",
     re.IGNORECASE,
 )
 

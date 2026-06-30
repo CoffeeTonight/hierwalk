@@ -31,12 +31,12 @@ _PARAM_RE = re.compile(
 )
 _BIND_LINE_RE = re.compile(r"^\s*bind\b", re.IGNORECASE | re.MULTILINE)
 _DIRECTIVE_LINE_RE = re.compile(
-    r"^\s*`(?:define|undef|include|ifdef|ifndef|elsif|else|endif)\b",
+    r"^\s*`(?:define|undef|include|ifdef|ifndef|elsif|else|endif|end)\b",
     re.IGNORECASE,
 )
 _MACRO_ONLY_LINE_RE = re.compile(r"^\s*(?:`[A-Za-z_]\w*\s*)+$")
 _ENDIF_DIRECTIVE_SUFFIX_RE = re.compile(
-    r"^\s*`(?:endif|else)\b\s*(.*)$",
+    r"^\s*`(?:endif|else|end)\b\s*(.*)$",
     re.IGNORECASE,
 )
 _LARGE_BODY_ATTR_SKIP = 512 * 1024
@@ -234,6 +234,26 @@ def _iter_body_lines(body: str) -> Iterator[str]:
         yield body[start:]
 
 
+def _strip_inline_ifdef_directives(line: str) -> str:
+    """Drop inline `` `ifdef ``-family tokens; keep RTL fragments from every branch."""
+    from hierwalk.preprocess import _IFDEF_RE
+
+    parts: List[str] = []
+    pos = 0
+    while True:
+        m = _IFDEF_RE.search(line, pos)
+        if not m:
+            tail = line[pos:].strip()
+            if tail:
+                parts.append(tail)
+            break
+        head = line[pos : m.start()].strip()
+        if head:
+            parts.append(head)
+        pos = m.end()
+    return " ".join(parts)
+
+
 def slim_body_for_instance_scan(body: str) -> str:
     from hierwalk.preprocess import rtl_after_ifdef_label_comment
     """
@@ -245,6 +265,8 @@ def slim_body_for_instance_scan(body: str) -> str:
     """
     if "`" not in body:
         return body
+    from hierwalk.preprocess import _IFDEF_RE
+
     kept: List[str] = []
     for line in _iter_body_lines(body):
         if _DIRECTIVE_LINE_RE.match(line):
@@ -253,10 +275,17 @@ def slim_body_for_instance_scan(body: str) -> str:
                 suffix_m = _ENDIF_DIRECTIVE_SUFFIX_RE.match(line)
                 if suffix_m is not None:
                     trailing = suffix_m.group(1).strip()
+                    if trailing:
+                        trailing = _strip_inline_ifdef_directives(trailing)
             if trailing:
                 kept.append(trailing)
             continue
         if _MACRO_ONLY_LINE_RE.match(line):
+            continue
+        if _IFDEF_RE.search(line):
+            stripped = _strip_inline_ifdef_directives(line)
+            if stripped:
+                kept.append(stripped)
             continue
         kept.append(line)
     if not kept:
