@@ -61,12 +61,7 @@ def resolve_top_modules(
     """Pick root module(s) for elaboration."""
     if top:
         if top not in index.modules:
-            hinted = [t for t in filelist_tops if t]
-            extra = f"; filelist -top hints: {', '.join(hinted)}" if hinted else ""
-            raise ValueError(
-                f"Top module not found: {top} "
-                f"(index has {len(index.modules)} module(s)){extra}"
-            )
+            raise ValueError(f"Top module not found: {top}")
         return [top]
 
     hinted = [t for t in filelist_tops if t in index.modules and _is_top_candidate(index, t)]
@@ -93,13 +88,5 @@ def resolve_top_modules(
             + " (use --top NAME or --find-top)"
         )
     if len(found) == 0:
-        hinted_names = [t for t in filelist_tops if t]
-        extra = ""
-        if hinted_names:
-            extra = f" (filelist -top hints: {', '.join(hinted_names)})"
-        raise ValueError(
-            "No top module candidate in index"
-            + extra
-            + " — set JSON top, -top in .f, or use --top NAME"
-        )
+        raise ValueError("No top module candidate in index")
     return found

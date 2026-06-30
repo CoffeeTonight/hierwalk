@@ -21,7 +21,7 @@ from hierwalk.connect_endpoints import parse_connect_endpoint
 from hierwalk.connect_request import ConnectivityCheck, ConnectivityRequest, load_connect_request
 from hierwalk.connectivity import ConnectResult, ConnectivityBatchResult, run_connectivity_request
 from hierwalk.elab import elaborate
-from hierwalk.filelist import filelist_has_rtl, parse_filelist
+from hierwalk.filelist import parse_filelist
 from hierwalk.index import DesignIndex
 from hierwalk.lazy_scope import elab_scope_paths, endpoint_specs_from_request, lazy_scoped_connect_elab
 from hierwalk.models import FlatRow
@@ -452,15 +452,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         on_progress=on_progress,
         defer_source_exists=lazy_filelist_defer_exists(),
     )
-    if not filelist_has_rtl(fl):
-        from hierwalk.filelist import emit_filelist_failure
-
-        emit_filelist_failure(
-            fl,
-            config_filelist=args.filelist,
-            index_cwd=args.index_cwd or None,
-            stream=sys.stderr,
-        )
+    if not fl.source_files:
         print("No sources in filelist", file=sys.stderr)
         return 1
 

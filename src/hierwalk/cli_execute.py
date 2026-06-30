@@ -12,7 +12,6 @@ from hierwalk.coverage_audit import compute_coverage_audit
 from hierwalk.cache import (
     get_cached_elab,
     load_or_build_index,
-    resolve_effective_run_top,
     resolve_run_work_dir,
     resolve_top_label,
     set_active_work_dir,
@@ -29,7 +28,7 @@ from hierwalk.lazy_scope import (
     lazy_scoped_connect_elab,
 )
 from hierwalk.perf import effective_low_memory
-from hierwalk.filelist import filelist_has_rtl, parse_filelist
+from hierwalk.filelist import parse_filelist
 from hierwalk.progress import ProgressHeartbeat, ProgressReporter, progress_callback
 from hierwalk.hierarchy_log import emit_hierarchy_rows_log, emit_path_provenance_log, rows_lookup
 from hierwalk.report import RunReport, default_log_path, emit_run_report, phase_log_path
@@ -68,16 +67,6 @@ from hierwalk.inst_trace import (
 
 from hierwalk.top_find import find_top_modules, resolve_top_modules
 from hierwalk.run_request import RunConfig
-
-
-def _check_endpoint_roots(request: Optional[ConnectivityRequest]) -> list[str]:
-    if request is None:
-        return []
-    out: list[str] = []
-    for chk in request.checks:
-        for ep in (chk.endpoint_a, chk.endpoint_b):
-            out.append(str(ep))
-    return out
 from hierwalk.verification_timing import (
     get_active_recorder,
     record_connect_check,
@@ -188,15 +177,7 @@ def execute_run(cfg: RunConfig, ap) -> int:
         ignore_filelists=list(cfg.ignore_filelist),
         defer_source_exists=lazy_filelist_defer_exists(),
     )
-    if not filelist_has_rtl(fl):
-        from hierwalk.filelist import emit_filelist_failure
-
-        emit_filelist_failure(
-            fl,
-            config_filelist=cfg.filelist,
-            index_cwd=cfg.index_cwd,
-            stream=sys.stderr,
-        )
+    if not fl.source_files:
         print("No sources in filelist", file=sys.stderr)
         return 1
 
@@ -268,12 +249,11 @@ def execute_run(cfg: RunConfig, ap) -> int:
     if path_walk_mode:
         if on_progress:
             on_progress("path-walk: on-demand index (endpoint paths only)")
-        top_for_walk = resolve_effective_run_top(
-            cfg_top=cfg.top or "",
-            connect_top=connect_request.top if connect_request else "",
-            inst_trace_top=cfg.inst_trace.top if cfg.inst_trace else "",
-            filelist_tops=fl.top_modules,
-            check_endpoints=_check_endpoint_roots(connect_request),
+        top_for_walk = (
+            cfg.top
+            or (connect_request.top if connect_request else "")
+            or (cfg.inst_trace.top if cfg.inst_trace else "")
+            or (fl.top_modules[0] if fl.top_modules else "")
         )
         if not top_for_walk:
             print("path-walk requires --top or JSON top", file=sys.stderr)
@@ -678,13 +658,7 @@ def execute_run(cfg: RunConfig, ap) -> int:
     try:
         tops = resolve_top_modules(
             index,
-            top=resolve_effective_run_top(
-                cfg_top=cfg.top or "",
-                connect_top=connect_request.top if connect_request else "",
-                inst_trace_top=cfg.inst_trace.top if cfg.inst_trace else "",
-                filelist_tops=fl.top_modules,
-                check_endpoints=_check_endpoint_roots(connect_request),
-            ),
+            top=cfg.top or (connect_request.top if connect_request else ""),
             filelist_tops=fl.top_modules,
             all_tops=cfg.all_tops,
         )

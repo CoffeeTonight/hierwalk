@@ -95,42 +95,6 @@ def ensure_top_work_dir(top: str, *, base: Optional[Path] = None) -> Path:
     return root
 
 
-def _nonempty_top_name(value: Optional[str]) -> Optional[str]:
-    if value is None:
-        return None
-    name = str(value).strip()
-    return name or None
-
-
-def resolve_effective_run_top(
-    *,
-    cfg_top: str = "",
-    connect_top: str = "",
-    inst_trace_top: str = "",
-    filelist_tops: Sequence[str] = (),
-    check_endpoints: Sequence[str] = (),
-) -> Optional[str]:
-    """
-    First explicit top name for elaboration/path-walk.
-
-    Order: JSON/CLI ``top`` → connect/inst-trace block → filelist ``-top`` →
-    first check endpoint root (``blabla.u0.a`` → ``blabla``).
-    """
-    for candidate in (cfg_top, connect_top, inst_trace_top):
-        hit = _nonempty_top_name(candidate)
-        if hit is not None:
-            return hit
-    for hinted in filelist_tops:
-        hit = _nonempty_top_name(hinted)
-        if hit is not None:
-            return hit
-    for endpoint in check_endpoints:
-        raw = str(endpoint).strip()
-        if "." in raw:
-            return raw.split(".", 1)[0]
-    return None
-
-
 def resolve_top_label(
     *,
     cfg_top: str = "",
@@ -139,14 +103,11 @@ def resolve_top_label(
     filelist_tops: Sequence[str] = (),
     filelist_path: str = "",
 ) -> str:
-    hit = resolve_effective_run_top(
-        cfg_top=cfg_top,
-        connect_top=connect_top,
-        inst_trace_top=inst_trace_top,
-        filelist_tops=filelist_tops,
-    )
-    if hit is not None:
-        return hit
+    for candidate in (cfg_top, connect_top, inst_trace_top):
+        if candidate and candidate.strip():
+            return candidate.strip()
+    if filelist_tops:
+        return str(filelist_tops[0])
     if filelist_path:
         return Path(filelist_path).stem
     return "top"

@@ -411,10 +411,6 @@ def run_config_for_full_index(
     base = base_dir or Path.cwd()
     cfg = _merge_full_index_fields(shared, spec, base_dir=base)
 
-    top_raw = _mapping_get_ci(spec, "top")
-    if top_raw is not None and str(top_raw).strip() and not cfg.top:
-        cfg = replace(cfg, top=str(top_raw).strip())
-
     out_raw = _mapping_get_ci(spec, "output")
     output = (
         _resolve_path(base, str(out_raw).strip())
@@ -477,10 +473,6 @@ def run_config_for_test(
     cfg = _merge_full_index_fields(shared, spec, base_dir=base)
     if full_index_spec is not None and full_index_enabled:
         cfg = _merge_full_index_fields(cfg, full_index_spec, base_dir=base)
-
-    top_raw = _mapping_get_ci(spec, "top")
-    if top_raw is not None and str(top_raw).strip() and not cfg.top:
-        cfg = replace(cfg, top=str(top_raw).strip())
 
     index_strategy = resolve_verification_index_strategy(
         entry.mode,
@@ -658,21 +650,6 @@ def parse_flat_run_suite(
         )
 
     shared = parse_shared_run_request_json(data, base_dir=base_dir)
-    if not shared.top:
-        for kind in _FLAT_BLOCK_ORDER:
-            if kind == RUN_ON_FULL_INDEX:
-                key = _full_index_block_key(data)
-                if key is None:
-                    continue
-                spec_raw = _mapping_get_ci(data, key)
-            else:
-                spec_raw = _mapping_get_ci(data, kind)
-            if not isinstance(spec_raw, Mapping):
-                continue
-            top_raw = _mapping_get_ci(spec_raw, "top")
-            if top_raw is not None and str(top_raw).strip():
-                shared = replace(shared, top=str(top_raw).strip())
-                break
     shared = replace(
         shared,
         mode=None,

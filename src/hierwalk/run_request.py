@@ -254,13 +254,10 @@ class RunConfig:
 def _resolve_path(base: Path, value: Optional[str]) -> Optional[str]:
     if value is None or value == "-":
         return value
-    from hierwalk.hch_compat.platform_paths import expand_path_vars, resolve_path
-
-    expanded = expand_path_vars(str(value))
-    p = Path(expanded).expanduser()
-    if not p.is_absolute():
-        p = base / p
-    return str(resolve_path(p))
+    p = Path(value)
+    if p.is_absolute():
+        return str(p)
+    return str((base / p).resolve())
 
 
 def _parse_defines(data: Any) -> Dict[str, str]:
@@ -299,13 +296,6 @@ def _parse_jobs(data: Any) -> int:
 
 
 _JOBS_KEY_ALIASES = ("jobs", "j", "job", "workers", "parallel")
-
-
-def _nonempty_top_name(value: Optional[str]) -> Optional[str]:
-    if value is None:
-        return None
-    name = str(value).strip()
-    return name or None
 
 
 def _mapping_get_ci(data: Mapping[str, Any], key: str) -> Any:
@@ -615,7 +605,7 @@ def parse_run_request_json(
         raise ValueError("run request JSON must be an object")
 
     base = base_dir or Path.cwd()
-    filelist = str(_mapping_get_ci(data, "filelist") or "").strip()
+    filelist = str(data.get("filelist") or "").strip()
     if not filelist:
         raise ValueError("run request needs 'filelist'")
 
@@ -686,7 +676,7 @@ def parse_run_request_json(
 
     return RunConfig(
         filelist=_resolve_path(base, filelist) or filelist,
-        top=_nonempty_top_name(str(_mapping_get_ci(data, "top") or "").strip() or None),
+        top=str(data.get("top") or "").strip() or None,
         find_top=bool(data.get("find_top")) or mode == "find-top",
         all_tops=bool(data.get("all_tops", False)),
         output=_resolve_path(base, str(data.get("output") or "-")) or "-",

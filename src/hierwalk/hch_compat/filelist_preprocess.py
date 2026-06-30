@@ -27,7 +27,6 @@ OnFilelistProgress = Callable[[str], None]
 class FilelistResult:
     top_path: Path
     base_dir: Path
-    raw_top_filelist: str = ""
     source_files: List[Path] = field(default_factory=list)
     incdirs: List[Path] = field(default_factory=list)
     defines: Dict[str, str] = field(default_factory=dict)
@@ -51,83 +50,7 @@ def _strip_comments(line: str) -> str:
     line = re.sub(r"/\*.*?\*/", "", line, flags=re.DOTALL)
     if "//" in line:
         line = line.split("//", 1)[0]
-    return line.strip().replace("\r", "")
-
-
-_RTL_SUFFIXES = (".v", ".sv", ".vh", ".svh")
-
-
-def _is_rtl_path_token(raw: str) -> bool:
-    from hierwalk.hch_compat.platform_paths import normalize_filelist_token
-
-    tok = normalize_filelist_token(raw)
-    if not tok:
-        return False
-    lower = tok.casefold()
-    return any(lower.endswith(ext) for ext in _RTL_SUFFIXES)
-
-
-_PATH_LIKE_GLUE = re.compile(r"(?:[./$\\]|^\.|\.)")
-
-
-def _looks_like_filelist_path(arg: str) -> bool:
-    """Glued ``-f``/``-F`` only when the token looks like a path, not ``-full64``."""
-    if not arg:
-        return False
-    return bool(_PATH_LIKE_GLUE.search(arg))
-
-
-def _dash_switch_arg(
-    line: str,
-    flag: str,
-    *,
-    allow_glued: bool = False,
-) -> Optional[str]:
-    """
-    VCS-style ``-f``, ``-F``, ``-v``, ``-y`` lines.
-
-    Accepts space or tab before the argument. Glued paths (``-flist.f``) are optional
-    and only enabled for ``-f``/``-F`` when the suffix looks path-like.
-    """
-    stripped = line.strip()
-    prefix = f"-{flag}"
-    if not stripped.startswith(prefix):
-        return None
-    rest = stripped[len(prefix) :]
-    if not rest:
-        return None
-    if rest[0] == "=":
-        rest = rest[1:].lstrip(" \t")
-        return rest if rest else None
-    if rest[0] in " \t":
-        rest = rest.lstrip(" \t")
-        if rest.startswith("="):
-            rest = rest[1:].lstrip(" \t")
-        return rest if rest else None
-    if not allow_glued:
-        return None
-    return rest if _looks_like_filelist_path(rest) else None
-
-
-def _word_switch_arg(line: str, word: str) -> Optional[str]:
-    """``-top name``, ``-topmodule name`` — whitespace required after the keyword."""
-    stripped = line.strip()
-    if not stripped.startswith(word):
-        return None
-    rest = stripped[len(word) :]
-    if not rest or rest[0] not in " \t":
-        return None
-    arg = rest.lstrip(" \t")
-    return arg if arg else None
-
-
-def _nested_filelist_directive(line: str) -> Optional[tuple[str, str]]:
-    """Parse nested ``-f`` / ``-F`` filelist includes (space, tab, or glued path)."""
-    for flag in ("F", "f"):
-        arg = _dash_switch_arg(line, flag, allow_glued=True)
-        if arg is not None:
-            return f"-{flag}", arg
-    return None
+    return line.strip()
 
 
 def expand_filelist(
@@ -145,24 +68,26 @@ def expand_filelist(
     ``index_cwd`` is the directory tools use for ``-F`` (see :func:`filelist_cwd.resolve_index_cwd`).
     """
     from hierwalk.hch_compat.filelist_cwd import resolve_index_cwd
-    from hierwalk.hch_compat.platform_paths import (
-        expand_path_vars,
-        merge_environ,
-        normalize_filelist_token,
-        resolve_path as _resolve_abs,
-        unexpanded_path_vars,
-    )
 
-    raw_top = str(top_filelist)
-    env_map = merge_environ(env)
-    top = _resolve_abs(expand_path_vars(raw_top, env_map))
-    cwd = resolve_index_cwd(top, index_cwd, env_map)
-    result = FilelistResult(top_path=top, base_dir=top.parent, raw_top_filelist=raw_top)
+    top = Path(top_filelist).resolve()
+    cwd = resolve_index_cwd(top, index_cwd, env)
+    env = env or {}
+    result = FilelistResult(top_path=top, base_dir=top.parent)
     seen_fl: Set[Path] = set()
     seen_src: Set[Path] = set()
 
+    def expand_env(s: str) -> str:
+        for k, v in env.items():
+            s = s.replace(f"${{{k}}}", v).replace(f"${k}", v)
+        return os.path.expandvars(s)
+
+    from hierwalk.hch_compat.platform_paths import (
+        normalize_filelist_token,
+        resolve_path as _resolve_abs,
+    )
+
     def resolve_path(raw: str, base: Path) -> Path:
-        raw = expand_path_vars(raw, env_map)
+        raw = expand_env(normalize_filelist_token(raw))
         p = Path(raw)
         if not p.is_absolute():
             p = base / p
@@ -188,10 +113,7 @@ def expand_filelist(
         elif sp.exists():
             result.source_files.append(sp)
         else:
-            msg = f"Source not found: {sp}"
-            result.errors.append(msg)
-            if on_progress:
-                on_progress(f"filelist: missing source {sp}")
+            result.errors.append(f"Source not found: {sp}")
 
     def add_incdir(ip: Path) -> None:
         if ip not in result.incdirs:
@@ -256,7 +178,7 @@ def expand_filelist(
                 on_progress(f"filelist: missing {fpath}")
             return
         base = content_base
-        text = fpath.read_text(encoding="utf-8-sig", errors="ignore")
+        text = fpath.read_text(encoding="utf-8", errors="ignore")
         for raw_line in text.splitlines():
             line = _strip_comments(raw_line)
             if not line or line.startswith("#"):
@@ -286,17 +208,12 @@ def expand_filelist(
                         ext = "." + ext
                     if ext and ext not in result.libexts:
                         result.libexts.append(ext)
-            elif (v_arg := _dash_switch_arg(line, "v")) is not None:
-                vp = resolve_path(v_arg, base)
+            elif line.startswith("-v "):
+                vp = resolve_path(line[3:].strip(), base)
                 if vp not in result.library_files:
                     result.library_files.append(vp)
-                add_source(
-                    vp,
-                    via_filelist=fpath,
-                    chain=this_chain,
-                )
-            elif (y_arg := _dash_switch_arg(line, "y")) is not None:
-                yp = resolve_path(y_arg, base)
+            elif line.startswith("-y "):
+                yp = resolve_path(line[3:].strip(), base)
                 if yp not in result.library_dirs:
                     result.library_dirs.append(yp)
             elif line.startswith("+libdir+"):
@@ -315,51 +232,49 @@ def expand_filelist(
                 result.slang_options.append(line)
             elif line.startswith("+ntb"):
                 result.unsupported_options.append(line[:40])
-            elif (top_mod := _word_switch_arg(line, "-topmodule")) is not None:
-                if top_mod not in result.top_modules:
-                    result.top_modules.append(top_mod)
-            elif (top_name := _word_switch_arg(line, "-top")) is not None:
-                if top_name not in result.top_modules:
+            elif line.startswith("-top ") or line.startswith("-topmodule "):
+                top_name = line.split(maxsplit=1)[1].strip() if " " in line else ""
+                if top_name and top_name not in result.top_modules:
                     result.top_modules.append(top_name)
-            elif (work_lib := _word_switch_arg(line, "-worklib")) is not None:
-                result.work_library = work_lib
-            elif (work_name := _word_switch_arg(line, "-work")) is not None:
-                result.work_library = work_name
+            elif line.startswith("-work ") or line.startswith("-worklib "):
+                result.work_library = line.split(maxsplit=1)[1].strip()
             elif line.startswith("+top+"):
                 body = line[len("+top+") :].strip()
                 if body and body not in result.top_modules:
                     result.top_modules.append(body)
-            elif (nested_hit := _nested_filelist_directive(line)) is not None:
-                kind, nested = nested_hit
-                locate_base = cwd if kind == "-F" else fpath.parent
-                np = resolve_path(nested, locate_base)
-                if on_progress:
-                    on_progress(f"filelist: nested {kind} {nested!r} -> {np}")
-                    for var in unexpanded_path_vars(str(np)):
-                        on_progress(
-                            f"filelist: WARNING unresolved env in {kind} path: {var}"
-                        )
+            elif line.startswith("-f "):
+                nested = line[3:].strip()
+                np = resolve_path(nested, fpath.parent)
                 chain_text = " -> ".join(str(p) for p in this_chain + [np])
                 if _skip_nested_filelist(np, chain_text):
                     if on_progress:
                         on_progress(f"filelist: skip {np.name} (ignore-filelist)")
                     continue
-                link_nested(fpath, np, kind)
+                link_nested(fpath, np, "-f")
                 parse_one(
                     np,
-                    content_base=np.parent if kind == "-f" else cwd,
+                    content_base=np.parent,
                     chain=this_chain,
                     parent=fpath,
-                    include_kind=kind,
+                    include_kind="-f",
+                )
+            elif line.startswith("-F "):
+                nested = line[3:].strip()
+                np = resolve_path(nested, cwd)
+                chain_text = " -> ".join(str(p) for p in this_chain + [np])
+                if _skip_nested_filelist(np, chain_text):
+                    if on_progress:
+                        on_progress(f"filelist: skip {np.name} (ignore-filelist)")
+                    continue
+                link_nested(fpath, np, "-F")
+                parse_one(
+                    np,
+                    content_base=cwd,
+                    chain=this_chain,
+                    parent=fpath,
+                    include_kind="-F",
                 )
             else:
-                if _is_rtl_path_token(line):
-                    add_source(
-                        resolve_path(line, base),
-                        via_filelist=fpath,
-                        chain=this_chain,
-                    )
-                    continue
                 tokens = line.split()
                 if len(tokens) >= 2 and tokens[0] in ("-top", "-topmodule"):
                     if tokens[1] not in result.top_modules:
@@ -367,34 +282,15 @@ def expand_filelist(
                 elif len(tokens) >= 2 and tokens[0] in ("-work", "-worklib"):
                     result.work_library = tokens[1]
                 for tok in tokens:
-                    if _is_rtl_path_token(tok):
+                    if tok.endswith((".v", ".sv", ".vh", ".svh")):
                         add_source(
                             resolve_path(tok, base),
                             via_filelist=fpath,
                             chain=this_chain,
                         )
-                if not tokens:
-                    continue
-                if not any(_is_rtl_path_token(tok) for tok in tokens) and "," in line:
-                    for piece in line.split(","):
-                        piece = piece.strip()
-                        if _is_rtl_path_token(piece):
-                            add_source(
-                                resolve_path(piece, base),
-                                via_filelist=fpath,
-                                chain=this_chain,
-                            )
 
     if on_progress:
-        on_progress(f"filelist: expanding {top}")
-        if normalize_filelist_token(raw_top) != str(top):
-            on_progress(f"filelist: env-expand {raw_top!r} -> {top}")
-        unresolved = unexpanded_path_vars(str(top))
-        if unresolved:
-            on_progress(
-                "filelist: WARNING unresolved env in top path: "
-                + ", ".join(unresolved)
-            )
+        on_progress(f"filelist: expanding {top.name}")
     parse_one(top.resolve(), content_base=top.parent, chain=[], include_kind="top")
     add_incdir(result.base_dir)
     result.index_cwd_used = cwd
