@@ -71,7 +71,6 @@ def expand_filelist(
     from hierwalk.hch_compat.platform_paths import (
         expand_path_vars,
         merge_environ,
-        normalize_filelist_token,
         resolve_path as _resolve_abs,
     )
 

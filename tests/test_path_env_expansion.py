@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ctypes
+import ctypes.util
 import json
 import os
 import subprocess
@@ -12,8 +14,15 @@ import pytest
 
 from hierwalk.filelist import parse_filelist
 from hierwalk.hch_compat.filelist_preprocess import expand_filelist
-from hierwalk.hch_compat.platform_paths import expand_path_vars
+from hierwalk.hch_compat.platform_paths import expand_path_vars, merge_environ
 from hierwalk.run_request import _resolve_path, parse_shared_run_request_json
+
+
+def _libc_setenv(name: str, value: str) -> None:
+    libc = ctypes.CDLL(ctypes.util.find_library("c"))
+    libc.setenv.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int]
+    if libc.setenv(name.encode(), value.encode(), 1) != 0:
+        raise OSError(f"setenv({name!r}) failed")
 
 
 def test_expand_path_vars_uses_process_environ(monkeypatch):
@@ -51,6 +60,37 @@ def test_expand_filelist_top_path_and_rtl_lines_use_environ(monkeypatch, tmp_pat
     result = expand_filelist("$HWALK_FL")
     assert len(result.source_files) == 1
     assert result.source_files[0].resolve() == (rtl_dir / "top.v").resolve()
+
+
+def test_merge_environ_sees_libc_setenv_without_os_environ_update(tmp_path: Path):
+    """C host setenv after Python start — libc environ must be visible."""
+    key = "HWALK_LIBC_ONLY"
+    value = str(tmp_path / "from_libc")
+    _libc_setenv(key, value)
+    assert os.environ.get(key) is None
+    assert merge_environ().get(key) == value
+    expanded = expand_path_vars(f"${key}/design.f")
+    assert expanded == f"{value}/design.f"
+
+
+def test_inprocess_libc_setenv_json_filelist_and_rtl(tmp_path: Path):
+    rtl = tmp_path / "rtl"
+    rtl.mkdir()
+    (rtl / "top.v").write_text("module top(input a, output z); assign z=a; endmodule\n", encoding="utf-8")
+    fl = tmp_path / "design.f"
+    fl.write_text("$HWALK_RTL_DIR/top.v\n", encoding="utf-8")
+    _libc_setenv("HWALK_RTL_DIR", str(rtl))
+    _libc_setenv("HWALK_FL", str(fl))
+
+    cfg = parse_shared_run_request_json(
+        {"filelist": "$HWALK_FL", "top": "top"},
+        base_dir=tmp_path,
+    )
+    assert cfg.filelist == str(fl.resolve())
+
+    parsed = expand_filelist(cfg.filelist)
+    assert len(parsed.source_files) == 1
+    assert parsed.source_files[0].resolve() == (rtl / "top.v").resolve()
 
 
 def test_cli_run_json_filelist_env_expansion(monkeypatch, tmp_path: Path):

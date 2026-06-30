@@ -8,6 +8,8 @@ Cross-platform path normalization (Linux / Windows / macOS).
 
 from __future__ import annotations
 
+import ctypes
+import ctypes.util
 import os
 import platform
 import sys
@@ -70,9 +72,41 @@ def normalize_filelist_token(raw: str) -> str:
     return raw.strip().strip('"').strip("'").strip()
 
 
+def _libc_environ() -> dict[str, str]:
+    """
+    Read the process environment from libc (POSIX).
+
+    Needed when a C host calls ``setenv`` after Python started: ``os.environ``
+    is not refreshed, but child RTL/filelist paths must still resolve.
+    """
+    if is_windows():
+        return {}
+    try:
+        libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+        environ = ctypes.POINTER(ctypes.c_char_p).in_dll(libc, "environ")
+    except (AttributeError, OSError, TypeError, ValueError):
+        return {}
+    if not environ:
+        return {}
+    out: dict[str, str] = {}
+    idx = 0
+    while environ[idx]:
+        raw = environ[idx]
+        if raw is None:
+            break
+        entry = raw.decode("utf-8", errors="surrogateescape")
+        idx += 1
+        if "=" not in entry:
+            continue
+        key, _, value = entry.partition("=")
+        out[key] = value
+    return out
+
+
 def merge_environ(extra: Optional[Mapping[str, str]] = None) -> dict[str, str]:
     """Process environment merged with optional overrides (JSON ``env`` block, etc.)."""
     merged = dict(os.environ)
+    merged.update(_libc_environ())
     if extra:
         for key, value in extra.items():
             if value is None:
