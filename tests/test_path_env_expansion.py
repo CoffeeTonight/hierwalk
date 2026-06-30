@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from hierwalk.filelist import parse_filelist
+from hierwalk.filelist import filelist_has_rtl, parse_filelist
 from hierwalk.hch_compat.filelist_preprocess import expand_filelist
 from hierwalk.hch_compat.platform_paths import expand_path_vars, merge_environ
 from hierwalk.run_request import _resolve_path, parse_shared_run_request_json
@@ -141,6 +141,63 @@ def test_vcs_flags_not_misparsed_as_nested_f_or_v(tmp_path: Path):
     assert result.source_files == []
     assert result.errors == []
     assert result.filelist_info and len(result.filelist_info) == 1
+
+
+def test_nested_f_chain_only_directives_until_quoted_rtl(tmp_path: Path):
+    """Top .f has only nested -f lines; leaf lists RTL in quotes."""
+    rtl = tmp_path / "rtl"
+    rtl.mkdir()
+    (rtl / "chip.v").write_text("module chip; endmodule\n", encoding="utf-8")
+    leaf = tmp_path / "leaf.f"
+    leaf.write_text(f'"{rtl / "chip.v"}"\n', encoding="utf-8")
+    mid = tmp_path / "mid.f"
+    mid.write_text(f"-f {leaf}\n", encoding="utf-8")
+    top = tmp_path / "top.f"
+    top.write_text(f"-f {mid}\n", encoding="utf-8")
+    result = expand_filelist(str(top))
+    assert len(result.source_files) == 1
+    assert result.source_files[0].resolve() == (rtl / "chip.v").resolve()
+
+
+def test_nested_f_chain_only_directives_until_dash_v_rtl(tmp_path: Path):
+    rtl = tmp_path / "rtl"
+    rtl.mkdir()
+    (rtl / "chip.v").write_text("module chip; endmodule\n", encoding="utf-8")
+    leaf = tmp_path / "leaf.f"
+    leaf.write_text(f"-v {rtl / 'chip.v'}\n", encoding="utf-8")
+    top = tmp_path / "top.f"
+    top.write_text(f"-f {leaf}\n", encoding="utf-8")
+    result = expand_filelist(str(top))
+    assert result.source_files == []
+    assert len(result.library_files) == 1
+    assert filelist_has_rtl(parse_filelist(str(top)))
+
+
+def test_nested_f_bom_before_directive(tmp_path: Path):
+    rtl = tmp_path / "rtl"
+    rtl.mkdir()
+    (rtl / "chip.v").write_text("module chip; endmodule\n", encoding="utf-8")
+    leaf = tmp_path / "leaf.f"
+    leaf.write_text("rtl/chip.v\n", encoding="utf-8")
+    mid = tmp_path / "mid.f"
+    mid.write_bytes("\ufeff-f ".encode("utf-8") + str(leaf).encode("utf-8") + b"\n")
+    top = tmp_path / "top.f"
+    top.write_text(f"-f {mid}\n", encoding="utf-8")
+    result = expand_filelist(str(top))
+    assert len(result.source_files) == 1
+
+
+def test_nested_f_equals_syntax_and_uppercase_v_extension(tmp_path: Path):
+    rtl = tmp_path / "rtl"
+    rtl.mkdir()
+    (rtl / "chip.V").write_text("module chip; endmodule\n", encoding="utf-8")
+    leaf = tmp_path / "leaf.f"
+    leaf.write_text(f"{rtl / 'chip.V'}\n", encoding="utf-8")
+    top = tmp_path / "top.f"
+    top.write_text(f"-f={leaf}\n", encoding="utf-8")
+    result = expand_filelist(str(top))
+    assert len(result.source_files) == 1
+    assert result.source_files[0].resolve() == (rtl / "chip.V").resolve()
 
 
 def test_dash_v_and_y_accept_tab_whitespace(tmp_path: Path):

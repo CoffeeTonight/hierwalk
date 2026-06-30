@@ -28,7 +28,7 @@ from hierwalk.lazy_scope import (
     lazy_scoped_connect_elab,
 )
 from hierwalk.perf import effective_low_memory
-from hierwalk.filelist import parse_filelist
+from hierwalk.filelist import filelist_has_rtl, parse_filelist
 from hierwalk.progress import ProgressHeartbeat, ProgressReporter, progress_callback
 from hierwalk.hierarchy_log import emit_hierarchy_rows_log, emit_path_provenance_log, rows_lookup
 from hierwalk.report import RunReport, default_log_path, emit_run_report, phase_log_path
@@ -177,7 +177,7 @@ def execute_run(cfg: RunConfig, ap) -> int:
         ignore_filelists=list(cfg.ignore_filelist),
         defer_source_exists=lazy_filelist_defer_exists(),
     )
-    if not fl.source_files:
+    if not filelist_has_rtl(fl):
         from hierwalk.filelist import emit_filelist_failure
 
         emit_filelist_failure(

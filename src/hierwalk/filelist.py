@@ -98,6 +98,11 @@ def filelist_provenance_maps(
     return via, chain
 
 
+def filelist_has_rtl(fl: FilelistResult) -> bool:
+    """True when the expanded filelist names RTL via sources and/or ``-v``/``-y`` libraries."""
+    return bool(fl.source_files or fl.library_files or fl.library_dirs)
+
+
 def filelist_status_map(fl: FilelistResult) -> Dict[str, str]:
     """regexVerilogAST ``filelist[path] = 'True: chain'`` compatible view."""
     out: Dict[str, str] = {}
@@ -154,9 +159,24 @@ def emit_filelist_failure(
             chain = rec.chain or path
             print(f"run: filelist: missing .f file: {path} (chain: {chain})", file=out)
 
+    if fl.filelist_info:
+        names = ", ".join(sorted(Path(p).name for p in fl.filelist_info))
+        print(
+            f"run: filelist: opened {len(fl.filelist_info)} .f file(s): {names}",
+            file=out,
+        )
+    if fl.library_files or fl.library_dirs:
+        print(
+            "run: filelist: note: "
+            f"{len(fl.library_files)} -v file(s), {len(fl.library_dirs)} -y dir(s) "
+            "(library entries; bare .v/.sv/.vh/.svh lines also count as RTL sources)",
+            file=out,
+        )
+
     if not fl.errors and not any(not rec.exists for rec in fl.filelist_info.values()):
         print(
-            "run: filelist: parsed .f file(s) contain no .v/.sv/.vh/.svh source lines",
+            "run: filelist: parsed .f file(s) contain no .v/.sv/.vh/.svh source lines "
+            "(check quoted paths, .V case, -f=path syntax, or nested -f env expansion)",
             file=out,
         )
 

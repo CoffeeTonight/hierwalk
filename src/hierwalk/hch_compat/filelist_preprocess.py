@@ -54,6 +54,19 @@ def _strip_comments(line: str) -> str:
     return line.strip().replace("\r", "")
 
 
+_RTL_SUFFIXES = (".v", ".sv", ".vh", ".svh")
+
+
+def _is_rtl_path_token(raw: str) -> bool:
+    from hierwalk.hch_compat.platform_paths import normalize_filelist_token
+
+    tok = normalize_filelist_token(raw)
+    if not tok:
+        return False
+    lower = tok.casefold()
+    return any(lower.endswith(ext) for ext in _RTL_SUFFIXES)
+
+
 _PATH_LIKE_GLUE = re.compile(r"(?:[./$\\]|^\.|\.)")
 
 
@@ -83,8 +96,13 @@ def _dash_switch_arg(
     rest = stripped[len(prefix) :]
     if not rest:
         return None
+    if rest[0] == "=":
+        rest = rest[1:].lstrip(" \t")
+        return rest if rest else None
     if rest[0] in " \t":
         rest = rest.lstrip(" \t")
+        if rest.startswith("="):
+            rest = rest[1:].lstrip(" \t")
         return rest if rest else None
     if not allow_glued:
         return None
@@ -238,7 +256,7 @@ def expand_filelist(
                 on_progress(f"filelist: missing {fpath}")
             return
         base = content_base
-        text = fpath.read_text(encoding="utf-8", errors="ignore")
+        text = fpath.read_text(encoding="utf-8-sig", errors="ignore")
         for raw_line in text.splitlines():
             line = _strip_comments(raw_line)
             if not line or line.startswith("#"):
@@ -330,6 +348,13 @@ def expand_filelist(
                     include_kind=kind,
                 )
             else:
+                if _is_rtl_path_token(line):
+                    add_source(
+                        resolve_path(line, base),
+                        via_filelist=fpath,
+                        chain=this_chain,
+                    )
+                    continue
                 tokens = line.split()
                 if len(tokens) >= 2 and tokens[0] in ("-top", "-topmodule"):
                     if tokens[1] not in result.top_modules:
@@ -337,12 +362,23 @@ def expand_filelist(
                 elif len(tokens) >= 2 and tokens[0] in ("-work", "-worklib"):
                     result.work_library = tokens[1]
                 for tok in tokens:
-                    if tok.endswith((".v", ".sv", ".vh", ".svh")):
+                    if _is_rtl_path_token(tok):
                         add_source(
                             resolve_path(tok, base),
                             via_filelist=fpath,
                             chain=this_chain,
                         )
+                if not tokens:
+                    continue
+                if not any(_is_rtl_path_token(tok) for tok in tokens) and "," in line:
+                    for piece in line.split(","):
+                        piece = piece.strip()
+                        if _is_rtl_path_token(piece):
+                            add_source(
+                                resolve_path(piece, base),
+                                via_filelist=fpath,
+                                chain=this_chain,
+                            )
 
     if on_progress:
         on_progress(f"filelist: expanding {top}")
