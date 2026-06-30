@@ -12,7 +12,7 @@ import os
 import platform
 import sys
 from pathlib import Path
-from typing import Union
+from typing import Mapping, Optional, Union
 
 PathLike = Union[str, Path]
 
@@ -68,6 +68,36 @@ def path_contains(haystack: PathLike, needle: str) -> bool:
 def normalize_filelist_token(raw: str) -> str:
     """Strip quotes; keep token usable with :class:`Path` on any OS."""
     return raw.strip().strip('"').strip("'").strip()
+
+
+def merge_environ(extra: Optional[Mapping[str, str]] = None) -> dict[str, str]:
+    """Process environment merged with optional overrides (JSON ``env`` block, etc.)."""
+    merged = dict(os.environ)
+    if extra:
+        for key, value in extra.items():
+            if value is None:
+                merged.pop(str(key), None)
+            else:
+                merged[str(key)] = str(value)
+    return merged
+
+
+def expand_path_vars(
+    raw: str,
+    env: Optional[Mapping[str, str]] = None,
+) -> str:
+    """
+    Expand ``$VAR`` / ``${VAR}`` (and Windows ``%VAR%``) using the process environment.
+
+    Used for RUN.json paths (``filelist``, ``index_cwd``, …) and Verilog filelist lines.
+    Longer variable names are substituted before shorter ones (``$PROJ_ROOT`` before ``$PROJ``).
+    """
+    s = normalize_filelist_token(raw)
+    env_map = merge_environ(env)
+    for key in sorted(env_map, key=lambda name: -len(name)):
+        value = env_map[key]
+        s = s.replace(f"${{{key}}}", value).replace(f"${key}", value)
+    return os.path.expandvars(s)
 
 
 def normalize_dql_path_pattern(pattern: str) -> str:

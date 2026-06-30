@@ -254,10 +254,13 @@ class RunConfig:
 def _resolve_path(base: Path, value: Optional[str]) -> Optional[str]:
     if value is None or value == "-":
         return value
-    p = Path(value)
-    if p.is_absolute():
-        return str(p)
-    return str((base / p).resolve())
+    from hierwalk.hch_compat.platform_paths import expand_path_vars, resolve_path
+
+    expanded = expand_path_vars(str(value))
+    p = Path(expanded).expanduser()
+    if not p.is_absolute():
+        p = base / p
+    return str(resolve_path(p))
 
 
 def _parse_defines(data: Any) -> Dict[str, str]:

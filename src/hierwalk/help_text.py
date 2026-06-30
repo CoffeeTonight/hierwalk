@@ -68,6 +68,8 @@ Required
 --------
   filelist (string)
       Top Verilog filelist (.f). Same as the positional argument.
+      ``$VAR`` / ``${VAR}`` expand from the process environment (setenv/export).
+      RTL paths inside the ``.f`` use the same expansion.
 
 Mode (optional; inferred when omitted)
 --------------------------------------
@@ -83,7 +85,8 @@ Elaboration / filelist
   defines (object | array)    Extra +define macros.
                               Object: {"USE_PCIE": "1", "DEBUG": "1"}
                               Array:  ["USE_PCIE=1", "DEBUG"]
-  index-cwd (string)          EDA cwd for -F nested filelists (--index-cwd)
+  index-cwd (string)          EDA cwd for -F nested filelists (--index-cwd);
+                              also ``$VAR`` / ``HCH_INDEX_CWD`` env
   max-depth (int)             Max instance elaboration depth (--max-depth)
 
 Output / logging

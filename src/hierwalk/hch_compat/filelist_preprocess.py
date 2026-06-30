@@ -68,26 +68,22 @@ def expand_filelist(
     ``index_cwd`` is the directory tools use for ``-F`` (see :func:`filelist_cwd.resolve_index_cwd`).
     """
     from hierwalk.hch_compat.filelist_cwd import resolve_index_cwd
-
-    top = Path(top_filelist).resolve()
-    cwd = resolve_index_cwd(top, index_cwd, env)
-    env = env or {}
-    result = FilelistResult(top_path=top, base_dir=top.parent)
-    seen_fl: Set[Path] = set()
-    seen_src: Set[Path] = set()
-
-    def expand_env(s: str) -> str:
-        for k, v in env.items():
-            s = s.replace(f"${{{k}}}", v).replace(f"${k}", v)
-        return os.path.expandvars(s)
-
     from hierwalk.hch_compat.platform_paths import (
+        expand_path_vars,
+        merge_environ,
         normalize_filelist_token,
         resolve_path as _resolve_abs,
     )
 
+    env_map = merge_environ(env)
+    top = _resolve_abs(expand_path_vars(str(top_filelist), env_map))
+    cwd = resolve_index_cwd(top, index_cwd, env_map)
+    result = FilelistResult(top_path=top, base_dir=top.parent)
+    seen_fl: Set[Path] = set()
+    seen_src: Set[Path] = set()
+
     def resolve_path(raw: str, base: Path) -> Path:
-        raw = expand_env(normalize_filelist_token(raw))
+        raw = expand_path_vars(raw, env_map)
         p = Path(raw)
         if not p.is_absolute():
             p = base / p

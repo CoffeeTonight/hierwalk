@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Optional, Union
 
@@ -19,12 +18,12 @@ def resolve_index_cwd(
 
     Priority: explicit ``index_cwd`` → ``HCH_INDEX_CWD`` env → parent of top ``.f``.
     """
-    from hierwalk.hch_compat.platform_paths import resolve_path
+    from hierwalk.hch_compat.platform_paths import expand_path_vars, merge_environ, resolve_path
 
+    env_map = merge_environ(env)
     if index_cwd is not None and str(index_cwd).strip():
-        return resolve_path(index_cwd)
-    env_map = env if env is not None else os.environ
+        return resolve_path(expand_path_vars(str(index_cwd), env_map))
     raw = str(env_map.get(_ENV_INDEX_CWD, "") or "").strip()
     if raw:
-        return resolve_path(raw)
+        return resolve_path(expand_path_vars(raw, env_map))
     return resolve_path(Path(top_filelist).parent)
