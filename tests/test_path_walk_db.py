@@ -103,6 +103,94 @@ def test_tier1_picks_file_with_expected_instance(tmp_path: Path):
     assert str(Path(rec.file_path).resolve()) == str(right_file.resolve())
 
 
+def test_tier1_honors_cross_file_rtl_undef(tmp_path: Path):
+    (tmp_path / "a.v").write_text("`define USE_CHILD 1\n", encoding="utf-8")
+    (tmp_path / "parent.v").write_text(
+        "`undef USE_CHILD\n"
+        "module parent;\n"
+        "`ifdef USE_CHILD\n"
+        "  child u_c ();\n"
+        "`endif\n"
+        "endmodule\n"
+        "module child; endmodule\n",
+        encoding="utf-8",
+    )
+    fl = tmp_path / "filelist.f"
+    fl.write_text(
+        "\n".join(
+            [
+                str((tmp_path / "a.v").resolve()),
+                str((tmp_path / "parent.v").resolve()),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    flr = parse_filelist(str(fl), index_cwd=str(tmp_path))
+    index = DesignIndex._assemble(
+        {},
+        path_patterns=[],
+        module_patterns=[],
+        preprocess_include_dirs=[str(p) for p in flr.include_dirs],
+        preprocess_defines=dict(flr.defines),
+    )
+    db = PathWalkModuleDb(
+        [str(p) for p in flr.source_files],
+        index,
+        include_dirs=[str(p) for p in flr.include_dirs],
+        defines=dict(flr.defines),
+        no_cache=True,
+    )
+    scanned = db.tier1_scan_file(str((tmp_path / "parent.v").resolve()))
+    assert scanned["parent"].instances == []
+
+
+def test_tier1_honors_cross_file_rtl_define(tmp_path: Path):
+    """RTL `` `define `` in file A must activate `` `ifdef `` instances in file B."""
+    (tmp_path / "defines.v").write_text(
+        "`define USE_CHILD 1\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "parent.v").write_text(
+        "module parent;\n"
+        "`ifdef USE_CHILD\n"
+        "  child u_c ();\n"
+        "`endif\n"
+        "endmodule\n"
+        "module child; endmodule\n",
+        encoding="utf-8",
+    )
+    fl = tmp_path / "filelist.f"
+    fl.write_text(
+        "\n".join(
+            [
+                str((tmp_path / "defines.v").resolve()),
+                str((tmp_path / "parent.v").resolve()),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    flr = parse_filelist(str(fl), index_cwd=str(tmp_path))
+    index = DesignIndex._assemble(
+        {},
+        path_patterns=[],
+        module_patterns=[],
+        preprocess_include_dirs=[str(p) for p in flr.include_dirs],
+        preprocess_defines=dict(flr.defines),
+    )
+    db = PathWalkModuleDb(
+        [str(p) for p in flr.source_files],
+        index,
+        include_dirs=[str(p) for p in flr.include_dirs],
+        defines=dict(flr.defines),
+        no_cache=True,
+    )
+    scanned = db.tier1_scan_file(str((tmp_path / "parent.v").resolve()))
+    insts = {e.inst_name for e in scanned["parent"].instances}
+    assert "u_c" in insts
+
+
 def test_tier1_validated_cache_keys_effective_defines(tmp_path: Path):
     """Tier-1 disk cache must use post-preprocess defines, not filelist-only."""
     rtl = tmp_path / "soc.v"

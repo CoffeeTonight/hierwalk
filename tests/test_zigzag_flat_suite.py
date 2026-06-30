@@ -85,10 +85,11 @@ def test_flat_suite_document_has_text_and_logical_conn(suite_bundle):
     assert "zz_pong_replicate" in ids
     assert "zz_ff_barrier_tap" in ids
     assert "zz_multi_g3_empty" in ids
+    assert "zz_ifndef_define_mix" in ids
     assert "zz_dw_vendor_inst" not in ids
     multi_g3 = next(c for c in checks if c["id"] == "zz_multi_g3_empty")
     assert multi_g3.get("expect_connected") is False
-    assert len(checks) == 58
+    assert len(checks) == 59
     assert sum(1 for c in checks if c.get("expect_connected") is True) >= 45
     for step in conn_steps:
         assert step["ignore-path"] == ["DW_*"]
@@ -132,6 +133,9 @@ def test_round17_conn_check_shapes(suite_bundle):
 def test_round18_rtl_probes_in_generated_files(suite_bundle):
     suite_path, design, _root = suite_bundle
     assert "u_bridge_expr" in design.files["zz_deep_d2.v"]
+    assert "u_ifndef_mix" in design.files["zz_deep_d2.v"]
+    assert "`ifndef ZZ_IFNDEF_INST_" in design.files["zz_deep_d2.v"]
+    assert "`ifndef ZZ_IFNDEF_PING_BODY_" in design.files["zz_common.v"]
     assert "chain_in ^ shallow_return" in design.files["zz_deep_d2.v"]
     assert "assign merge_tap" in design.files["zz_deep_d4.v"]
     assert "u_bridge_concat" in design.files["zz_deep_d2.v"]

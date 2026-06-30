@@ -318,7 +318,7 @@ class PathWalkModuleDb:
         self._skip = tuple(skip_path_patterns)
         self._ignore_modules = tuple(ignore_module_patterns)
         self._no_cache = no_cache
-        self._defines_digest = _defines_digest(self._defines)
+        self._defines_digest = _defines_digest(self._tier1_defines())
         self._on_trace = on_trace
         self._on_progress = on_progress
         self._file_via_filelist: Dict[str, str] = dict(file_via_filelist or {})
@@ -384,6 +384,12 @@ class PathWalkModuleDb:
     @property
     def cache_root(self) -> Optional[Path]:
         return self._cache_root
+
+    def _tier1_defines(self) -> Dict[str, str]:
+        """Filelist + RTL-collected defines (same basis as connect COI)."""
+        from hierwalk.connectivity import _effective_defines
+
+        return _effective_defines(self._index, self._defines, sources=self._sources)
 
     def _trace(self, message: str) -> None:
         if self._on_trace is not None and message:
@@ -1814,7 +1820,7 @@ class PathWalkModuleDb:
 
             self._set_phase("parsing", detail=Path(key).name)
 
-            defs: Dict[str, str] = dict(self._defines)
+            defs: Dict[str, str] = dict(self._tier1_defines())
             effective_digest = _defines_digest(defs)
             include_digest = self._include_closure_digest(key)
 
@@ -1906,7 +1912,7 @@ class PathWalkModuleDb:
 
         from hierwalk.preprocess import preprocess_file_for_index
 
-        defs: Dict[str, str] = dict(self._defines)
+        defs: Dict[str, str] = dict(self._tier1_defines())
         text = preprocess_file_for_index(
             Path(key),
             self._include_dirs,
@@ -1980,7 +1986,7 @@ class PathWalkModuleDb:
             return disk
         from hierwalk.preprocess import preprocess_file_for_index
 
-        defs = dict(self._defines)
+        defs = dict(self._tier1_defines())
         text = preprocess_file_for_index(
             Path(key),
             self._include_dirs,

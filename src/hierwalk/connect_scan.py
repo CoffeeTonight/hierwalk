@@ -3868,26 +3868,49 @@ def apply_bind_connectivity(
                     mod_idx.hier_ref_targets.setdefault((inst, port), set()).add(rep)
 
 
-def collect_design_defines(index: object) -> Dict[str, str]:
-    """Active-branch `` `define `` directives (ifdef order, includes) across RTL."""
-    file_modules = getattr(index, "file_modules", None)
-    if not isinstance(file_modules, Mapping):
-        return {}
+def collect_design_defines(
+    index: object,
+    *,
+    sources: Optional[Sequence[str]] = None,
+    extra_defines: Optional[Mapping[str, str]] = None,
+) -> Dict[str, str]:
+    """
+    Active-branch `` `define `` / `` `undef `` across RTL (ifdef order, includes).
+
+    Filelist/extra defines seed the map; each RTL file may add or `` `undef `` names.
+    The result is final — callers must not re-merge filelist on top (undef would be lost).
+    """
     from pathlib import Path
 
-    from hierwalk.preprocess import preprocess_file_for_index
+    base = dict(getattr(index, "_preprocess_defines", {}) or {})
+    if extra_defines:
+        base.update(extra_defines)
+    file_modules = getattr(index, "file_modules", None)
+    if sources is not None:
+        paths = sorted({str(Path(s).resolve()) for s in sources})
+    elif isinstance(file_modules, Mapping):
+        paths = sorted(file_modules)
+    else:
+        return dict(base)
+
+    from hierwalk.preprocess import include_guard_macro_names, preprocess_file_for_index
 
     inc = [Path(p) for p in getattr(index, "_preprocess_include_dirs", ()) or ()]
     skip = tuple(getattr(index, "_skip_path_patterns", ()) or ())
-    out: Dict[str, str] = {}
+    out: Dict[str, str] = dict(base)
     seen: Set[str] = set()
-    for fpath in sorted(file_modules):
+    for fpath in paths:
         if fpath in seen:
             continue
         seen.add(fpath)
         path = Path(fpath)
         if not path.is_file():
             continue
+        try:
+            raw = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            raw = ""
+        guards = include_guard_macro_names(raw)
         preprocess_file_for_index(
             path,
             inc,
@@ -3896,6 +3919,8 @@ def collect_design_defines(index: object) -> Dict[str, str]:
             skip_path_patterns=skip,
             apply_ifdef=True,
         )
+        for name in guards:
+            out.pop(name, None)
     return dict(out)
 
 

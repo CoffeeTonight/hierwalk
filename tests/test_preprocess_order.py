@@ -56,6 +56,68 @@ def test_elsif_define_only_active_branch(tmp_path: Path):
     assert defs.get("X") == "2"
 
 
+def test_collect_design_defines_honors_rtl_undef(tmp_path: Path):
+    (tmp_path / "a.v").write_text("`define FOO 1\n", encoding="utf-8")
+    (tmp_path / "b.v").write_text(
+        "`undef FOO\n"
+        "module top;\n"
+        "`ifdef FOO\n"
+        "  ghost u_g ();\n"
+        "`endif\n"
+        "endmodule\n",
+        encoding="utf-8",
+    )
+    fl = tmp_path / "filelist.f"
+    fl.write_text(
+        "\n".join(
+            [
+                str((tmp_path / "a.v").resolve()),
+                str((tmp_path / "b.v").resolve()),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    from hierwalk.filelist import parse_filelist
+
+    flr = parse_filelist(str(fl), index_cwd=str(tmp_path))
+    index = DesignIndex._assemble(
+        {},
+        path_patterns=[],
+        module_patterns=[],
+        preprocess_include_dirs=[str(p) for p in flr.include_dirs],
+        preprocess_defines=dict(flr.defines),
+    )
+    defs = collect_design_defines(index, sources=[str(p) for p in flr.source_files])
+    assert "FOO" not in defs
+
+
+def test_collect_design_defines_rtl_undef_overrides_filelist(tmp_path: Path):
+    rtl = tmp_path / "top.v"
+    rtl.write_text(
+        "`undef FOO\n"
+        "module top;\n"
+        "`ifdef FOO\n"
+        "  ghost u_g ();\n"
+        "`endif\n"
+        "endmodule\n",
+        encoding="utf-8",
+    )
+    index = DesignIndex._assemble(
+        {},
+        path_patterns=[],
+        module_patterns=[],
+        preprocess_include_dirs=[str(tmp_path)],
+        preprocess_defines={"FOO": "1"},
+    )
+    defs = collect_design_defines(
+        index,
+        sources=[str(rtl.resolve())],
+        extra_defines={"FOO": "1"},
+    )
+    assert "FOO" not in defs
+
+
 def test_undef_before_ifdef(tmp_path: Path):
     rtl = tmp_path / "top.v"
     rtl.write_text(
@@ -122,6 +184,46 @@ def test_include_define_affects_parent_ifdef(tmp_path: Path):
     mods = scan_preprocessed(text, str(rtl))
     assert any(e.child_module == "pcie" for e in mods["top"].instances)
     assert not any(e.child_module == "uart" for e in mods["top"].instances)
+
+
+def test_collect_design_defines_seeds_filelist_macros(tmp_path: Path):
+    rtl = tmp_path / "top.v"
+    rtl.write_text(
+        "module top;\n"
+        "`ifdef FEATURE\n"
+        "`define INTERNAL 1\n"
+        "  leaf u_l ();\n"
+        "`endif\n"
+        "endmodule\n"
+        "module leaf; endmodule\n",
+        encoding="utf-8",
+    )
+    text = preprocess_file_for_index(rtl, [tmp_path], {"FEATURE": "1"}, apply_ifdef=True)
+    index = DesignIndex.build({str(rtl): text})
+    index._preprocess_include_dirs = [str(tmp_path)]
+    index._preprocess_defines = {"FEATURE": "1"}
+    defs = collect_design_defines(index)
+    assert defs.get("FEATURE") == "1"
+    assert defs.get("INTERNAL") == "1"
+
+
+def test_collect_design_defines_drops_ifndef_define_include_guards(tmp_path: Path):
+    rtl = tmp_path / "guard.v"
+    rtl.write_text(
+        "`ifndef _BLA_\n"
+        "`define _BLA_\n"
+        "module BLA(input logic a);\n"
+        "`define EXPORTED 1\n"
+        "endmodule\n"
+        "`endif\n",
+        encoding="utf-8",
+    )
+    text = preprocess_file_for_index(rtl, [tmp_path], {}, apply_ifdef=True)
+    index = DesignIndex.build({str(rtl): text})
+    index._preprocess_include_dirs = [str(tmp_path)]
+    defs = collect_design_defines(index)
+    assert "_BLA_" not in defs
+    assert defs.get("EXPORTED") == "1"
 
 
 def test_collect_design_defines_respects_inactive_branch(tmp_path: Path):

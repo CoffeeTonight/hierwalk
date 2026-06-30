@@ -136,6 +136,23 @@ def _decoy_module() -> str:
     ).strip()
 
 
+def _ifndef_guard_ping_module() -> str:
+    """Include-guard module: `` `ifndef `` must precede in-body `` `define ``."""
+    return textwrap.dedent(
+        """
+        `ifndef ZZ_IFNDEF_PING_BODY_
+        `define ZZ_IFNDEF_PING_BODY_
+        module zz_ifndef_ping (
+          input  logic [2:0][3:0] din,
+          output logic [2:0][3:0] dout
+        );
+          assign dout = din;
+        endmodule
+        `endif
+        """
+    ).strip()
+
+
 def _bridge_modules() -> str:
     return textwrap.dedent(
         """
@@ -455,6 +472,21 @@ def _deep_level_body(lvl: int) -> str:
             """
         ).strip()
 
+    ifndef_define_block = ""
+    if lvl == 2:
+        ifndef_define_block = textwrap.dedent(
+            """
+            `ifndef ZZ_IFNDEF_INST_
+            `define ZZ_IFNDEF_INST_
+              logic [2:0][3:0] ifndef_mix_tap;
+              zz_ifndef_ping u_ifndef_mix (
+                .din(chain_in),
+                .dout(ifndef_mix_tap)
+              );
+            `endif
+            """
+        ).strip()
+
     decoys = textwrap.dedent(
         f"""
         zz_decoy #(.D({lvl})) d{lvl}_shadow (.clk(clk), .rst_n(rst_n), .noise()),
@@ -574,6 +606,7 @@ def _deep_level_body(lvl: int) -> str:
         cube_assign,
         gen_block,
         ifdef_block,
+        ifndef_define_block,
         child,
         decoys,
         "endmodule",
@@ -890,6 +923,7 @@ def _hierarchy_specs() -> Tuple[str, ...]:
         DEEP_D3,
         DEEP_D4,
         f"{SHALLOW_ARM}.r1.r2",
+        f"{DEEP_D2}.u_ifndef_mix",
         COLLISION,
         f"{DEEP_ARM}.d1.d1_shadow",
         f"{DEEP_ARM}.d1.u_next_decoy",
@@ -1107,6 +1141,17 @@ def _round18_design_checks() -> Tuple[ConnectivityCheck, ...]:
     )
 
 
+def _round20_design_checks() -> Tuple[ConnectivityCheck, ...]:
+    """Round20: `` `ifndef `` / `` `define `` include-guard order on spine (회차20)."""
+    return (
+        ConnectivityCheck(
+            f"{DEEP_D2}.chain_in[0][0]",
+            f"{DEEP_D2}.u_ifndef_mix.dout[0][0]",
+            check_id="zz_ifndef_define_mix",
+        ),
+    )
+
+
 def _round19_design_checks() -> Tuple[ConnectivityCheck, ...]:
     """Round19: vuln-plan gaps + round18 cone/io blind spots (회차19)."""
     return (
@@ -1260,6 +1305,7 @@ def _build_checks() -> Tuple[ConnectivityCheck, ...]:
         _list_endpoint_check(),
         *_round18_design_checks(),
         *_round19_design_checks(),
+        *_round20_design_checks(),
     ]
     return tuple(checks)
 
@@ -1274,6 +1320,7 @@ def generate_zigzag_torture_design() -> ZigzagTortureDesign:
                 _decoy_leaf(),
                 _decoy_module(),
                 _bridge_modules(),
+                _ifndef_guard_ping_module(),
                 _blackbox_module(),
                 _collision_module(),
             ]
@@ -1510,6 +1557,7 @@ def _suite_conn_checks() -> List[Dict[str, Any]]:
         },
         *_gap_suite_specs(_round18_design_checks()),
         *_gap_suite_specs(_round19_design_checks()),
+        *_gap_suite_specs(_round20_design_checks()),
     ]
     return _apply_suite_conn_defaults(specs)
 

@@ -79,6 +79,10 @@ ROUND19_NEW_CHECK_IDS = (
     "zz_multi_g3_empty",
 )
 
+ROUND20_NEW_CHECK_IDS = (
+    "zz_ifndef_define_mix",
+)
+
 ROUND18_NEW_CHECK_IDS = (
     "zz_casex_route",
     "zz_casez_route",
@@ -101,6 +105,7 @@ ROUND18_NEW_CHECK_IDS = (
     "zz_literal_concat",
     "zz_mid_ifdef_child",
     *ROUND19_NEW_CHECK_IDS,
+    *ROUND20_NEW_CHECK_IDS,
 )
 
 
@@ -115,7 +120,7 @@ def test_torture_design_shape():
     assert design.top == TOP
     assert design.deep_path == DEEP_D5
     assert design.shallow_path == SHALLOW_R4
-    assert len(design.checks) == 46
+    assert len(design.checks) == 47
     check_ids = {c.check_id for c in design.checks}
     assert "zz_fanin_merge" in check_ids
     assert "zz_fanin_merge_decoy" in check_ids
@@ -131,6 +136,9 @@ def test_torture_design_shape():
     assert "u_empty_multi" in design.files["zz_zigzag.v"]
     assert "gen_tap1" in design.files["zz_deep_d1.v"]
     assert "u_bridge_expr" in design.files["zz_deep_d2.v"]
+    assert "u_ifndef_mix" in design.files["zz_deep_d2.v"]
+    assert "`ifndef ZZ_IFNDEF_INST_" in design.files["zz_deep_d2.v"]
+    assert "`ifndef ZZ_IFNDEF_PING_BODY_" in design.files["zz_common.v"]
     assert "chain_in ^ shallow_return" in design.files["zz_deep_d2.v"]
     assert "assign merge_tap" in design.files["zz_deep_d4.v"]
     assert len(design.files) >= DEEP_DEPTH + SHALLOW_DEPTH + 6

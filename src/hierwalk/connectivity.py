@@ -284,8 +284,14 @@ def print_connect_trace_reports(
 def _effective_defines(
     index: DesignIndex,
     defines: Mapping[str, str] | None,
+    *,
+    sources: Optional[Sequence[str]] = None,
 ) -> Dict[str, str]:
-    return {**collect_design_defines(index), **dict(defines or {})}
+    return collect_design_defines(
+        index,
+        sources=sources,
+        extra_defines=dict(defines or {}),
+    )
 
 
 def _resolve_connect_jobs(jobs: int, num_tasks: int) -> int:

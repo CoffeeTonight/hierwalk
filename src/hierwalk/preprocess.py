@@ -712,6 +712,17 @@ def _apply_define_ops(
             defines.pop(name, None)
 
 
+_INCLUDE_GUARD_RE = re.compile(
+    r"`ifndef\s+([A-Za-z_]\w*)\s*(?://[^\n]*)?\n\s*`define\s+\1\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def include_guard_macro_names(text: str) -> Set[str]:
+    """Macro names from `` `ifndef NAME `` / `` `define NAME `` include-guard pairs."""
+    return {m.group(1) for m in _INCLUDE_GUARD_RE.finditer(text)}
+
+
 def _collect_define_undef_ops(
     text: str,
 ) -> Tuple[str, Tuple[_DefineOp, ...]]:
