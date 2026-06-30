@@ -106,6 +106,56 @@ def test_nested_f_with_env_var_path(monkeypatch, tmp_path: Path):
     assert result.source_files[0].resolve() == (nested_dir / "chip.v").resolve()
 
 
+def test_nested_f_space_form_with_env_var(monkeypatch, tmp_path: Path):
+    """Production form: ``-f $BLA/design/list/blabla_A.f`` (space, not tab)."""
+    monkeypatch.setenv("BLA", str(tmp_path / "proj"))
+    nested_dir = tmp_path / "proj" / "design" / "list"
+    nested_dir.mkdir(parents=True)
+    (nested_dir / "blabla_A.f").write_text("chip.v\n", encoding="utf-8")
+    (nested_dir / "chip.v").write_text("module chip; endmodule\n", encoding="utf-8")
+    top = tmp_path / "top.f"
+    top.write_text("-f $BLA/design/list/blabla_A.f\n", encoding="utf-8")
+    result = expand_filelist(str(top))
+    assert len(result.source_files) == 1
+    assert result.source_files[0].resolve() == (nested_dir / "chip.v").resolve()
+
+
+def test_nested_f_glued_path(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("BLA", str(tmp_path / "proj"))
+    nested_dir = tmp_path / "proj" / "lists"
+    nested_dir.mkdir(parents=True)
+    (nested_dir / "child.f").write_text("leaf.v\n", encoding="utf-8")
+    (nested_dir / "leaf.v").write_text("module leaf; endmodule\n", encoding="utf-8")
+    top = tmp_path / "top.f"
+    top.write_text(f"-f{nested_dir / 'child.f'}\n", encoding="utf-8")
+    result = expand_filelist(str(top))
+    assert len(result.source_files) == 1
+    assert result.source_files[0].resolve() == (nested_dir / "leaf.v").resolve()
+
+
+def test_vcs_flags_not_misparsed_as_nested_f_or_v(tmp_path: Path):
+    """``-full64``, ``-verilog`` must not become nested ``-f`` / library ``-v``."""
+    top = tmp_path / "top.f"
+    top.write_text("-full64\n-verilog\n-vcs\n", encoding="utf-8")
+    result = expand_filelist(str(top))
+    assert result.source_files == []
+    assert result.errors == []
+    assert result.filelist_info and len(result.filelist_info) == 1
+
+
+def test_dash_v_and_y_accept_tab_whitespace(tmp_path: Path):
+    lib = tmp_path / "lib.v"
+    lib.write_text("module lib; endmodule\n", encoding="utf-8")
+    ydir = tmp_path / "yd"
+    ydir.mkdir()
+    (ydir / "cell.v").write_text("module cell; endmodule\n", encoding="utf-8")
+    top = tmp_path / "top.f"
+    top.write_text(f"-v\t{lib}\n-y\t{ydir}\n", encoding="utf-8")
+    result = expand_filelist(str(top))
+    assert result.library_files == [lib.resolve()]
+    assert result.library_dirs == [ydir.resolve()]
+
+
 def test_emit_filelist_failure_logs_unset_env_and_missing_file(tmp_path: Path, capsys):
     from hierwalk.filelist import emit_filelist_failure, parse_filelist
 

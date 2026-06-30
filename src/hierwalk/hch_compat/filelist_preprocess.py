@@ -51,25 +51,65 @@ def _strip_comments(line: str) -> str:
     line = re.sub(r"/\*.*?\*/", "", line, flags=re.DOTALL)
     if "//" in line:
         line = line.split("//", 1)[0]
-    return line.strip()
+    return line.strip().replace("\r", "")
+
+
+_PATH_LIKE_GLUE = re.compile(r"(?:[./$\\]|^\.|\.)")
+
+
+def _looks_like_filelist_path(arg: str) -> bool:
+    """Glued ``-f``/``-F`` only when the token looks like a path, not ``-full64``."""
+    if not arg:
+        return False
+    return bool(_PATH_LIKE_GLUE.search(arg))
+
+
+def _dash_switch_arg(
+    line: str,
+    flag: str,
+    *,
+    allow_glued: bool = False,
+) -> Optional[str]:
+    """
+    VCS-style ``-f``, ``-F``, ``-v``, ``-y`` lines.
+
+    Accepts space or tab before the argument. Glued paths (``-flist.f``) are optional
+    and only enabled for ``-f``/``-F`` when the suffix looks path-like.
+    """
+    stripped = line.strip()
+    prefix = f"-{flag}"
+    if not stripped.startswith(prefix):
+        return None
+    rest = stripped[len(prefix) :]
+    if not rest:
+        return None
+    if rest[0] in " \t":
+        rest = rest.lstrip(" \t")
+        return rest if rest else None
+    if not allow_glued:
+        return None
+    return rest if _looks_like_filelist_path(rest) else None
+
+
+def _word_switch_arg(line: str, word: str) -> Optional[str]:
+    """``-top name``, ``-topmodule name`` — whitespace required after the keyword."""
+    stripped = line.strip()
+    if not stripped.startswith(word):
+        return None
+    rest = stripped[len(word) :]
+    if not rest or rest[0] not in " \t":
+        return None
+    arg = rest.lstrip(" \t")
+    return arg if arg else None
 
 
 def _nested_filelist_directive(line: str) -> Optional[tuple[str, str]]:
-    """
-    Parse ``-f`` / ``-F`` nested filelist lines (space or tab after the flag).
-
-    Returns ``(kind, path)`` where *kind* is ``-f`` or ``-F``.
-    """
-    stripped = line.strip()
-    if len(stripped) < 3 or stripped[0] != "-":
-        return None
-    flag = stripped[1]
-    if flag not in ("f", "F"):
-        return None
-    rest = stripped[2:].lstrip(" \t")
-    if not rest:
-        return None
-    return f"-{flag}", rest
+    """Parse nested ``-f`` / ``-F`` filelist includes (space, tab, or glued path)."""
+    for flag in ("F", "f"):
+        arg = _dash_switch_arg(line, flag, allow_glued=True)
+        if arg is not None:
+            return f"-{flag}", arg
+    return None
 
 
 def expand_filelist(
@@ -228,12 +268,12 @@ def expand_filelist(
                         ext = "." + ext
                     if ext and ext not in result.libexts:
                         result.libexts.append(ext)
-            elif line.startswith("-v "):
-                vp = resolve_path(line[3:].strip(), base)
+            elif (v_arg := _dash_switch_arg(line, "v")) is not None:
+                vp = resolve_path(v_arg, base)
                 if vp not in result.library_files:
                     result.library_files.append(vp)
-            elif line.startswith("-y "):
-                yp = resolve_path(line[3:].strip(), base)
+            elif (y_arg := _dash_switch_arg(line, "y")) is not None:
+                yp = resolve_path(y_arg, base)
                 if yp not in result.library_dirs:
                     result.library_dirs.append(yp)
             elif line.startswith("+libdir+"):
@@ -252,42 +292,44 @@ def expand_filelist(
                 result.slang_options.append(line)
             elif line.startswith("+ntb"):
                 result.unsupported_options.append(line[:40])
-            elif line.startswith("-top ") or line.startswith("-topmodule "):
-                top_name = line.split(maxsplit=1)[1].strip() if " " in line else ""
-                if top_name and top_name not in result.top_modules:
+            elif (top_mod := _word_switch_arg(line, "-topmodule")) is not None:
+                if top_mod not in result.top_modules:
+                    result.top_modules.append(top_mod)
+            elif (top_name := _word_switch_arg(line, "-top")) is not None:
+                if top_name not in result.top_modules:
                     result.top_modules.append(top_name)
-            elif line.startswith("-work ") or line.startswith("-worklib "):
-                result.work_library = line.split(maxsplit=1)[1].strip()
+            elif (work_lib := _word_switch_arg(line, "-worklib")) is not None:
+                result.work_library = work_lib
+            elif (work_name := _word_switch_arg(line, "-work")) is not None:
+                result.work_library = work_name
             elif line.startswith("+top+"):
                 body = line[len("+top+") :].strip()
                 if body and body not in result.top_modules:
                     result.top_modules.append(body)
-            else:
-                nested_hit = _nested_filelist_directive(line)
-                if nested_hit is not None:
-                    kind, nested = nested_hit
-                    base = cwd if kind == "-F" else fpath.parent
-                    np = resolve_path(nested, base)
+            elif (nested_hit := _nested_filelist_directive(line)) is not None:
+                kind, nested = nested_hit
+                locate_base = cwd if kind == "-F" else fpath.parent
+                np = resolve_path(nested, locate_base)
+                if on_progress:
+                    on_progress(f"filelist: nested {kind} {nested!r} -> {np}")
+                    for var in unexpanded_path_vars(str(np)):
+                        on_progress(
+                            f"filelist: WARNING unresolved env in {kind} path: {var}"
+                        )
+                chain_text = " -> ".join(str(p) for p in this_chain + [np])
+                if _skip_nested_filelist(np, chain_text):
                     if on_progress:
-                        on_progress(f"filelist: nested {kind} {nested!r} -> {np}")
-                        for var in unexpanded_path_vars(str(np)):
-                            on_progress(
-                                f"filelist: WARNING unresolved env in {kind} path: {var}"
-                            )
-                    chain_text = " -> ".join(str(p) for p in this_chain + [np])
-                    if _skip_nested_filelist(np, chain_text):
-                        if on_progress:
-                            on_progress(f"filelist: skip {np.name} (ignore-filelist)")
-                        continue
-                    link_nested(fpath, np, kind)
-                    parse_one(
-                        np,
-                        content_base=np.parent if kind == "-f" else cwd,
-                        chain=this_chain,
-                        parent=fpath,
-                        include_kind=kind,
-                    )
+                        on_progress(f"filelist: skip {np.name} (ignore-filelist)")
                     continue
+                link_nested(fpath, np, kind)
+                parse_one(
+                    np,
+                    content_base=np.parent if kind == "-f" else cwd,
+                    chain=this_chain,
+                    parent=fpath,
+                    include_kind=kind,
+                )
+            else:
                 tokens = line.split()
                 if len(tokens) >= 2 and tokens[0] in ("-top", "-topmodule"):
                     if tokens[1] not in result.top_modules:
