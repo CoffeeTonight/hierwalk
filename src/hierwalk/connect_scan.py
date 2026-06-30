@@ -2579,12 +2579,10 @@ def prepare_connect_body(
     over_approximate_if: bool = True,
 ) -> str:
     """Apply in-body ``define``, macro expand, ``ifdef``, and generate fold."""
-    from hierwalk.preprocess import _collect_define_undef, _expand_macros, apply_ifdef_filter
+    from hierwalk.preprocess import _preprocess_conditional_pass
 
     pmap = dict(defines or {})
-    text = _collect_define_undef(body, pmap)
-    text = _expand_macros(text, pmap)
-    text = apply_ifdef_filter(text, pmap)
+    text = _preprocess_conditional_pass(body, pmap, apply_ifdef=True)
     fold_ctx = dict(defines or {})
     fold_ctx.update(param_map or {})
     return prepare_body_for_instance_scan(

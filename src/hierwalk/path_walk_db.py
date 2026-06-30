@@ -340,6 +340,7 @@ class PathWalkModuleDb:
         ] = set()
         self._phase = "ready"
         self._last_heartbeat: float = 0.0
+        self._heartbeat_count: int = 0
 
         base = cache_dir
         if base is None and not no_cache:
@@ -411,16 +412,21 @@ class PathWalkModuleDb:
         if now - self._last_heartbeat < interval:
             return
         self._last_heartbeat = now
+        self._heartbeat_count += 1
         detail = self.heartbeat_detail()
         from hierwalk.perf import pw_trace_verbose
 
         if pw_trace_verbose():
             self._trace(
-                f"pw-db heartbeat tier0={self.files_regex_scanned} "
+                f"pw-db heartbeat count={self._heartbeat_count} "
+                f"tier0={self.files_regex_scanned} "
                 f"tier1={self.files_validated} phase={detail or 'idle'}"
             )
         else:
-            self._trace(f"pw-db heartbeat phase={detail or 'idle'}")
+            self._trace(
+                f"pw-db heartbeat count={self._heartbeat_count} "
+                f"phase={detail or 'idle'}"
+            )
 
     def heartbeat_detail(self) -> str:
         return self._phase
@@ -1827,7 +1833,7 @@ class PathWalkModuleDb:
                 self._trace(f"pw-db tier1 cache {Path(key).name} -> {summary or '(none)'}")
                 return disk
 
-            from hierwalk.preprocess import apply_ifdef_filter, preprocess_file_for_index
+            from hierwalk.preprocess import preprocess_file_for_index
 
             text = preprocess_file_for_index(
                 Path(key),
@@ -1835,9 +1841,8 @@ class PathWalkModuleDb:
                 defs,
                 set(),
                 skip_path_patterns=self._skip,
+                apply_ifdef=True,
             )
-            # Tier-1 must honour filelist + in-file defines (ifdef instance names, gated modules).
-            text = apply_ifdef_filter(text, defs)
             per_file = scan_preprocessed(text, key)
             out = {name: _record_lite(rec) for name, rec in per_file.items()}
             self._validated_memory[key] = out
@@ -1899,7 +1904,7 @@ class PathWalkModuleDb:
         ):
             return self._index.instances_for(mod_name, parent_ctx, {})
 
-        from hierwalk.preprocess import apply_ifdef_filter, preprocess_file_for_index
+        from hierwalk.preprocess import preprocess_file_for_index
 
         defs: Dict[str, str] = dict(self._defines)
         text = preprocess_file_for_index(
@@ -1908,6 +1913,7 @@ class PathWalkModuleDb:
             defs,
             set(),
             skip_path_patterns=self._skip,
+            apply_ifdef=True,
         )
         fold_ctx = dict(defs)
         fold_ctx.update(resolve_param_map(hit.raw_params, parent=parent_ctx))
@@ -1915,8 +1921,6 @@ class PathWalkModuleDb:
         cached_edges = self._folded_edges_cache.get(fold_cache_key)
         if cached_edges is not None:
             return cached_edges
-
-        text = apply_ifdef_filter(text, defs)
         _hdr, body = _module_header_body(text, mod_name)
         if not body:
             edges = list(hit.instances)
@@ -1974,8 +1978,7 @@ class PathWalkModuleDb:
             self._preprocessed_text_cache[mem_key] = disk
             self._trace(f"pw-db preprocess cache {Path(key).name}")
             return disk
-        from hierwalk.lazy_scope import lazy_index_ifdef
-        from hierwalk.preprocess import apply_ifdef_filter, preprocess_file_for_index
+        from hierwalk.preprocess import preprocess_file_for_index
 
         defs = dict(self._defines)
         text = preprocess_file_for_index(
@@ -1984,9 +1987,8 @@ class PathWalkModuleDb:
             defs,
             set(),
             skip_path_patterns=self._skip,
+            apply_ifdef=True,
         )
-        if not lazy_index_ifdef():
-            text = apply_ifdef_filter(text, defs)
         self._preprocessed_text_cache[mem_key] = text
         self._save_preprocessed_sidecar(
             key,

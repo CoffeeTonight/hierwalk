@@ -27,7 +27,8 @@ def _row(path: str, *, file: str, via: str, chain: str) -> FlatRow:
 
 def test_path_walk_trace_connect_coi_heartbeat_always_visible():
     assert path_walk_trace_show_message(
-        "connect-coi heartbeat checks_done=2/10 modules_cached=4 elapsed_sec=30.0"
+        "connect-coi heartbeat count=1 checks_done=2/10 "
+        "modules_cached=4 elapsed_sec=30.0"
     )
 
 

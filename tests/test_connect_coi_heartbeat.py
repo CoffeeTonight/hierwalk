@@ -41,6 +41,8 @@ def test_connect_coi_heartbeat_emits_progress():
     assert emitted
     joined = "\n".join(emitted)
     assert "connect-coi heartbeat" in joined
+    assert "count=1" in joined
+    assert "count=2" in joined
     assert "checks_done=3/10" in joined
     assert "modules_cached=7" in joined
     assert "hierarchy_ready=4/10" in joined

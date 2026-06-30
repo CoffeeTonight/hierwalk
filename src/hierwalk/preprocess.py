@@ -43,10 +43,10 @@ _ENDIF_LABEL_COMMENT_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Per-process include unit cache: (path, mtime_ns, size, skip_patterns) -> (text, define ops).
+# Per-process include unit cache: (path, mtime_ns, size, skip_patterns) -> expanded text.
 _IncludeCacheKey = Tuple[str, int, int, Tuple[str, ...]]
 _DefineOp = Tuple[str, str, str]  # ("set"|"undef", name, value)
-_INCLUDE_UNIT_CACHE: Dict[_IncludeCacheKey, Tuple[str, Tuple[_DefineOp, ...]]] = {}
+_INCLUDE_UNIT_CACHE: Dict[_IncludeCacheKey, str] = {}
 
 # Per-process source translation-unit cache after full preprocess.
 _SourcePreprocessKey = Tuple[str, int, int, str, Tuple[Tuple[str, str], ...], Tuple[str, ...]]
@@ -60,7 +60,7 @@ def clear_include_unit_cache() -> None:
     _SOURCE_PREPROCESS_CACHE.clear()
 
 
-def _snapshot_include_cache() -> Dict[_IncludeCacheKey, Tuple[str, Tuple[_DefineOp, ...]]]:
+def _snapshot_include_cache() -> Dict[_IncludeCacheKey, str]:
     return dict(_INCLUDE_UNIT_CACHE)
 
 
@@ -93,7 +93,7 @@ def _restore_source_preprocess_cache_hit(
 
 
 def _install_include_cache_snapshot(
-    snapshot: Dict[_IncludeCacheKey, Tuple[str, Tuple[_DefineOp, ...]]],
+    snapshot: Dict[_IncludeCacheKey, str],
 ) -> None:
     """Seed worker-local include cache (required when start method is ``spawn``)."""
     _INCLUDE_UNIT_CACHE.clear()
@@ -101,7 +101,7 @@ def _install_include_cache_snapshot(
 
 
 def _install_preprocess_caches(
-    include_snapshot: Dict[_IncludeCacheKey, Tuple[str, Tuple[_DefineOp, ...]]],
+    include_snapshot: Dict[_IncludeCacheKey, str],
     source_snapshot: Dict[_SourcePreprocessKey, _SourcePreprocessEntry],
 ) -> None:
     """Seed worker-local include + source preprocess caches."""
@@ -342,28 +342,151 @@ def _emit_ifdef_line_segments(
     return segments
 
 
-def apply_ifdef_filter(text: str, defines: Mapping[str, str]) -> str:
-    defs = dict(defines)
+def _stack_active(stack: Sequence[Tuple[bool, bool, bool]]) -> bool:
+    return all(frame[1] for frame in stack)
+
+
+def _expand_macros_on_line(line: str, defines: Mapping[str, str]) -> str:
+    if not defines or "`" not in line:
+        return line
+    skip = {
+        "ifdef", "ifndef", "elsif", "else", "endif",
+        "define", "undef", "include",
+    }
+
+    def repl(m: re.Match[str]) -> str:
+        name = m.group(1)
+        if name in skip:
+            return m.group(0)
+        if name not in defines:
+            return m.group(0)
+        body = str(defines[name])
+        if "(" in body:
+            return m.group(0)
+        return body
+
+    return _MACRO_USE_RE.sub(repl, line)
+
+
+def _match_define_line(line: str) -> Optional[Tuple[str, str]]:
+    dm = _DEFINE_LINE_RE.match(line)
+    if dm is None:
+        return None
+    return dm.group(1), (dm.group(2) or "1").strip()
+
+
+def _match_undef_line(line: str) -> Optional[str]:
+    um = _UNDEF_LINE_RE.match(line)
+    if um is None:
+        return None
+    return um.group(1)
+
+
+def _apply_ifdef_control_line(
+    line: str,
+    stack: List[Tuple[bool, bool, bool]],
+    defs: Mapping[str, str],
+) -> bool:
+    """Update *stack* when *line* is a standalone `` `ifdef `` control directive."""
+    stripped = line.strip()
+    m = re.match(r"^\s*`ifdef\s+([A-Za-z_]\w*)\s*$", stripped, re.IGNORECASE)
+    if m:
+        _apply_ifdef_directive("ifdef", m.group(1), stack, defs)
+        return True
+    m = re.match(r"^\s*`ifndef\s+([A-Za-z_]\w*)\s*$", stripped, re.IGNORECASE)
+    if m:
+        _apply_ifdef_directive("ifndef", m.group(1), stack, defs)
+        return True
+    m = re.match(r"^\s*`elsif\s+([A-Za-z_]\w*)\s*$", stripped, re.IGNORECASE)
+    if m:
+        _apply_ifdef_directive("elsif", m.group(1), stack, defs)
+        return True
+    m = re.match(r"^\s*`else\s*$", stripped, re.IGNORECASE)
+    if m:
+        _apply_ifdef_directive("else", "", stack, defs)
+        return True
+    m = re.match(r"^\s*`(?:endif|end)\b", stripped, re.IGNORECASE)
+    if m:
+        _apply_ifdef_directive("endif", "", stack, defs)
+        return True
+    return False
+
+
+def _preprocess_conditional_pass(
+    text: str,
+    defines: MutableMapping[str, str],
+    *,
+    apply_ifdef: bool,
+) -> str:
+    """
+    Honour `` `ifdef `` / `` `ifndef `` before in-file `` `define `` / `` `undef ``.
+
+    ``define``/``undef`` lines apply only in currently active conditional branches.
+    When *apply_ifdef* is false, inactive branches are kept for structural index scan.
+    """
+    if not text:
+        return text
     needs_comment_strip = "/*" in text or "//" in text
     if needs_comment_strip:
         text = strip_comments_for_instance_scan(text)
     stack: List[Tuple[bool, bool, bool]] = []
     out = StringIO()
     first = True
+
+    def _write(segment: str) -> None:
+        nonlocal first
+        if not segment:
+            return
+        if first:
+            first = False
+        else:
+            out.write("\n")
+        out.write(segment)
+
     for raw_line in _iter_text_lines(text):
         if needs_comment_strip or rtl_after_ifdef_label_comment(raw_line):
             line = strip_line_for_ifdef_scan(raw_line)
         else:
             line = raw_line.strip()
-        segments = _emit_ifdef_line_segments(line, stack, defs, preprocessed=True)
-        if not segments:
+        if not line:
             continue
-        if first:
-            first = False
+
+        define_hit = _match_define_line(line)
+        if define_hit is not None:
+            if _stack_active(stack):
+                defines[define_hit[0]] = define_hit[1]
+            continue
+        undef_name = _match_undef_line(line)
+        if undef_name is not None:
+            if _stack_active(stack):
+                defines.pop(undef_name, None)
+            continue
+        if _INCLUDE_LINE_RE.match(line):
+            continue
+
+        if apply_ifdef:
+            segments = _emit_ifdef_line_segments(line, stack, defines, preprocessed=True)
+            if not segments:
+                continue
+            joined = " ".join(_expand_macros_on_line(seg, defines) for seg in segments)
+            _write(joined)
+            continue
+
+        if _apply_ifdef_control_line(line, stack, defines):
+            _write(line)
+            continue
+
+        if _stack_active(stack):
+            _write(_expand_macros_on_line(line, defines))
         else:
-            out.write("\n")
-        out.write(" ".join(segments))
+            _write(line)
+
     return out.getvalue()
+
+
+def apply_ifdef_filter(text: str, defines: Mapping[str, str]) -> str:
+    defs = dict(defines)
+    return _preprocess_conditional_pass(text, defs, apply_ifdef=True)
 
 
 def _resolve_include(
@@ -564,7 +687,7 @@ def _preprocess_include_unit(
     *,
     skip_path_patterns: Sequence[str] = (),
 ) -> str:
-    """Expand includes and `` `define ``/`` `undef `` only (keep `` `ifdef `` for parent)."""
+    """Expand includes only; `` `define ``/`` `ifdef `` run in conditional pass."""
     key = path.resolve()
     if _should_skip_preprocess_path(key, skip_path_patterns):
         return _IGNORE_PATH_STUB
@@ -576,9 +699,7 @@ def _preprocess_include_unit(
     if cache_key is not None:
         hit = _INCLUDE_UNIT_CACHE.get(cache_key)
         if hit is not None:
-            cleaned, ops = hit
-            _apply_define_ops(defines, ops)
-            return cleaned
+            return hit
 
     try:
         raw = path.read_text(encoding="utf-8", errors="ignore")
@@ -592,11 +713,9 @@ def _preprocess_include_unit(
         visiting,
         skip_path_patterns=skip_path_patterns,
     )
-    cleaned, ops = _collect_define_undef_ops(text)
     if cache_key is not None:
-        _INCLUDE_UNIT_CACHE[cache_key] = (cleaned, ops)
-    _apply_define_ops(defines, ops)
-    return cleaned
+        _INCLUDE_UNIT_CACHE[cache_key] = text
+    return text
 
 
 def preprocess_file_for_index(
@@ -606,6 +725,7 @@ def preprocess_file_for_index(
     visiting: Optional[Set[Path]] = None,
     *,
     skip_path_patterns: Sequence[str] = (),
+    apply_ifdef: Optional[bool] = None,
 ) -> str:
     """
     Light preprocess for index/instance scan: includes, macro expand, optional ``ifdef``.
@@ -619,8 +739,9 @@ def preprocess_file_for_index(
         return _IGNORE_PATH_STUB
     from hierwalk.lazy_scope import lazy_index_ifdef
 
+    use_ifdef = lazy_index_ifdef() if apply_ifdef is None else apply_ifdef
     base_defines = dict(defines)
-    mode = "light-ifdef" if lazy_index_ifdef() else "minimal"
+    mode = "light-ifdef" if use_ifdef else "minimal"
     cache_key = _source_preprocess_cache_key(
         path, base_defines, mode, skip_path_patterns
     )
@@ -636,9 +757,7 @@ def preprocess_file_for_index(
         visiting,
         skip_path_patterns=skip_path_patterns,
     )
-    text = _expand_macros(text, defines)
-    if lazy_index_ifdef():
-        text = apply_ifdef_filter(text, defines)
+    text = _preprocess_conditional_pass(text, defines, apply_ifdef=use_ifdef)
     if cache_key is not None:
         _SOURCE_PREPROCESS_CACHE[cache_key] = (
             text,
@@ -674,8 +793,7 @@ def preprocess_file(
         visiting,
         skip_path_patterns=skip_path_patterns,
     )
-    text = _expand_macros(text, defines)
-    text = apply_ifdef_filter(text, defines)
+    text = _preprocess_conditional_pass(text, defines, apply_ifdef=True)
     if re.search(r"^\s*bind\b", text, re.IGNORECASE | re.MULTILINE):
         text = _BIND_LINE_RE.sub("", text)
     if cache_key is not None:

@@ -323,6 +323,7 @@ class _ConnectCoiHeartbeat:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._started = time.monotonic()
+        self._count = 0
 
     def __enter__(self) -> "_ConnectCoiHeartbeat":
         if self._interval is None or self._on_emit is None or self._total <= 0:
@@ -343,12 +344,14 @@ class _ConnectCoiHeartbeat:
     def _emit_once(self) -> None:
         if self._on_emit is None:
             return
+        self._count += 1
         done = self._get_checks_done()
         modules = self._get_modules_cached()
         elapsed = time.monotonic() - self._started
         detail = self._get_detail()
         msg = (
-            f"connect-coi heartbeat checks_done={done}/{self._total} "
+            f"connect-coi heartbeat count={self._count} "
+            f"checks_done={done}/{self._total} "
             f"modules_cached={modules} elapsed_sec={elapsed:.1f}"
         )
         if detail:
