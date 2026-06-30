@@ -27,6 +27,7 @@ OnFilelistProgress = Callable[[str], None]
 class FilelistResult:
     top_path: Path
     base_dir: Path
+    raw_top_filelist: str = ""
     source_files: List[Path] = field(default_factory=list)
     incdirs: List[Path] = field(default_factory=list)
     defines: Dict[str, str] = field(default_factory=dict)
@@ -71,13 +72,16 @@ def expand_filelist(
     from hierwalk.hch_compat.platform_paths import (
         expand_path_vars,
         merge_environ,
+        normalize_filelist_token,
         resolve_path as _resolve_abs,
+        unexpanded_path_vars,
     )
 
+    raw_top = str(top_filelist)
     env_map = merge_environ(env)
-    top = _resolve_abs(expand_path_vars(str(top_filelist), env_map))
+    top = _resolve_abs(expand_path_vars(raw_top, env_map))
     cwd = resolve_index_cwd(top, index_cwd, env_map)
-    result = FilelistResult(top_path=top, base_dir=top.parent)
+    result = FilelistResult(top_path=top, base_dir=top.parent, raw_top_filelist=raw_top)
     seen_fl: Set[Path] = set()
     seen_src: Set[Path] = set()
 
@@ -108,7 +112,10 @@ def expand_filelist(
         elif sp.exists():
             result.source_files.append(sp)
         else:
-            result.errors.append(f"Source not found: {sp}")
+            msg = f"Source not found: {sp}"
+            result.errors.append(msg)
+            if on_progress:
+                on_progress(f"filelist: missing source {sp}")
 
     def add_incdir(ip: Path) -> None:
         if ip not in result.incdirs:
@@ -285,7 +292,15 @@ def expand_filelist(
                         )
 
     if on_progress:
-        on_progress(f"filelist: expanding {top.name}")
+        on_progress(f"filelist: expanding {top}")
+        if normalize_filelist_token(raw_top) != str(top):
+            on_progress(f"filelist: env-expand {raw_top!r} -> {top}")
+        unresolved = unexpanded_path_vars(str(top))
+        if unresolved:
+            on_progress(
+                "filelist: WARNING unresolved env in top path: "
+                + ", ".join(unresolved)
+            )
     parse_one(top.resolve(), content_base=top.parent, chain=[], include_kind="top")
     add_incdir(result.base_dir)
     result.index_cwd_used = cwd

@@ -12,11 +12,15 @@ import ctypes
 import ctypes.util
 import os
 import platform
+import re
 import sys
 from pathlib import Path
 from typing import Mapping, Optional, Union
 
 PathLike = Union[str, Path]
+
+_ENV_REF_PAT = re.compile(r"\$\{([^}]+)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
+_LIBC = None
 
 
 def is_windows() -> bool:
@@ -72,19 +76,32 @@ def normalize_filelist_token(raw: str) -> str:
     return raw.strip().strip('"').strip("'").strip()
 
 
+def _libc() -> Optional[ctypes.CDLL]:
+    global _LIBC
+    if _LIBC is not None:
+        return _LIBC
+    if is_windows():
+        return None
+    try:
+        _LIBC = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+    except (AttributeError, OSError, TypeError):
+        _LIBC = None
+    return _LIBC
+
+
 def _libc_environ() -> dict[str, str]:
     """
     Read the process environment from libc (POSIX).
 
-    Needed when a C host calls ``setenv`` after Python started: ``os.environ``
-    is not refreshed, but child RTL/filelist paths must still resolve.
+    C ``setenv`` after Python started does not refresh ``os.environ``; libc is
+    the source of truth for those variables.
     """
-    if is_windows():
+    libc = _libc()
+    if libc is None:
         return {}
     try:
-        libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
         environ = ctypes.POINTER(ctypes.c_char_p).in_dll(libc, "environ")
-    except (AttributeError, OSError, TypeError, ValueError):
+    except (AttributeError, ValueError):
         return {}
     if not environ:
         return {}
@@ -103,17 +120,56 @@ def _libc_environ() -> dict[str, str]:
     return out
 
 
+def _libc_getenv(name: str) -> Optional[str]:
+    libc = _libc()
+    if libc is None:
+        return None
+    try:
+        libc.getenv.argtypes = [ctypes.c_char_p]
+        libc.getenv.restype = ctypes.c_char_p
+        raw = libc.getenv(name.encode())
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+    if raw is None:
+        return None
+    return raw.decode("utf-8", errors="surrogateescape")
+
+
 def merge_environ(extra: Optional[Mapping[str, str]] = None) -> dict[str, str]:
-    """Process environment merged with optional overrides (JSON ``env`` block, etc.)."""
-    merged = dict(os.environ)
-    merged.update(_libc_environ())
+    """libc + ``os.environ`` + optional overrides (JSON ``env`` wins last)."""
+    merged = dict(_libc_environ())
+    merged.update(os.environ)
     if extra:
         for key, value in extra.items():
+            key_s = str(key)
             if value is None:
-                merged.pop(str(key), None)
+                merged.pop(key_s, None)
             else:
-                merged[str(key)] = str(value)
+                merged[key_s] = str(value)
     return merged
+
+
+def lookup_env_var(name: str, env: Optional[Mapping[str, str]] = None) -> Optional[str]:
+    """Resolve one variable from overrides, Python env, then libc ``getenv``."""
+    if env is not None and name in env:
+        return env[name]
+    hit = os.environ.get(name)
+    if hit is not None:
+        return hit
+    return _libc_getenv(name)
+
+
+def unexpanded_path_vars(raw: str) -> tuple[str, ...]:
+    """Return env var names still present as ``$VAR`` / ``${VAR}`` after expansion."""
+    s = normalize_filelist_token(raw)
+    if "$" not in s and "%" not in s:
+        return ()
+    names: list[str] = []
+    for match in _ENV_REF_PAT.finditer(s):
+        name = match.group(1) or match.group(2)
+        if name and name not in names:
+            names.append(name)
+    return tuple(names)
 
 
 def expand_path_vars(
@@ -121,17 +177,27 @@ def expand_path_vars(
     env: Optional[Mapping[str, str]] = None,
 ) -> str:
     """
-    Expand ``$VAR`` / ``${VAR}`` (and Windows ``%VAR%``) using the process environment.
+    Expand only referenced ``$VAR`` / ``${VAR}`` (and Windows ``%VAR%``).
 
-    Used for RUN.json paths (``filelist``, ``index_cwd``, …) and Verilog filelist lines.
-    Longer variable names are substituted before shorter ones (``$PROJ_ROOT`` before ``$PROJ``).
+    Lookup order per variable: merged overrides → ``os.environ`` → libc ``getenv``.
     """
     s = normalize_filelist_token(raw)
+    if "$" not in s and "%" not in s:
+        return s
+
     env_map = merge_environ(env)
-    for key in sorted(env_map, key=lambda name: -len(name)):
-        value = env_map[key]
-        s = s.replace(f"${{{key}}}", value).replace(f"${key}", value)
-    return os.path.expandvars(s)
+
+    def _replace(match: re.Match[str]) -> str:
+        name = match.group(1) or match.group(2)
+        value = lookup_env_var(name, env_map)
+        if value is None:
+            return match.group(0)
+        return str(value)
+
+    s = _ENV_REF_PAT.sub(_replace, s)
+    if is_windows() or "%" in s:
+        return os.path.expandvars(s)
+    return s
 
 
 def normalize_dql_path_pattern(pattern: str) -> str:

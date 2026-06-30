@@ -178,6 +178,14 @@ def execute_run(cfg: RunConfig, ap) -> int:
         defer_source_exists=lazy_filelist_defer_exists(),
     )
     if not fl.source_files:
+        from hierwalk.filelist import emit_filelist_failure
+
+        emit_filelist_failure(
+            fl,
+            config_filelist=cfg.filelist,
+            index_cwd=cfg.index_cwd,
+            stream=sys.stderr,
+        )
         print("No sources in filelist", file=sys.stderr)
         return 1
 

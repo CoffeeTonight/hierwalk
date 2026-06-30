@@ -93,6 +93,41 @@ def test_inprocess_libc_setenv_json_filelist_and_rtl(tmp_path: Path):
     assert parsed.source_files[0].resolve() == (rtl / "top.v").resolve()
 
 
+def test_emit_filelist_failure_logs_unset_env_and_missing_file(tmp_path: Path, capsys):
+    from hierwalk.filelist import emit_filelist_failure, parse_filelist
+
+    fl = parse_filelist(
+        "$HWALK_TOTALLY_MISSING_FLIST/design.f",
+        on_progress=lambda _msg: None,
+        defer_source_exists=False,
+    )
+    emit_filelist_failure(
+        fl,
+        config_filelist="$HWALK_TOTALLY_MISSING_FLIST/design.f",
+        stream=sys.stderr,
+    )
+    err = capsys.readouterr().err
+    assert "run: filelist: FAIL" in err
+    assert "unset env var $HWALK_TOTALLY_MISSING_FLIST" in err
+    assert "resolved top .f path:" in err
+
+
+def test_emit_filelist_failure_logs_missing_rtl_source(tmp_path: Path, capsys):
+    fl_path = tmp_path / "list.f"
+    fl_path.write_text("missing_child.v\n", encoding="utf-8")
+    from hierwalk.filelist import emit_filelist_failure, parse_filelist
+
+    fl = parse_filelist(
+        str(fl_path),
+        on_progress=lambda _msg: None,
+        defer_source_exists=False,
+    )
+    emit_filelist_failure(fl, config_filelist=str(fl_path), stream=sys.stderr)
+    err = capsys.readouterr().err
+    assert "Source not found:" in err
+    assert "missing_child.v" in err
+
+
 def test_cli_run_json_filelist_env_expansion(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("HWALK_RTL_DIR", str(tmp_path / "rtl"))
     rtl_dir = tmp_path / "rtl"
@@ -131,4 +166,5 @@ def test_cli_run_json_filelist_env_expansion(monkeypatch, tmp_path: Path):
     assert proc.returncode == 0, proc.stderr
     assert "test-suite" in proc.stderr
     assert "No sources in filelist" not in proc.stderr
-    assert f"filelist: expanding {fl.name}" in proc.stderr
+    assert "filelist: expanding" in proc.stderr
+    assert str(fl.resolve()) in proc.stderr
