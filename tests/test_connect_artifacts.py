@@ -312,18 +312,10 @@ def test_compact_hierarchy_final_tsv_keeps_deepest_hit_only(tmp_path: Path):
     )
     write_hierarchy_evidence_tsv(out, evidence, phase="text", compact=False)
     body = out.read_text(encoding="utf-8")
-    a_hits = [
-        ln
-        for ln in body.splitlines()
-        if ln.startswith("c0\ta\tinst\t") and "\thit\t" in ln
-    ]
-    b_hits = [
-        ln
-        for ln in body.splitlines()
-        if ln.startswith("c0\tb\tinst\t") and "\thit\t" in ln
-    ]
-    assert len(a_hits) == 1 and "top.u_leaf" in a_hits[0]
-    assert len(b_hits) == 1 and "\ttop\t" in b_hits[0]
+    a_rows = [ln for ln in body.splitlines() if ln.startswith("c0\ta\t")]
+    b_rows = [ln for ln in body.splitlines() if ln.startswith("c0\tb\t")]
+    assert len(a_rows) == 1 and "top.u_leaf.w" in a_rows[0]
+    assert len(b_rows) == 1 and "top.clk" in b_rows[0]
 
 
 def test_resolve_hierarchy_row_identity_side():
@@ -334,6 +326,26 @@ def test_resolve_hierarchy_row_identity_side():
     )
     assert resolve_hierarchy_row_identity(ctx, "top.u_a") == ("t", "a")
     assert resolve_hierarchy_row_identity(ctx, "top.clk") == ("t", "b")
+
+
+def test_compact_hierarchy_evidence_one_final_row_per_side():
+    from hierwalk.connect_artifacts import (
+        HierarchyEvidenceRow,
+        compact_hierarchy_evidence,
+    )
+
+    evidence = [
+        HierarchyEvidenceRow("c1", "a", "inst", "top", "hit", "TOP"),
+        HierarchyEvidenceRow("c1", "a", "inst", "top.u", "hit", "U"),
+        HierarchyEvidenceRow("c1", "a", "wire", "top.u.sig", "miss", "U"),
+        HierarchyEvidenceRow("c1", "b", "inst", "top", "hit", "TOP"),
+        HierarchyEvidenceRow("c1", "b", "port", "top.clk", "hit", "TOP"),
+    ]
+    compact = compact_hierarchy_evidence(evidence)
+    assert len(compact) == 2
+    by_side = {row.side: row for row in compact}
+    assert by_side["a"].path == "top.u.sig"
+    assert by_side["b"].path == "top.clk"
 
 
 def test_compact_hierarchy_evidence_drops_redundant_inst_hits():
@@ -349,9 +361,9 @@ def test_compact_hierarchy_evidence_drops_redundant_inst_hits():
         HierarchyEvidenceRow("c1", "a", "wire", "top.a.b.sig", "hit", "B"),
     ]
     compact = compact_hierarchy_evidence(evidence)
-    inst_paths = [r.path for r in compact if r.kind == "inst"]
-    assert inst_paths == ["top.a.b"]
-    assert any(r.kind == "wire" for r in compact)
+    assert len(compact) == 1
+    assert compact[0].path == "top.a.b.sig"
+    assert compact[0].kind == "wire"
 
 
 def test_format_connect_hierarchy_tsv_includes_absolute_rtl_path(tmp_path: Path):
@@ -386,10 +398,8 @@ def test_format_connect_hierarchy_tsv_includes_absolute_rtl_path(tmp_path: Path)
     tsv = format_connect_hierarchy_tsv([result], rows_by_path, phase="text")
     parsed = _tsv_rows(tsv)
     assert "rtl" in parsed[0]
-    leaf_rows = [row for row in parsed if row["path"] == "top.u_leaf"]
-    assert leaf_rows and leaf_rows[0]["rtl"] == rtl_abs
     sig_rows = [row for row in parsed if row["path"] == "top.u_leaf.sig"]
-    assert sig_rows and sig_rows[0]["rtl"] == rtl_abs
+    assert len(sig_rows) == 1 and sig_rows[0]["rtl"] == rtl_abs
 
 
 def test_format_connect_hierarchy_tsv_marks_miss_prefixes():
@@ -413,14 +423,13 @@ def test_format_connect_hierarchy_tsv_marks_miss_prefixes():
     tsv = format_connect_hierarchy_tsv([result], rows_by_path, phase="text")
     parsed = _tsv_rows(tsv)
     a_rows = [row for row in parsed if row["side"] == "a"]
-    assert any(row["path"] == "top" and row["status"] == "hit" for row in a_rows)
-    assert any(row["path"] == "top.missing" and row["status"] == "miss" for row in a_rows)
-    b_signal = [
-        row
-        for row in parsed
-        if row["side"] == "b" and row["kind"] in ("port", "wire", "signal")
-    ]
-    assert b_signal and b_signal[0]["status"] == "hit"
+    assert len(a_rows) == 1
+    assert a_rows[0]["path"] == "top.missing.sig"
+    assert a_rows[0]["status"] == "miss"
+    b_rows = [row for row in parsed if row["side"] == "b"]
+    assert len(b_rows) == 1
+    assert b_rows[0]["path"] == "top.clk"
+    assert b_rows[0]["status"] == "hit"
 
 
 def test_resolve_connect_output_dir_falls_back_to_db_top(tmp_path: Path):

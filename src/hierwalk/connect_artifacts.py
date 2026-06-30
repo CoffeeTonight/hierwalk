@@ -1179,32 +1179,33 @@ def collect_hierarchy_evidence(
     return out
 
 
+def _hierarchy_final_row_rank(row: HierarchyEvidenceRow) -> tuple[int, int, str]:
+    """Prefer deepest path; port/wire/reg beat inst at the same depth."""
+    depth = len([part for part in row.path.split(".") if part])
+    signal_rank = 0 if row.kind == "inst" else 1
+    return (depth, signal_rank, row.path)
+
+
 def compact_hierarchy_evidence(
     evidence: Sequence[HierarchyEvidenceRow],
 ) -> List[HierarchyEvidenceRow]:
     """
-    Drop redundant inst spine hits; keep miss steps and deepest inst per side.
+    One row per ``(check_id, side)``: the endpoint's final hit/miss only.
 
-    Intermediate ``top`` / ``top.a`` hits are omitted when ``top.a.b.c`` is the
-    resolved inst path.  Miss prefixes (e.g. ``top.missing``) are always kept.
-    Port/wire/reg rows are unchanged.
+    Intermediate inst spine prefixes (``top``, ``top.a``, …) are dropped when a
+    deeper port/wire/reg path exists for the same side.  When the endpoint is
+    inst-only, the deepest inst path is kept.
     """
-    inst_by_group: dict[tuple[str, str], List[HierarchyEvidenceRow]] = {}
-    other: List[HierarchyEvidenceRow] = []
+    by_group: dict[tuple[str, str], List[HierarchyEvidenceRow]] = {}
     for row in evidence:
-        if row.kind == "inst":
-            inst_by_group.setdefault((row.check_id, row.side), []).append(row)
-        else:
-            other.append(row)
+        side = row.side if row.side in ("a", "b", "-", "?") else "-"
+        by_group.setdefault((row.check_id, side), []).append(row)
 
     compact: List[HierarchyEvidenceRow] = []
-    for (_cid, _side), rows in inst_by_group.items():
-        misses = [r for r in rows if r.status == "miss"]
-        hits = [r for r in rows if r.status == "hit"]
-        compact.extend(misses)
-        if hits:
-            compact.append(max(hits, key=lambda r: (len(r.path), r.path)))
-    compact.extend(other)
+    for key in sorted(by_group, key=lambda item: (item[0], item[1])):
+        rows = by_group[key]
+        if rows:
+            compact.append(max(rows, key=_hierarchy_final_row_rank))
     return compact
 
 

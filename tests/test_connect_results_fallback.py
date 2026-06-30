@@ -9,6 +9,7 @@ from hierwalk.connect_artifacts import (
     SignalTailRecord,
     build_connect_results_from_request,
     collect_hierarchy_evidence,
+    compact_hierarchy_evidence,
     format_connect_hierarchy_tsv,
     normalize_connect_results,
     normalize_hierarchy_kind,
@@ -74,9 +75,10 @@ def test_hierarchy_tsv_includes_signal_tail_hits(tmp_path: Path):
         phase="text",
         signal_tails=tails,
     )
-    assert "top.c" in body
-    assert "\twire\t" in body or "\twire\t" in body
+    rows = [ln for ln in body.splitlines() if ln.startswith("t\t")]
+    assert len(rows) == 2
     assert "top.clk" in body
+    assert "top.c" in body
 
 
 def test_collect_hierarchy_evidence_includes_inst_port_wire_reg(tmp_path: Path):
@@ -127,9 +129,11 @@ def test_collect_hierarchy_evidence_includes_inst_port_wire_reg(tmp_path: Path):
         index=session.index,
         top="top",
     )
-    assert any("inst" in line for line in report)
     assert any("port" in line for line in report)
     assert any("wire" in line for line in report)
+    compact = compact_hierarchy_evidence(evidence)
+    assert len([r for r in compact if r.check_id == "t" and r.side == "a"]) == 1
+    assert len([r for r in compact if r.check_id == "t" and r.side == "b"]) == 1
 
 
 def test_hierarchy_tsv_expands_list_endpoint_display(tmp_path: Path):
@@ -172,7 +176,6 @@ def test_hierarchy_tsv_expands_list_endpoint_display(tmp_path: Path):
         top="top",
     )
     assert "[top" not in body
-    assert "\tinst\ttop\t" in body or "\tinst\ttop\thit" in body
     assert "top.a.b.e.r.t" in body
     assert "top.a.b.u.i.o" in body
     assert "top.a.b.c" in body
