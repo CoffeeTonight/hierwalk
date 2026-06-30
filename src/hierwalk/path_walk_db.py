@@ -412,23 +412,35 @@ class PathWalkModuleDb:
             return
         self._last_heartbeat = now
         detail = self.heartbeat_detail()
-        self._trace(
-            f"pw-db heartbeat tier0={self.files_regex_scanned} "
-            f"tier1={self.files_validated} phase={detail or 'idle'}"
-        )
+        from hierwalk.perf import pw_trace_verbose
+
+        if pw_trace_verbose():
+            self._trace(
+                f"pw-db heartbeat tier0={self.files_regex_scanned} "
+                f"tier1={self.files_validated} phase={detail or 'idle'}"
+            )
+        else:
+            self._trace(f"pw-db heartbeat phase={detail or 'idle'}")
 
     def heartbeat_detail(self) -> str:
         return self._phase
 
     def format_status_line(self) -> str:
+        from hierwalk.perf import pw_trace_verbose
+
         root = str(self._cache_root) if self._cache_root else "(memory only)"
         mapped = len(self._module_to_files)
-        return (
+        base = (
             f"pw-db v{PATH_WALK_DB_VERSION} root={root} "
-            f"module_map={mapped} tier0={self.files_regex_scanned} "
-            f"tier1={self.files_validated} cache_hit="
+            f"module_map={mapped} cache_hit="
             f"{self.cache_regex_hits}+{self.cache_validated_hits}"
         )
+        if pw_trace_verbose():
+            return (
+                f"{base} tier0={self.files_regex_scanned} "
+                f"tier1={self.files_validated}"
+            )
+        return base
 
     def module_to_files_snapshot(self) -> Dict[str, List[str]]:
         return {name: list(files) for name, files in self._module_to_files.items()}

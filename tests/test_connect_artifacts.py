@@ -319,11 +319,11 @@ def test_format_connect_hierarchy_tsv_includes_absolute_rtl_path(tmp_path: Path)
     )
     tsv = format_connect_hierarchy_tsv([result], rows_by_path, phase="text")
     parsed = _tsv_rows(tsv)
-    assert "rtl_path" in parsed[0]
+    assert "rtl" in parsed[0]
     leaf_rows = [row for row in parsed if row["path"] == "top.u_leaf"]
-    assert leaf_rows and leaf_rows[0]["rtl_path"] == rtl_abs
+    assert leaf_rows and leaf_rows[0]["rtl"] == rtl_abs
     sig_rows = [row for row in parsed if row["path"] == "top.u_leaf.sig"]
-    assert sig_rows and sig_rows[0]["rtl_path"] == rtl_abs
+    assert sig_rows and sig_rows[0]["rtl"] == rtl_abs
 
 
 def test_format_connect_hierarchy_tsv_marks_miss_prefixes():

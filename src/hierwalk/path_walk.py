@@ -260,6 +260,9 @@ class PathWalkState:
     _param_ctx_cache: Dict[str, Mapping[str, str]] = field(default_factory=dict, repr=False)
     _signal_tail_records: List[object] = field(default_factory=list, repr=False)
     _walk_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    _hierarchy_text_writer: object = field(default=None, repr=False)
+    _hierarchy_logical_writer: object = field(default=None, repr=False)
+    _hierarchy_flush_phase: str = field(default="", repr=False)
 
     def _trace_streams(self) -> List[TextIO]:
         out: List[TextIO] = []
@@ -2446,6 +2449,32 @@ def _extend_path_walk_for_specs(
     state.flush_pending_misses()
 
 
+def _flush_hierarchy_tsv_for_check(state: PathWalkState, chk) -> None:
+    """Write hierarchy.text.tsv / hierarchy.tsv as soon as a check's walk finishes."""
+    phase = str(state._hierarchy_flush_phase or "").strip().lower()
+    if phase == "text":
+        writer = state._hierarchy_text_writer
+    elif phase == "logical":
+        writer = state._hierarchy_logical_writer
+    else:
+        return
+    if writer is None:
+        return
+    from hierwalk.connect_artifacts import IncrementalHierarchyTsvWriter
+
+    if not isinstance(writer, IncrementalHierarchyTsvWriter):
+        return
+    out = writer.record_check(
+        chk,
+        state.rows_by_path,
+        rows=state.rows(),
+        signal_tails=state._signal_tail_records,
+        index=state.index,
+        top=state.top,
+    )
+    state._emit_walk(f"hierarchy-{phase} written {out}")
+
+
 def _walk_hierarchy_for_check(
     state: PathWalkState,
     chk,
@@ -2465,8 +2494,10 @@ def _walk_hierarchy_for_check(
             return
         seen_lca.add(key)
     if state._is_walk_blocked(a) and state._is_walk_blocked(b):
+        _flush_hierarchy_tsv_for_check(state, chk)
         return
     state.ensure_lca_subtree(a, b)
+    _flush_hierarchy_tsv_for_check(state, chk)
 
 
 def _extend_path_walk_connect(
@@ -2599,6 +2630,58 @@ def _pipeline_path_walk_text_conn(
         text_coi_leaves=leaves,
         text_coi_unique=unique,
     )
+
+
+def _path_walk_progress_stats_line(state: PathWalkState) -> str:
+    from hierwalk.perf import pw_trace_verbose
+
+    progress = (
+        f"path-walk: {len(state.rows_by_path)} instance row(s), "
+        f"{state.stats.modules_loaded} module(s) loaded, "
+        f"cache={state.stats.cache_regex_hits}+{state.stats.cache_validated_hits}"
+    )
+    if pw_trace_verbose():
+        progress += (
+            f" tier0={state.stats.files_regex_scanned} "
+            f"tier1={state.stats.files_validated}"
+        )
+    return progress
+
+
+def _init_hierarchy_tsv_writers(
+    state: PathWalkState,
+    out_paths,
+    *,
+    do_text: bool,
+    do_logical: bool,
+) -> None:
+    from hierwalk.connect_artifacts import IncrementalHierarchyTsvWriter
+
+    if do_text:
+        writer = IncrementalHierarchyTsvWriter(
+            out_paths.hierarchy_text_tsv,
+            phase="text",
+        )
+        writer.flush_empty()
+        state._hierarchy_text_writer = writer
+    if do_logical:
+        writer = IncrementalHierarchyTsvWriter(
+            out_paths.hierarchy_logical_tsv,
+            phase="logical",
+        )
+        writer.flush_empty()
+        state._hierarchy_logical_writer = writer
+
+
+def _backfill_hierarchy_tsv(
+    state: PathWalkState,
+    request: ConnectivityRequest,
+    *,
+    phase: str,
+) -> None:
+    state._hierarchy_flush_phase = phase
+    for chk in request.checks:
+        _flush_hierarchy_tsv_for_check(state, chk)
 
 
 def _path_walk_trace_emit(
@@ -2804,12 +2887,7 @@ def run_path_walk_index(
 
         state._sync_db_stats()
         if on_progress:
-            on_progress(
-                f"path-walk: {len(state.rows_by_path)} instance row(s), "
-                f"{state.stats.modules_loaded} module(s) loaded, "
-                f"tier0={state.stats.files_regex_scanned} tier1={state.stats.files_validated} "
-                f"cache={state.stats.cache_regex_hits}+{state.stats.cache_validated_hits}"
-            )
+            on_progress(_path_walk_progress_stats_line(state))
         if state.mod_db.defer_count() and not state.stats.recovery_stalled:
             state.run_recovery_pass()
         _drain_path_walk_workers(state.mod_db)
@@ -3240,12 +3318,7 @@ def run_path_walk_connect(
                 )
         state._sync_db_stats()
         if on_progress:
-            on_progress(
-                f"path-walk: {len(state.rows_by_path)} instance row(s), "
-                f"{state.stats.modules_loaded} module(s) loaded, "
-                f"tier0={state.stats.files_regex_scanned} tier1={state.stats.files_validated} "
-                f"cache={state.stats.cache_regex_hits}+{state.stats.cache_validated_hits}"
-            )
+            on_progress(_path_walk_progress_stats_line(state))
 
         if do_text and not do_logical:
             _drain_path_walk_workers(state.mod_db)
@@ -3296,9 +3369,21 @@ def run_path_walk_connect(
             cache_dir=cache_dir,
         )
         out_paths = connect_output_paths(resolved_output_dir, connect_output_name)
+        _init_hierarchy_tsv_writers(
+            state,
+            out_paths,
+            do_text=do_text,
+            do_logical=do_logical,
+        )
+        if do_logical and not do_text:
+            _backfill_hierarchy_tsv(state, request, phase="logical")
         try:
             batch: Optional[ConnectivityBatchResult] = None
             if do_text:
+                if not use_connect_pipeline or reuse_suite_session:
+                    _backfill_hierarchy_tsv(state, request, phase="text")
+                else:
+                    state._hierarchy_flush_phase = "text"
                 if timing_rec is not None:
                     timing_rec.begin_step("text-conn", "connect-coi")
                 t_coi = time.perf_counter()
@@ -3393,6 +3478,7 @@ def run_path_walk_connect(
                 state.stats.checks_run = len(text_results)
 
             if do_logical:
+                state._hierarchy_flush_phase = "logical"
                 if timing_rec is not None:
                     timing_rec.begin_step("logical-conn", "activation-audit")
                 t_act = time.perf_counter()
@@ -3404,6 +3490,7 @@ def run_path_walk_connect(
                 conn_session.clear_cache()
                 try:
                     finalize_logical_walk_before_connect(state, request)
+                    _backfill_hierarchy_tsv(state, request, phase="logical")
                     walk_rows = state.rows()
                     conn_session.rows = walk_rows
                     conn_session.elab_index = ElabIndex.from_rows_by_path(

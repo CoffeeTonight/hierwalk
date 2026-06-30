@@ -563,6 +563,8 @@ def path_walk_trace_show_message(message: str) -> bool:
     if msg.startswith("recovery-pass "):
         return True
     if msg.startswith("pw-db heartbeat "):
+        if "tier0=" in msg or "tier1=" in msg:
+            return pw_trace_verbose()
         return True
     if msg.startswith("connect-pipeline "):
         return True

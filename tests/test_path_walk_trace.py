@@ -25,6 +25,20 @@ def _row(path: str, *, file: str, via: str, chain: str) -> FlatRow:
     )
 
 
+def test_path_walk_trace_heartbeat_hides_tier0_unless_verbose(monkeypatch):
+    from hierwalk.hierarchy_log import path_walk_trace_show_message
+
+    monkeypatch.delenv("HIERWALK_PW_TRACE_VERBOSE", raising=False)
+    assert path_walk_trace_show_message("pw-db heartbeat phase=mapping")
+    assert not path_walk_trace_show_message(
+        "pw-db heartbeat tier0=12 tier1=3 phase=mapping"
+    )
+    monkeypatch.setenv("HIERWALK_PW_TRACE_VERBOSE", "1")
+    assert path_walk_trace_show_message(
+        "pw-db heartbeat tier0=12 tier1=3 phase=mapping"
+    )
+
+
 def test_path_walk_trace_filter_hides_search_keeps_hits():
     assert not path_walk_trace_show_message("walk target=top.u_a")
     assert not path_walk_trace_show_message("pw-db tier0 scan a.v -> A")
@@ -132,6 +146,51 @@ def test_path_walk_connect_trace_writes_pw_db_to_run_log(tmp_path: Path):
     assert "pw-db tier1" not in text
     assert "ok A" in text
     assert "[hier-walk path-walk]" in text
+
+
+def test_path_walk_connect_writes_hierarchy_tsv_during_walk(tmp_path: Path):
+    from hierwalk.connect_request import ConnectivityCheck, ConnectivityRequest
+    from hierwalk.path_walk import run_path_walk_connect
+
+    top_v = tmp_path / "top.v"
+    top_v.write_text(
+        """
+        module top(input logic clk);
+          leaf u_leaf (.clk(clk));
+        endmodule
+        module leaf(input logic clk);
+          wire w;
+          assign w = clk;
+        endmodule
+        """,
+        encoding="utf-8",
+    )
+    fl_path = tmp_path / "design.f"
+    fl_path.write_text(f"{top_v.resolve()}\n", encoding="utf-8")
+    fl = parse_filelist(str(fl_path), index_cwd=str(tmp_path))
+    out_dir = tmp_path / ".db_top"
+    request = ConnectivityRequest(
+        checks=(
+            ConnectivityCheck("top.u_leaf.w", "top.clk", check_id="c0"),
+            ConnectivityCheck("top.clk", "top.u_leaf.clk", check_id="c1"),
+        ),
+        top="top",
+    )
+    run_path_walk_connect(
+        request,
+        fl,
+        top="top",
+        no_cache=True,
+        connect_phase="text",
+        connect_output_dir=out_dir,
+    )
+    hier_text = out_dir / "hierarchy.text.tsv"
+    assert hier_text.is_file()
+    text_body = hier_text.read_text(encoding="utf-8")
+    assert "check_id\tside\tkind\tpath\tstatus" in text_body
+    assert "c0" in text_body
+    assert "c1" in text_body
+    assert "hit" in text_body or "miss" in text_body
 
 
 def test_path_walk_connect_execute_writes_tsv_and_report_log(tmp_path: Path, monkeypatch):

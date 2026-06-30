@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Mapping, Optional, Sequence, Union
 
@@ -792,6 +792,191 @@ def _provenance_for_evidence_path(
     return "", "", ""
 
 
+def _hierarchy_tsv_headers() -> List[str]:
+    return [
+        "check_id",
+        "side",
+        "kind",
+        "path",
+        "status",
+        "module",
+        "rtl",
+        "via_filelist",
+        "filelist_chain",
+        "phase",
+    ]
+
+
+def _check_id_keys(chk: ConnectivityCheck) -> frozenset[str]:
+    pairs = expand_check_to_pairs(
+        chk.endpoint_a,
+        chk.endpoint_b,
+        check_id=chk.check_id,
+        expand=chk.expand,
+    )
+    keys: set[str] = set()
+    for pair in pairs:
+        sub = pair.sub_id.strip("[]->")
+        if chk.check_id:
+            keys.add(f"{chk.check_id}{pair.sub_id}" if pair.sub_id else chk.check_id)
+        elif sub:
+            keys.add(sub)
+    if chk.check_id:
+        keys.add(chk.check_id)
+    return frozenset(keys)
+
+
+def collect_hierarchy_evidence_for_check(
+    chk: ConnectivityCheck,
+    rows_by_path: Mapping[str, FlatRow],
+    *,
+    rows: Sequence[FlatRow],
+    signal_tails: Sequence[SignalTailRecord] = (),
+    index: Optional[DesignIndex] = None,
+    top: str = "",
+) -> List[HierarchyEvidenceRow]:
+    """Hierarchy hit/miss rows for one check right after path-walk (no COI yet)."""
+    pairs = expand_check_to_pairs(
+        chk.endpoint_a,
+        chk.endpoint_b,
+        check_id=chk.check_id,
+        expand=chk.expand,
+    )
+    shells: List[ConnectResult] = []
+    for pair in pairs:
+        sub_id = (
+            f"{chk.check_id}{pair.sub_id}"
+            if chk.check_id and pair.sub_id
+            else (chk.check_id or pair.sub_id.strip("[]->"))
+        )
+        shells.append(
+            ConnectResult(
+                check_id=sub_id,
+                endpoint_a=_resolve_endpoint_for_spec(
+                    pair.endpoint_a,
+                    rows_by_path,
+                    index=index,
+                    top=top,
+                    rows=rows,
+                ),
+                endpoint_b=_resolve_endpoint_for_spec(
+                    pair.endpoint_b,
+                    rows_by_path,
+                    index=index,
+                    top=top,
+                    rows=rows,
+                ),
+                connected=False,
+                mode="",
+                note="",
+            )
+        )
+    return collect_hierarchy_evidence(
+        shells,
+        rows_by_path,
+        signal_tails=signal_tails,
+        index=index,
+        top=top,
+    )
+
+
+def format_hierarchy_evidence_tsv(
+    evidence: Sequence[HierarchyEvidenceRow],
+    *,
+    phase: str = "text",
+    compact: bool = True,
+) -> str:
+    phase_label = str(phase).strip().lower() or "text"
+    rows = (
+        compact_hierarchy_evidence(list(evidence))
+        if compact
+        else list(evidence)
+    )
+    lines = ["\t".join(_hierarchy_tsv_headers())]
+    for row in rows:
+        lines.append(
+            "\t".join(
+                (
+                    row.check_id,
+                    row.side,
+                    row.kind,
+                    row.path,
+                    row.status,
+                    row.module,
+                    row.rtl,
+                    row.via_filelist,
+                    row.filelist_chain,
+                    phase_label,
+                )
+            )
+        )
+    return "\n".join(lines) + "\n"
+
+
+def write_hierarchy_evidence_tsv(
+    path: Path,
+    evidence: Sequence[HierarchyEvidenceRow],
+    *,
+    phase: str = "text",
+    compact: bool = True,
+) -> Path:
+    out = path.expanduser().resolve()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    body = format_hierarchy_evidence_tsv(evidence, phase=phase, compact=compact)
+    tmp = out.with_name(f"{out.name}.tmp.{os.getpid()}")
+    try:
+        tmp.write_text(body, encoding="utf-8")
+        tmp.replace(out)
+    finally:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
+    return out
+
+
+@dataclass
+class IncrementalHierarchyTsvWriter:
+    """Append hierarchy rows per check; rewrites TSV atomically after each update."""
+
+    path: Path
+    phase: str = "text"
+    _rows: List[HierarchyEvidenceRow] = field(default_factory=list)
+
+    def record_check(
+        self,
+        chk: ConnectivityCheck,
+        rows_by_path: Mapping[str, FlatRow],
+        *,
+        rows: Sequence[FlatRow],
+        signal_tails: Sequence[SignalTailRecord] = (),
+        index: Optional[DesignIndex] = None,
+        top: str = "",
+    ) -> Path:
+        keys = _check_id_keys(chk)
+        evidence = compact_hierarchy_evidence(
+            collect_hierarchy_evidence_for_check(
+                chk,
+                rows_by_path,
+                rows=rows,
+                signal_tails=signal_tails,
+                index=index,
+                top=top,
+            )
+        )
+        if keys:
+            self._rows = [row for row in self._rows if row.check_id not in keys]
+        self._rows.extend(evidence)
+        return write_hierarchy_evidence_tsv(
+            self.path,
+            self._rows,
+            phase=self.phase,
+            compact=False,
+        )
+
+    def flush_empty(self) -> Path:
+        """Write header-only TSV so downstream tools can watch the file early."""
+        return write_hierarchy_evidence_tsv(self.path, (), phase=self.phase)
+
+
 def collect_hierarchy_evidence(
     results: Sequence[ConnectResult],
     rows_by_path: Mapping[str, FlatRow],
@@ -1046,19 +1231,6 @@ def format_connect_hierarchy_tsv(
     top: str = "",
     compact: bool = True,
 ) -> str:
-    phase_label = str(phase).strip().lower() or "text"
-    headers = [
-        "check_id",
-        "side",
-        "kind",
-        "path",
-        "status",
-        "module",
-        "rtl",
-        "via_filelist",
-        "filelist_chain",
-        "phase",
-    ]
     evidence = collect_hierarchy_evidence(
         results,
         rows_by_path,
@@ -1066,27 +1238,11 @@ def format_connect_hierarchy_tsv(
         index=index,
         top=top,
     )
-    if compact:
-        evidence = compact_hierarchy_evidence(evidence)
-    lines = ["\t".join(headers)]
-    for row in evidence:
-        lines.append(
-            "\t".join(
-                (
-                    row.check_id,
-                    row.side,
-                    row.kind,
-                    row.path,
-                    row.status,
-                    row.module,
-                    row.rtl,
-                    row.via_filelist,
-                    row.filelist_chain,
-                    phase_label,
-                )
-            )
-        )
-    return "\n".join(lines) + "\n"
+    return format_hierarchy_evidence_tsv(
+        evidence,
+        phase=phase,
+        compact=compact,
+    )
 
 
 def write_connect_phase_tsv(
