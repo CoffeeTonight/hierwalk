@@ -297,6 +297,65 @@ def _resolve_connect_jobs(jobs: int, num_tasks: int) -> int:
     return max(1, min(jobs, num_tasks))
 
 
+class _ConnectCoiHeartbeat:
+    """Periodic connect-coi progress while checks run (``HIERWALK_PW_HEARTBEAT``)."""
+
+    def __init__(
+        self,
+        *,
+        total_checks: int,
+        get_checks_done: Any,
+        get_modules_cached: Any,
+        get_detail: Any = lambda: "",
+        on_emit: Optional[Any] = None,
+        interval_sec: Optional[float] = None,
+    ) -> None:
+        from hierwalk.perf import pw_heartbeat_interval_sec
+
+        self._total = total_checks
+        self._get_checks_done = get_checks_done
+        self._get_modules_cached = get_modules_cached
+        self._get_detail = get_detail
+        self._on_emit = on_emit
+        self._interval = (
+            interval_sec if interval_sec is not None else pw_heartbeat_interval_sec()
+        )
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._started = time.monotonic()
+
+    def __enter__(self) -> "_ConnectCoiHeartbeat":
+        if self._interval is None or self._on_emit is None or self._total <= 0:
+            return self
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        if self._thread is not None:
+            self._stop.set()
+            self._thread.join(timeout=self._interval + 2.0)
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval):
+            self._emit_once()
+
+    def _emit_once(self) -> None:
+        if self._on_emit is None:
+            return
+        done = self._get_checks_done()
+        modules = self._get_modules_cached()
+        elapsed = time.monotonic() - self._started
+        detail = self._get_detail()
+        msg = (
+            f"connect-coi heartbeat checks_done={done}/{self._total} "
+            f"modules_cached={modules} elapsed_sec={elapsed:.1f}"
+        )
+        if detail:
+            msg += f" {detail}"
+        self._on_emit(msg)
+
+
 def _connect_pair(
     endpoint_a: str,
     endpoint_b: str,
@@ -989,6 +1048,7 @@ class ConnectivitySession:
         *,
         trace: Optional[bool] = None,
         on_progress: Optional[Any] = None,
+        on_heartbeat: Optional[Any] = None,
         jobs: int = 0,
         record_timing: bool = False,
     ) -> ConnectivityBatchResult:
@@ -1007,6 +1067,16 @@ class ConnectivitySession:
         checks = list(request.checks)
         workers = _resolve_connect_jobs(jobs, len(checks))
         dedup_lock = threading.Lock() if workers > 1 else None
+        checks_done = 0
+        checks_done_lock = threading.Lock() if workers > 1 else None
+
+        def _bump_checks_done() -> None:
+            nonlocal checks_done
+            if checks_done_lock is None:
+                checks_done += 1
+                return
+            with checks_done_lock:
+                checks_done += 1
 
         def _one(chk: ConnectivityCheck) -> ConnectResult:
             t0 = time.perf_counter()
@@ -1026,19 +1096,26 @@ class ConnectivitySession:
                     endpoint_b=str(chk.endpoint_b),
                     elapsed_sec=time.perf_counter() - t0,
                 )
+            _bump_checks_done()
             return result
 
-        if workers <= 1 or len(checks) < 4:
-            results = [_one(chk) for chk in checks]
-        else:
-            ordered: List[Optional[ConnectResult]] = [None] * len(checks)
-            with ThreadPoolExecutor(max_workers=workers) as pool:
-                futures = {
-                    pool.submit(_one, chk): idx for idx, chk in enumerate(checks)
-                }
-                for fut in as_completed(futures):
-                    ordered[futures[fut]] = fut.result()
-            results = [r for r in ordered if r is not None]
+        with _ConnectCoiHeartbeat(
+            total_checks=len(checks),
+            get_checks_done=lambda: checks_done,
+            get_modules_cached=lambda: self.modules_cached,
+            on_emit=on_heartbeat,
+        ):
+            if workers <= 1 or len(checks) < 4:
+                results = [_one(chk) for chk in checks]
+            else:
+                ordered: List[Optional[ConnectResult]] = [None] * len(checks)
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    futures = {
+                        pool.submit(_one, chk): idx for idx, chk in enumerate(checks)
+                    }
+                    for fut in as_completed(futures):
+                        ordered[futures[fut]] = fut.result()
+                results = [r for r in ordered if r is not None]
 
         leaves, unique = dedup_stats[0], dedup_stats[1]
         if on_progress is not None and leaves > unique:

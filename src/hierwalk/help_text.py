@@ -51,7 +51,7 @@ environment:
   HIERWALK_PW_DB_PREFETCH_WAIT  wait for post-verify DB build (default 1; 0=detach)
   HIERWALK_PW_DB_PREFETCH_MAX   cap post-verify DB files per run (0 = no limit)
   HIERWALK_PW_TRACE_VERBOSE  show tier0/tier1 pw-db search steps on stderr (1=on)
-  HIERWALK_PW_HEARTBEAT      periodic pw-db progress during long resolves (1=30s)
+  HIERWALK_PW_HEARTBEAT      periodic pw-db / connect-coi progress (1=30s)
   HIERWALK_CONNECT_JOBS      path-walk text/logical COI worker count (0=auto)
   HIERWALK_LOG_SLOW_FILES    log per-file preprocess/scan timing (1=10s, or seconds)
   HIERWALK_LOW_MEMORY_AUTO   auto fused index above N sources (default 1500; 0=off)

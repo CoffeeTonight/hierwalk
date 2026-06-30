@@ -159,7 +159,7 @@ def pw_trace_verbose() -> bool:
 
 def pw_heartbeat_interval_sec() -> Optional[float]:
     """
-    Periodic pw-db heartbeat on stderr/log during long resolves.
+    Periodic heartbeat on stderr/log during long pw-db resolves and connect-coi.
 
     ``HIERWALK_PW_HEARTBEAT=1`` uses 30s; ``=60`` uses 60s; unset/0 disables.
     """

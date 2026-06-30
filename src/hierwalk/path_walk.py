@@ -2553,7 +2553,7 @@ def _pipeline_path_walk_text_conn(
 ) -> ConnectivityBatchResult:
     """Interleave per-check hierarchy walk with parallel text-COI workers (J-003/J-004)."""
     from hierwalk.connect_artifacts import prepare_text_connect_request
-    from hierwalk.connectivity import _resolve_connect_jobs
+    from hierwalk.connectivity import _ConnectCoiHeartbeat, _resolve_connect_jobs
     from hierwalk.verification_timing import record_connect_check
 
     text_request = prepare_text_connect_request(request)
@@ -2564,54 +2564,66 @@ def _pipeline_path_walk_text_conn(
     dedup_lock = threading.Lock()
     seen_lca: Set[Tuple[str, str]] = set()
     results: List = [None] * len(request.checks)
+    hierarchy_ready = 0
+    coi_done = 0
+    total = len(request.checks)
 
     state._emit_walk(
-        f"connect-pipeline begin checks={len(request.checks)} "
+        f"connect-pipeline begin checks={total} "
         f"hierarchy_jobs={hierarchy_jobs} connect_jobs={workers}"
     )
 
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {}
-        for idx, chk in enumerate(request.checks):
-            t_walk = time.perf_counter()
-            _walk_hierarchy_for_check(
-                state,
-                chk,
-                jobs=hierarchy_jobs,
-                seen_lca=seen_lca,
-            )
-            walk_ms = (time.perf_counter() - t_walk) * 1000.0
-            state._emit_walk(
-                f"connect-pipeline hierarchy-ready check={chk.check_id or idx} "
-                f"ms={walk_ms:.1f}"
-            )
-            t0 = time.perf_counter()
-
-            def _run_check(
-                _chk=chk,
-                _idx=idx,
-                _t0=t0,
-            ):
-                conn_session.resolve_param_dims = False
-                result = conn_session.text_check_entry(
-                    _chk,
-                    trace=use_trace,
-                    dedup_cache=dedup_cache,
-                    dedup_stats=dedup_stats,
-                    dedup_lock=dedup_lock,
+    with _ConnectCoiHeartbeat(
+        total_checks=total,
+        get_checks_done=lambda: coi_done,
+        get_modules_cached=lambda: conn_session.modules_cached,
+        get_detail=lambda: f"hierarchy_ready={hierarchy_ready}/{total}",
+        on_emit=state._emit_walk,
+    ):
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {}
+            for idx, chk in enumerate(request.checks):
+                t_walk = time.perf_counter()
+                _walk_hierarchy_for_check(
+                    state,
+                    chk,
+                    jobs=hierarchy_jobs,
+                    seen_lca=seen_lca,
                 )
-                record_connect_check(
-                    check_id=_chk.check_id,
-                    endpoint_a=str(_chk.endpoint_a),
-                    endpoint_b=str(_chk.endpoint_b),
-                    elapsed_sec=time.perf_counter() - _t0,
+                hierarchy_ready += 1
+                walk_ms = (time.perf_counter() - t_walk) * 1000.0
+                state._emit_walk(
+                    f"connect-pipeline hierarchy-ready check={chk.check_id or idx} "
+                    f"ms={walk_ms:.1f}"
                 )
-                return _idx, result
+                t0 = time.perf_counter()
 
-            futures[pool.submit(_run_check)] = idx
-        for fut in as_completed(futures):
-            idx, result = fut.result()
-            results[idx] = result
+                def _run_check(
+                    _chk=chk,
+                    _idx=idx,
+                    _t0=t0,
+                ):
+                    conn_session.resolve_param_dims = False
+                    result = conn_session.text_check_entry(
+                        _chk,
+                        trace=use_trace,
+                        dedup_cache=dedup_cache,
+                        dedup_stats=dedup_stats,
+                        dedup_lock=dedup_lock,
+                    )
+                    record_connect_check(
+                        check_id=_chk.check_id,
+                        endpoint_a=str(_chk.endpoint_a),
+                        endpoint_b=str(_chk.endpoint_b),
+                        elapsed_sec=time.perf_counter() - _t0,
+                    )
+                    return _idx, result
+
+                futures[pool.submit(_run_check)] = idx
+            for fut in as_completed(futures):
+                idx, result = fut.result()
+                results[idx] = result
+                coi_done += 1
 
     state.flush_pending_misses()
     leaves, unique = dedup_stats[0], dedup_stats[1]
@@ -3398,6 +3410,7 @@ def run_path_walk_connect(
                             batch = conn_session.run_text_request(
                                 text_request,
                                 on_progress=on_progress,
+                                on_heartbeat=state._emit_walk,
                                 jobs=effective_connect_jobs,
                                 record_timing=True,
                             )

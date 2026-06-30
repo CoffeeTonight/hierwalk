@@ -102,7 +102,7 @@ _BEHAVIOR_ENV_VARS: Sequence[tuple[str, str, str]] = (
     (
         "HIERWALK_PW_HEARTBEAT",
         "(unset)",
-        "pw-db heartbeat interval during long resolves (1=30s)",
+        "pw-db / connect-coi heartbeat interval (1=30s)",
     ),
     (
         "HIERWALK_CONNECT_JOBS",
