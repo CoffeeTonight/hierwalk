@@ -116,27 +116,25 @@ class VerificationTimingRecorder:
             f"done {format_duration(step.elapsed_sec)} ({n} {word})"
         )
 
-    def emit_summary(self) -> None:
+    def emit_summary(self, *, wall_sec: Optional[float] = None) -> None:
         if not self.steps:
             return
-        lines = [
-            f"{_PREFIX} summary total {format_duration(self.total_sec)} "
-            f"across {len(self.steps)} step(s)",
-        ]
+        from hierwalk.report_provenance import format_timing_summary_lines
+
+        for line in format_timing_summary_lines(self.steps, wall_sec=wall_sec):
+            self._write(f"{_PREFIX} {line}")
         for step in self.steps:
             n = len(step.items)
             word = "item" if n == 1 else "items"
-            lines.append(
-                f"{_PREFIX}   {step.name} kind={step.kind} "
-                f"{format_duration(step.elapsed_sec)} ({n} {word})"
+            self._write(
+                f"{_PREFIX} step {step.name} kind={step.kind} "
+                f"done {format_duration(step.elapsed_sec)} ({n} {word})"
             )
             for item in step.items:
-                lines.append(
-                    f"{_PREFIX}     item {self._format_item_detail(item)} "
+                self._write(
+                    f"{_PREFIX}   item {self._format_item_detail(item)} "
                     f"{format_duration(item.elapsed_sec)}"
                 )
-        for line in lines:
-            self._write(line)
 
 
 _suite_recorder: Optional[VerificationTimingRecorder] = None

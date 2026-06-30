@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hier-walk"
-version = "0.3.27"
+version = "0.3.28"
 description = "RTL hierarchy path-walk and structural connectivity verification"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -20,4 +20,5 @@ where = ["src"]
 testpaths = ["tests"]
 markers = [
     "stress: deep hierarchy connectivity stress trials (slower)",
+    "slow: full zigzag suite verification (tens of minutes)",
 ]

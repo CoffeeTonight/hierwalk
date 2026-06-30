@@ -265,6 +265,10 @@ def test_empty_param_ctx_skips_path_refine_on_signal_tail(tmp_path: Path, monkey
     state = build_path_walk_state(index, "TOP", req, mod_db, jobs=1)
     walk_ms = (time.perf_counter() - t0) * 1000.0
 
+    assert refine_calls == [], "path-walk must not refine param ctx on signal-tail probes"
+    assert walk_ms < 30_000.0
+
+    refine_calls.clear()
     batch, _index, _state = run_path_walk_connect(
         req,
         flr,
@@ -274,8 +278,6 @@ def test_empty_param_ctx_skips_path_refine_on_signal_tail(tmp_path: Path, monkey
     )
 
     assert batch.results[0].connected is True
-    assert refine_calls == []
-    assert walk_ms < 30_000.0
 
 
 def test_find_instance_by_child_module_returns_first_matching_edge():
@@ -292,3 +294,49 @@ def test_find_instance_by_child_module_returns_first_matching_edge():
     assert edge is not None
     assert edge.inst_name == "u_ip_0"
     assert edge.child_module == "IP_BLK"
+
+
+def test_ensure_path_skips_signal_tail_on_intermediate_inst_hops(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """Mid-hop instance names must not run signal-tail before child-edge resolution."""
+    n = 50_000
+    body = "module TOP(input logic clk);\n  MOD_A a (.clk(clk));\nendmodule\n"
+    body += "module MOD_A(input logic clk);\n"
+    body += "".join(f"  assign w{i} = clk;\n" for i in range(n))
+    body += "  MOD_B b (.clk(clk));\nendmodule\n"
+    body += "module MOD_B(input logic clk);\n  MOD_C c (.clk(clk));\nendmodule\n"
+    body += "module MOD_C(input logic clk);\nendmodule\n"
+    rtl = tmp_path / "chain.v"
+    rtl.write_text(body, encoding="utf-8")
+    fl = tmp_path / "design.f"
+    fl.write_text(str(rtl.resolve()) + "\n", encoding="utf-8")
+    flr = parse_filelist(str(fl), index_cwd=str(tmp_path))
+
+    classify_calls: list[tuple[str, str]] = []
+
+    from hierwalk.path_walk import PathWalkState
+
+    orig = PathWalkState._classify_signal_tail
+
+    def traced_classify(self, parent_path, signal_name, row):
+        classify_calls.append((parent_path, signal_name))
+        return orig(self, parent_path, signal_name, row)
+
+    monkeypatch.setattr(PathWalkState, "_classify_signal_tail", traced_classify)
+
+    from hierwalk.path_walk_db import PathWalkModuleDb
+
+    monkeypatch.setattr(PathWalkModuleDb, "_warm_tier1_background", lambda self, _f: None)
+
+    index, mod_db = create_path_walk_index(flr, "TOP", defines={}, no_cache=True, jobs=1)
+    state = PathWalkState(index=index, top="TOP", mod_db=mod_db)
+    state.ensure_root()
+    t0 = time.perf_counter()
+    assert state.ensure_path("TOP.a.b.c")
+    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+
+    assert classify_calls == []
+    assert elapsed_ms < 30_000.0
+    assert "TOP.a.b.c" in state.rows_by_path

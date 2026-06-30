@@ -98,6 +98,7 @@ class ModuleConnectIndex:
     ff_q_roots: FrozenSet[str] = field(default_factory=frozenset)
     vector_bases: FrozenSet[str] = field(default_factory=frozenset)
     vector_scalar_rep: Dict[str, str] = field(default_factory=dict)
+    resolve_param_dims: bool = True
 
     def copy(self) -> ModuleConnectIndex:
         """Shallow copy of mutable fields (safe before in-place bind folding)."""
@@ -118,6 +119,7 @@ class ModuleConnectIndex:
             ff_q_roots=self.ff_q_roots,
             vector_bases=self.vector_bases,
             vector_scalar_rep=dict(self.vector_scalar_rep),
+            resolve_param_dims=self.resolve_param_dims,
         )
 
 
@@ -635,34 +637,130 @@ def _collect_declared_net_names(body: str) -> Set[str]:
     return names
 
 
-_ASSIGN_DRIVE_BASE_INDEX_MIN = 64 * 1024
+_LARGE_MODULE_PROBE_MIN = 256 * 1024
 _ASSIGN_PROBE_MISS_CACHE_MAX = 8192
 _assign_drive_bases_cache: Dict[str, FrozenSet[str]] = {}
+_port_map_bases_cache: Dict[str, FrozenSet[str]] = {}
 _assign_probe_miss_cache: Dict[Tuple[str, str], None] = {}
 _assign_probe_miss_cache_guard = threading.Lock()
+_large_module_probe_cache_guard = threading.Lock()
 
 
-def _assign_body_digest(body: str) -> str:
+def _module_body_digest(body: str) -> str:
     clean = _clean_body(body)
     return hashlib.sha256(clean.encode("utf-8", errors="surrogateescape")).hexdigest()[:16]
 
 
+def _assign_drive_bases_from_body(body: str) -> FrozenSet[str]:
+    return frozenset(collect_assign_net_names(body))
+
+
+def _ensure_assign_drive_bases_index(body: str) -> FrozenSet[str]:
+    """One O(n) statement walk per large body; O(1) membership after (no body regex)."""
+    digest = _module_body_digest(body)
+    cached = _assign_drive_bases_cache.get(digest)
+    if cached is not None:
+        return cached
+    with _large_module_probe_cache_guard:
+        cached = _assign_drive_bases_cache.get(digest)
+        if cached is not None:
+            return cached
+        bases = _assign_drive_bases_from_body(body)
+        _assign_drive_bases_cache[digest] = bases
+        return bases
+
+
+def _port_map_bases_from_body(
+    body: str,
+    *,
+    param_map: Mapping[str, str] | None = None,
+) -> FrozenSet[str]:
+    pmap = dict(param_map or {})
+    names: Set[str] = set()
+    for _inst, ports in instance_port_maps(body, param_map=pmap).items():
+        for _port, expr in ports:
+            names.update(_net_name_bases(extract_connect_nodes(expr, pmap)))
+    return frozenset(names)
+
+
+def _ensure_port_map_bases_index(
+    body: str,
+    *,
+    param_map: Mapping[str, str] | None = None,
+) -> FrozenSet[str]:
+    """One O(n) inst/port walk per large body; O(1) membership after (no body regex)."""
+    digest = _module_body_digest(body)
+    cached = _port_map_bases_cache.get(digest)
+    if cached is not None:
+        return cached
+    with _large_module_probe_cache_guard:
+        cached = _port_map_bases_cache.get(digest)
+        if cached is not None:
+            return cached
+        bases = _port_map_bases_from_body(body, param_map=param_map)
+        _port_map_bases_cache[digest] = bases
+        return bases
+
+
 def _seed_assign_drive_bases_cache(body: str, bases: Iterable[str]) -> None:
-    if len(body) < _ASSIGN_DRIVE_BASE_INDEX_MIN:
+    if len(body) < _LARGE_MODULE_PROBE_MIN:
         return
-    digest = _assign_body_digest(body)
+    digest = _module_body_digest(body)
     if digest in _assign_drive_bases_cache:
         return
-    normalized = frozenset(
-        b.split("[", 1)[0].split(".", 1)[0] for b in bases if b
-    )
-    _assign_drive_bases_cache[digest] = normalized
+    _assign_drive_bases_cache[digest] = _assign_drive_bases_from_body(body)
+
+
+def _is_word_char(ch: str) -> bool:
+    return ch.isalnum() or ch == "_"
+
+
+def _word_boundary_find(haystack: str, needle: str, start: int = 0) -> int:
+    """Case-insensitive str.find with identifier word boundaries."""
+    if not needle:
+        return -1
+    hlow = haystack.lower()
+    nlow = needle.lower()
+    nlen = len(needle)
+    pos = start
+    while pos < len(haystack):
+        idx = hlow.find(nlow, pos)
+        if idx < 0:
+            return -1
+        before = haystack[idx - 1] if idx > 0 else ""
+        after_i = idx + nlen
+        after = haystack[after_i] if after_i < len(haystack) else ""
+        if not (before and _is_word_char(before)) and not (
+            after and _is_word_char(after)
+        ):
+            return idx
+        pos = idx + 1
+    return -1
+
+
+def _str_find_net_in_assign(clean: str, target: str) -> bool:
+    """O(n) str scan for assign/``<=`` drives (no whole-body regex)."""
+    if not clean or not target:
+        return False
+    pos = 0
+    assign_kw = "assign"
+    while pos < len(clean):
+        idx = _word_boundary_find(clean, target, pos)
+        if idx < 0:
+            return False
+        window_start = max(0, idx - 96)
+        prefix = clean[window_start:idx].lower()
+        if assign_kw in prefix or "<=" in prefix:
+            return True
+        pos = idx + 1
+    return False
 
 
 def _regex_net_in_assign(clean: str, target: str) -> bool:
+    """Small-body fallback — ``[^;]`` only (no redundant ``\\n`` alternation)."""
     esc = re.escape(target)
     if re.search(
-        rf"\bassign\b(?:[^;]|\n)*?\b{esc}\b",
+        rf"\bassign\b[^;]*?\b{esc}\b",
         clean,
         flags=re.IGNORECASE,
     ):
@@ -670,7 +768,7 @@ def _regex_net_in_assign(clean: str, target: str) -> bool:
     if re.search(rf"\b{esc}\s*<=", clean, flags=re.IGNORECASE):
         return True
     if re.search(
-        rf"<=\s*(?:[^;]|\n)*?\b{esc}\b",
+        rf"<=\s*[^;]*?\b{esc}\b",
         clean,
         flags=re.IGNORECASE,
     ):
@@ -679,29 +777,18 @@ def _regex_net_in_assign(clean: str, target: str) -> bool:
 
 
 def _net_base_in_assign_regex_fast(body: str, base: str) -> bool:
-    """Regex probe for assign/``<=`` drives — avoids full statement iteration."""
+    """Probe assign/``<=`` drives; large bodies use pre-indexed frozenset."""
     if not body or not base:
         return False
     target = base.split("[", 1)[0].split(".", 1)[0]
     if not target:
         return False
-    large = len(body) >= _ASSIGN_DRIVE_BASE_INDEX_MIN
-    digest = _assign_body_digest(body) if large else ""
-    if large:
-        cached = _assign_drive_bases_cache.get(digest)
-        if cached is not None:
-            return target in cached
-        with _assign_probe_miss_cache_guard:
-            if (digest, target) in _assign_probe_miss_cache:
-                return False
+    if len(body) >= _LARGE_MODULE_PROBE_MIN:
+        return target in _ensure_assign_drive_bases_index(body)
     clean = _clean_body(body)
-    hit = _regex_net_in_assign(clean, target)
-    if large and not hit:
-        with _assign_probe_miss_cache_guard:
-            if len(_assign_probe_miss_cache) >= _ASSIGN_PROBE_MISS_CACHE_MAX:
-                _assign_probe_miss_cache.pop(next(iter(_assign_probe_miss_cache)))
-            _assign_probe_miss_cache[(digest, target)] = None
-    return hit
+    if len(clean) >= _LARGE_MODULE_PROBE_MIN:
+        return _str_find_net_in_assign(clean, target)
+    return _regex_net_in_assign(clean, target)
 
 
 def _net_name_bases(names: Iterable[str]) -> Set[str]:
@@ -753,14 +840,39 @@ def collect_assign_net_names(
     return _net_name_bases(names)
 
 
+def _str_find_net_in_port_map(clean: str, target: str) -> bool:
+    """O(n) str scan: *target* as port actual after ``.inst (`` (no whole-body regex)."""
+    if not clean or not target:
+        return False
+    pos = 0
+    while pos < len(clean):
+        idx = _word_boundary_find(clean, target, pos)
+        if idx < 0:
+            return False
+        window_start = max(0, idx - 160)
+        prefix = clean[window_start:idx]
+        if re.search(
+            r"\.(?:\\(?:[A-Za-z_]\w*|\S+)|[A-Za-z_]\w*)\s*\([^)]*$",
+            prefix,
+            flags=re.IGNORECASE,
+        ):
+            return True
+        pos = idx + 1
+    return False
+
+
 def _net_base_in_port_map_regex_fast(body: str, base: str) -> bool:
-    """Regex probe for *base* in instance port expressions (no statement split)."""
+    """Probe port-map nets; large bodies use pre-index or O(n) str scan."""
     if not body or not base:
         return False
     target = base.split("[", 1)[0].split(".", 1)[0]
     if not target:
         return False
+    if len(body) >= _LARGE_MODULE_PROBE_MIN:
+        return target in _ensure_port_map_bases_index(body)
     clean = _clean_body(body)
+    if len(clean) >= _LARGE_MODULE_PROBE_MIN:
+        return _str_find_net_in_port_map(clean, target)
     esc = re.escape(target)
     pat = re.compile(
         rf"\.(?:\\(?:[A-Za-z_]\w*|\S+)|[A-Za-z_]\w*)\s*\([^)]*\b{esc}\b",
@@ -3980,6 +4092,9 @@ def clear_module_connect_index_mem_cache() -> None:
     _build_index_mem_cache.clear()
     with _assign_probe_miss_cache_guard:
         _assign_probe_miss_cache.clear()
+    with _large_module_probe_cache_guard:
+        _assign_drive_bases_cache.clear()
+        _port_map_bases_cache.clear()
 
 
 def clear_module_connect_index_cache() -> None:
@@ -3997,6 +4112,22 @@ def clear_module_connect_index_cache() -> None:
 def module_connect_index_stats() -> Tuple[int, int]:
     """Return (uncached_build_calls, mem_cache_hits) since last clear."""
     return _build_index_uncached_calls, _build_index_mem_hits
+
+
+def _promote_slice_edges_to_bases(adj: Dict[str, Set[str]]) -> None:
+    """Text-conn bloom filter: any slice edge also links the participating base nets."""
+    extra: List[Tuple[str, str]] = []
+    for a, peers in adj.items():
+        a_base, _ = _split_net_base_suffix(a)
+        for b in peers:
+            b_base, _ = _split_net_base_suffix(b)
+            if a_base != a or b_base != b:
+                extra.append((a_base, b))
+                extra.append((a, b_base))
+                if a_base != b_base:
+                    extra.append((a_base, b_base))
+    for a, b in extra:
+        _add_undirected(adj, a, b)
 
 
 def build_module_connect_index(
@@ -4132,6 +4263,8 @@ def _build_module_connect_index_uncached(
         edge_prov=raw_edge_prov,
         iface_insts=iface_insts,
     )
+    if not resolve_param_dims:
+        _promote_slice_edges_to_bases(assign_adj)
     _expand_hier_bit_links(
         hier_links,
         hier_ref_targets,
@@ -4263,7 +4396,24 @@ def _build_module_connect_index_uncached(
         ff_q_roots=frozenset(ff_q_raw),
         vector_bases=vector_bases_set,
         vector_scalar_rep=vector_scalar_rep,
+        resolve_param_dims=resolve_param_dims,
     )
+
+
+def _coarse_net_representative(mod_idx: ModuleConnectIndex, net: str) -> str:
+    """Text-conn bloom filter: collapse unknown slice selects to base bus rep."""
+    base, _suffix = _split_net_base_suffix(net)
+    if not base or base == net:
+        return net
+    base_hit = mod_idx.net_rep.get(base)
+    if base_hit is not None:
+        return base_hit
+    cached = mod_idx.vector_scalar_rep.get(base)
+    if cached is not None:
+        return cached
+    if base in mod_idx.vector_bases:
+        return mod_idx.net_rep.get(base, base)
+    return mod_idx.net_rep.get(base, base)
 
 
 def net_representative(mod_idx: ModuleConnectIndex, net: str) -> str:
@@ -4274,4 +4424,7 @@ def net_representative(mod_idx: ModuleConnectIndex, net: str) -> str:
         cached = mod_idx.vector_scalar_rep.get(net)
         if cached is not None:
             return cached
+        return net
+    if not mod_idx.resolve_param_dims:
+        return _coarse_net_representative(mod_idx, net)
     return net

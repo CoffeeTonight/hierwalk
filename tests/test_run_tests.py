@@ -203,6 +203,33 @@ def test_run_on_full_index_step_when_enabled():
     assert cfg.ignore_module == ("bb_mod",)
 
 
+def test_run_conn_check_ignore_path_survives_empty_full_index_merge():
+    """run_on_full_index ignore-path: [] must not wipe per-step ignores."""
+    doc = {
+        "filelist": "design.f",
+        "top": "top",
+        "run_on_full_index": {
+            "enable": 1,
+            "mode": "hierarchy",
+            "ignore-path": [],
+            "output": "inst.tsv",
+        },
+        "run_conn_check": {
+            "enable": 1,
+            "mode": "path-walk",
+            "ignore-path": ["DW_*"],
+            "checks": [{"a": "top.a", "b": "top.b"}],
+        },
+    }
+    suite = parse_flat_run_suite(doc)
+    conn_cfg = next(
+        cfg
+        for ent, cfg in build_test_run_configs(suite, doc)
+        if ent.kind == RUN_CONN_CHECK
+    )
+    assert conn_cfg.ignore_path == ("DW_*",)
+
+
 def test_legacy_run_on_full_db_key_still_parses():
     doc = {
         "filelist": "fl.f",

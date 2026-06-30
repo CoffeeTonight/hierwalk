@@ -15,6 +15,7 @@ from hierwalk.hierarchy_log import format_hierarchy_rows_report
 from hierwalk.models import ConnectResult, FlatRow, SearchHit
 from hierwalk.path_chain import format_path_chain_report
 from hierwalk.progress import format_duration, format_hierwalk_log
+from hierwalk.report_provenance import format_timing_summary_lines, report_header_lines
 
 
 def format_bytes(num: int) -> str:
@@ -68,11 +69,45 @@ class RunReport:
     connect_rows_by_path: Mapping[str, FlatRow] = field(default_factory=dict)
     connect_signal_tails: Sequence[object] = ()
     connect_top: str = ""
+    report_argv: Optional[Sequence[str]] = None
+    report_cwd: Optional[Path] = None
+    report_user: Optional[str] = None
+    report_started_at: Optional[datetime] = None
 
     def lines(self) -> List[str]:
         out: List[str] = []
-        out.append("--- hier-walk report ---")
-        out.append(f"Elapsed:       {format_duration(self.elapsed_sec)}")
+        out.extend(
+            report_header_lines(
+                argv=self.report_argv,
+                cwd=self.report_cwd,
+                user=self.report_user,
+                when=self.report_started_at,
+            )
+        )
+        phase = (self.connect_phase or "").strip().lower()
+        timing_steps = []
+        if phase in ("text", "logical", "both"):
+            from hierwalk.verification_timing import get_active_recorder
+
+            rec = get_active_recorder()
+            if rec is not None and rec.steps:
+                timing_steps = list(rec.steps)
+        if timing_steps:
+            out.extend(
+                format_timing_summary_lines(
+                    timing_steps,
+                    wall_sec=self.elapsed_sec,
+                    ok=None,
+                )
+            )
+        else:
+            out.append("--- summary ---")
+            out.append(f"Elapsed:       {format_duration(self.elapsed_sec)}")
+            if phase in ("text", "logical"):
+                label = "text-conn" if phase == "text" else "logical-conn"
+                out.append(f"Connect phase: {label} ({format_duration(self.elapsed_sec)})")
+            out.append("")
+        out.append("--- details ---")
         out.append(f"Mode:          {self.mode}")
         out.append(f"Filelist:      {self.filelist_path}")
         if self.fl.index_cwd_used:
@@ -252,6 +287,22 @@ def default_log_path(
     return fl.parent / _log_basename(fl.stem, phase=phase)
 
 
+def _fill_report_provenance(report: RunReport) -> RunReport:
+    import getpass
+    import os
+    import sys
+
+    if report.report_argv is None:
+        report.report_argv = list(sys.argv)
+    if report.report_cwd is None:
+        report.report_cwd = Path.cwd()
+    if report.report_user is None:
+        report.report_user = getpass.getuser()
+    if report.report_started_at is None:
+        report.report_started_at = datetime.now().astimezone()
+    return report
+
+
 def write_run_report_log(
     report: RunReport,
     log_path: Path,
@@ -259,14 +310,11 @@ def write_run_report_log(
     append: bool = True,
 ) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    lines = report.lines()
-    stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    lines = _fill_report_provenance(report).lines()
     mode = "a" if append else "w"
     with log_path.open(mode, encoding="utf-8") as fh:
         if append:
-            fh.write(f"\n# hier-walk run {stamp}\n")
-        else:
-            fh.write(f"# hier-walk run {stamp}\n")
+            fh.write("\n")
         fh.write("\n".join(lines))
         fh.write("\n")
 
@@ -281,7 +329,7 @@ def emit_run_report(
 ) -> Optional[Path]:
     """Print report to stderr and optionally append to a log file."""
     target = stream or sys.stderr
-    for line in report.lines():
+    for line in _fill_report_provenance(report).lines():
         print(line, file=target, flush=True)
     if log_path is None:
         return None

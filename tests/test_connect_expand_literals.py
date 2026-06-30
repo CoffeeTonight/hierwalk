@@ -188,3 +188,15 @@ def test_round_trip_preserves_literal_concat_form():
     assert "1'b0" in chk.expand.elements_a
     assert "2'h0" in chk.expand.elements_a
     assert "3'h7" in chk.expand.elements_a
+
+
+def test_array_list_zip_sub_id_does_not_duplicate_check_id():
+    pairs = expand_check_to_pairs(
+        ["top.a0", "top.a1"],
+        ["top.b0", "top.b1"],
+        check_id="lst",
+        expand=build_expand_meta(["top.a0", "top.a1"], ["top.b0", "top.b1"]),
+    )
+    assert len(pairs) == 2
+    assert pairs[0].sub_id == "[0]"
+    assert pairs[1].sub_id == "[1]"

@@ -303,8 +303,9 @@ def _zip_array_pairs(
     right: Sequence[str],
     *,
     bit_align: str,
-    prefix: str,
+    prefix: str = "",
 ) -> List[ExpandedPair]:
+    del prefix  # check_id prefix applied by ConnectivitySession / artifacts
     left_bits = _ordered_bits(left, bit_align=bit_align)
     right_bits = _ordered_bits(right, bit_align=bit_align)
     if len(left_bits) != len(right_bits):
@@ -315,7 +316,7 @@ def _zip_array_pairs(
         ExpandedPair(
             endpoint_a=left_bits[i],
             endpoint_b=right_bits[i],
-            sub_id=f"{prefix}[{i}]",
+            sub_id=f"[{i}]",
         )
         for i in range(len(left_bits))
     ]

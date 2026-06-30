@@ -75,9 +75,9 @@ python3 -m hierwalk --version
 cd hierwalk && chmod +x scripts/hier-walk
 ./scripts/hier-walk design.f --top TOP -o out.tsv
 
-# D) venv (회사 PC 권장) · venv recommended
+# D) venv (권장) — clone/이동 후에도 동일
 cd hierwalk
-python3 -m venv .venv && . .venv/bin/activate
-pip install -e .
+./scripts/dev-setup.sh
+source .venv/bin/activate
 hier-walk --version
 ```

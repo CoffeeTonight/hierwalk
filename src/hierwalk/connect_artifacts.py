@@ -20,7 +20,7 @@ from hierwalk.connectivity import (
     flatten_connect_results_for_output,
     format_connect_results_tsv,
 )
-from hierwalk.hierarchy_log import path_spine_prefixes, resolve_absolute_rtl_path
+from hierwalk.hierarchy_log import path_spine_prefixes
 from hierwalk.index import DesignIndex
 from hierwalk.models import ConnectEndpoint, ConnectResult, FlatRow
 from hierwalk.run_request import RunConfig
@@ -38,24 +38,9 @@ class HierarchyEvidenceRow:
     path: str
     status: str
     module: str = ""
-    rtl_path: str = ""
-
-
-def _hierarchy_rtl_path(
-    path: str,
-    kind: str,
-    rows_by_path: Mapping[str, FlatRow],
-) -> str:
-    """Absolute RTL file for an inst scope or the parent module of a signal tail."""
-    row = rows_by_path.get(path)
-    if row is not None and row.file:
-        return resolve_absolute_rtl_path(row.file)
-    if "." in path:
-        parent = path.rsplit(".", 1)[0]
-        parent_row = rows_by_path.get(parent)
-        if parent_row is not None and parent_row.file:
-            return resolve_absolute_rtl_path(parent_row.file)
-    return ""
+    rtl: str = ""
+    via_filelist: str = ""
+    filelist_chain: str = ""
 
 
 @dataclass(frozen=True)
@@ -550,27 +535,75 @@ def any_text_conn_hit(results: Sequence[ConnectResult]) -> bool:
     return any(r.connected_text for r in flatten_text_conn_results(results))
 
 
+def _merge_one_connect_result(orig: ConnectResult, ref: ConnectResult) -> None:
+    """Copy refined structural COI into *orig*, preserving ``connected_text``."""
+    text_flag = orig.connected_text
+    orig.connected = ref.connected
+    orig.mode = ref.mode
+    orig.note = ref.note
+    orig.errors = list(ref.errors)
+    orig.hops = list(ref.hops)
+    orig.walk_notes = list(ref.walk_notes)
+    orig.coi_walk = ref.coi_walk
+    orig.endpoint_a = ref.endpoint_a
+    orig.endpoint_b = ref.endpoint_b
+    if text_flag is not None:
+        orig.connected_text = text_flag
+    if ref.sub_results:
+        if orig.sub_results and len(orig.sub_results) == len(ref.sub_results):
+            for o_sub, r_sub in zip(orig.sub_results, ref.sub_results):
+                _merge_one_connect_result(o_sub, r_sub)
+        else:
+            orig.sub_results = ref.sub_results
+
+
 def merge_refined_connect_results(
     results: Sequence[ConnectResult],
     refined: Sequence[ConnectResult],
 ) -> None:
-    """Copy post-recovery structural COI into *results*, keeping ``connected_text``."""
-    orig_flat = flatten_connect_results(results)
-    ref_flat = flatten_connect_results(refined)
-    if len(orig_flat) != len(ref_flat):
+    """Copy post-recovery structural COI into *results*, keeping ``connected_text``.
+
+    Text-conn may reorder checks for cache reuse; merge by ``check_id``, not index.
+    """
+    ref_by_id = {r.check_id: r for r in refined if r.check_id}
+    if ref_by_id:
+        for orig in results:
+            if not orig.check_id:
+                continue
+            ref = ref_by_id.get(orig.check_id)
+            if ref is None:
+                continue
+            _merge_one_connect_result(orig, ref)
+        return
+
+    if len(results) != len(refined):
         raise ValueError(
-            f"connect result length mismatch: {len(orig_flat)} vs {len(ref_flat)}"
+            f"connect result length mismatch: {len(results)} vs {len(refined)}"
         )
-    for orig, ref in zip(orig_flat, ref_flat):
-        orig.connected = ref.connected
-        orig.mode = ref.mode
-        orig.note = ref.note
-        orig.errors = list(ref.errors)
-        orig.hops = list(ref.hops)
-        orig.walk_notes = list(ref.walk_notes)
-        orig.coi_walk = ref.coi_walk
-        orig.endpoint_a = ref.endpoint_a
-        orig.endpoint_b = ref.endpoint_b
+    for orig, ref in zip(results, refined):
+        _merge_one_connect_result(orig, ref)
+
+
+def reorder_connect_results_to_checks(
+    checks: Sequence[ConnectivityCheck],
+    results: Sequence[ConnectResult],
+) -> List[ConnectResult]:
+    """Restore batch result order to match the connect JSON request."""
+    by_id = {r.check_id: r for r in results if r.check_id}
+    ordered: List[ConnectResult] = []
+    seen: set[str] = set()
+    for chk in checks:
+        hit = by_id.get(chk.check_id)
+        if hit is None:
+            continue
+        ordered.append(hit)
+        seen.add(chk.check_id)
+    for result in results:
+        if result.check_id and result.check_id not in seen:
+            ordered.append(result)
+        elif not result.check_id:
+            ordered.append(result)
+    return ordered
 
 
 def apply_connect_logical_phase(
@@ -736,6 +769,29 @@ def _match_signal_tail_to_check(
     return None
 
 
+def _provenance_for_evidence_path(
+    path: str,
+    rows_by_path: Mapping[str, FlatRow],
+) -> tuple[str, str, str]:
+    from hierwalk.hierarchy_log import provenance_fields
+
+    text = (path or "").strip()
+    if not text:
+        return "", "", ""
+    parts = text.split(".")
+    for depth in range(len(parts), 0, -1):
+        prefix = ".".join(parts[:depth])
+        if prefix not in rows_by_path:
+            continue
+        prov = provenance_fields(prefix, rows_by_path)
+        return (
+            prov.get("rtl", ""),
+            prov.get("via_filelist", ""),
+            prov.get("filelist_chain", ""),
+        )
+    return "", "", ""
+
+
 def collect_hierarchy_evidence(
     results: Sequence[ConnectResult],
     rows_by_path: Mapping[str, FlatRow],
@@ -764,6 +820,7 @@ def collect_hierarchy_evidence(
         if key in seen:
             return
         seen.add(key)
+        rtl, via_fl, fl_chain = _provenance_for_evidence_path(path, rows_by_path)
         out.append(
             HierarchyEvidenceRow(
                 check_id=check_id,
@@ -772,7 +829,9 @@ def collect_hierarchy_evidence(
                 path=path,
                 status=status,
                 module=module,
-                rtl_path=_hierarchy_rtl_path(path, norm_kind, rows_by_path),
+                rtl=rtl,
+                via_filelist=via_fl,
+                filelist_chain=fl_chain,
             )
         )
 
@@ -894,9 +953,8 @@ def format_hierarchy_evidence_report(
         for row in by_check[check_id]:
             side = row.side if row.side in ("a", "b") else "·"
             mod = f" ({row.module})" if row.module else ""
-            rtl = f" rtl={row.rtl_path}" if row.rtl_path else ""
             lines.append(
-                f"{indent}{side} {row.kind:4} {row.path:40} {row.status}{mod}{rtl}"
+                f"{indent}{side} {row.kind:4} {row.path:40} {row.status}{mod}"
             )
     return lines
 
@@ -950,9 +1008,8 @@ def format_connect_results_report(
         if check_evidence:
             for ev in check_evidence:
                 mod = f" ({ev.module})" if ev.module else ""
-                rtl = f" rtl={ev.rtl_path}" if ev.rtl_path else ""
                 lines.append(
-                    f"    {ev.side} {ev.kind:4} {ev.path:40} {ev.status}{mod}{rtl}"
+                    f"    {ev.side} {ev.kind:4} {ev.path:40} {ev.status}{mod}"
                 )
         else:
             for side, ep in (("a", result.endpoint_a), ("b", result.endpoint_b)):
@@ -990,7 +1047,18 @@ def format_connect_hierarchy_tsv(
     compact: bool = True,
 ) -> str:
     phase_label = str(phase).strip().lower() or "text"
-    headers = ["check_id", "side", "kind", "path", "status", "module", "rtl_path", "phase"]
+    headers = [
+        "check_id",
+        "side",
+        "kind",
+        "path",
+        "status",
+        "module",
+        "rtl",
+        "via_filelist",
+        "filelist_chain",
+        "phase",
+    ]
     evidence = collect_hierarchy_evidence(
         results,
         rows_by_path,
@@ -1011,7 +1079,9 @@ def format_connect_hierarchy_tsv(
                     row.path,
                     row.status,
                     row.module,
-                    row.rtl_path,
+                    row.rtl,
+                    row.via_filelist,
+                    row.filelist_chain,
                     phase_label,
                 )
             )

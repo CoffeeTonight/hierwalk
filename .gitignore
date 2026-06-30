@@ -220,6 +220,7 @@ __marimo__/
 # hier-walk run / verification artifacts
 # Per-top work dir (.db_{TOP}): path-walk-db, conn.tsv, archived run JSON, logs
 .db_*/
+.zz_*/
 *.hier-walk.log
 *.hier-walk.pkl
 

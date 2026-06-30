@@ -18,12 +18,14 @@ import os
 import pickle
 import re
 import threading
+import time
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple, Union
 
 from hierwalk.ignore_path import source_path_matches
+from hierwalk.index import _module_name_ignored
 from hierwalk.index import (
     DesignIndex,
     _ctx_key,
@@ -291,6 +293,7 @@ class PathWalkModuleDb:
         include_dirs: Sequence[str | Path] = (),
         defines: Optional[Mapping[str, str]] = None,
         skip_path_patterns: Sequence[str] = (),
+        ignore_module_patterns: Sequence[str] = (),
         cache_dir: Optional[Path] = None,
         cache_key: Optional[str] = None,
         no_cache: bool = False,
@@ -313,6 +316,7 @@ class PathWalkModuleDb:
         self._include_dirs = [Path(p) for p in include_dirs]
         self._defines = dict(defines or {})
         self._skip = tuple(skip_path_patterns)
+        self._ignore_modules = tuple(ignore_module_patterns)
         self._no_cache = no_cache
         self._defines_digest = _defines_digest(self._defines)
         self._on_trace = on_trace
@@ -335,6 +339,7 @@ class PathWalkModuleDb:
             Tuple[str, str, str, str, Optional[Tuple[str, str]]]
         ] = set()
         self._phase = "ready"
+        self._last_heartbeat: float = 0.0
 
         base = cache_dir
         if base is None and not no_cache:
@@ -385,14 +390,32 @@ class PathWalkModuleDb:
 
     def _set_phase(self, phase: str, *, detail: str = "") -> None:
         if not phase or phase == self._phase:
+            self._maybe_heartbeat()
             return
         self._phase = phase
+        self._maybe_heartbeat()
         if self._on_progress is None:
             return
         msg = f"path-walk: {phase}"
         if detail:
             msg += f" — {detail}"
         self._on_progress(msg)
+
+    def _maybe_heartbeat(self) -> None:
+        from hierwalk.perf import pw_heartbeat_interval_sec
+
+        interval = pw_heartbeat_interval_sec()
+        if interval is None:
+            return
+        now = time.monotonic()
+        if now - self._last_heartbeat < interval:
+            return
+        self._last_heartbeat = now
+        detail = self.heartbeat_detail()
+        self._trace(
+            f"pw-db heartbeat tier0={self.files_regex_scanned} "
+            f"tier1={self.files_validated} phase={detail or 'idle'}"
+        )
 
     def heartbeat_detail(self) -> str:
         return self._phase
@@ -432,8 +455,23 @@ class PathWalkModuleDb:
     def flush_module_index_snapshot(self) -> Optional[Path]:
         return self.write_module_index_snapshot(force=True)
 
+    def _is_ignored_module(self, module_name: str) -> bool:
+        if not module_name:
+            return False
+        if self._ignore_modules and _module_name_ignored(
+            module_name,
+            list(self._ignore_modules),
+        ):
+            return True
+        if self._index.module_stop_reason(module_name) == "ignorePath":
+            return True
+        rec = self._index.get_module(module_name)
+        return rec is not None and bool(rec.stop_reason)
+
     def remember_index_modules(self) -> None:
         for name, rec in self._index.modules.items():
+            if self._is_ignored_module(name):
+                continue
             if rec.file_path and not _is_placeholder_module(rec):
                 self._note_regex_modules(rec.file_path, [name])
                 self._prefer_file.setdefault(name, str(Path(rec.file_path).resolve()))
@@ -771,7 +809,7 @@ class PathWalkModuleDb:
         key = str(Path(path).resolve())
         file_names = self._file_to_modules.setdefault(key, [])
         for name in names:
-            if not name:
+            if not name or self._is_ignored_module(name):
                 continue
             if name not in file_names:
                 file_names.append(name)
@@ -1044,16 +1082,94 @@ class PathWalkModuleDb:
 
         return 1000
 
+    @staticmethod
+    def _normalize_name_hint(name: str) -> str:
+        n = name.strip().lower()
+        if n.startswith("u_") and len(n) > 2:
+            return n[2:]
+        return n
+
+    def _name_hints(
+        self,
+        module_name: str = "",
+        inst_leaf: str = "",
+    ) -> Tuple[str, ...]:
+        hints: List[str] = []
+        for raw in (module_name, inst_leaf):
+            if not raw:
+                continue
+            hints.append(raw)
+            norm = self._normalize_name_hint(raw)
+            if norm and norm not in hints:
+                hints.append(norm)
+        return tuple(hints)
+
+    def _rtl_name_similarity(self, rtl_path: str, hints: Sequence[str]) -> int:
+        key = str(Path(rtl_path).resolve())
+        stem = Path(key).stem.lower()
+        score = 0
+        for hint in hints:
+            h = hint.lower()
+            if not h:
+                continue
+            if stem == h:
+                score = max(score, 100)
+            elif h in stem:
+                score = max(score, 70)
+            elif stem in h:
+                score = max(score, 60)
+            elif stem.startswith(h) or h.startswith(stem):
+                score = max(score, 40)
+        for mod in self._file_to_modules.get(key, ()):
+            ml = mod.lower()
+            for hint in hints:
+                h = hint.lower()
+                if not h:
+                    continue
+                if ml == h:
+                    score = max(score, 120)
+                elif h in ml or ml in h:
+                    score = max(score, 80)
+        return score
+
+    def _sort_files_by_resolve_rank(
+        self,
+        files: Sequence[str],
+        *,
+        scope_anchor: str = "",
+        module_name: str = "",
+        inst_leaf: str = "",
+    ) -> List[str]:
+        ordered = list(dict.fromkeys(str(Path(f).resolve()) for f in files))
+        hints = self._name_hints(module_name, inst_leaf)
+        if not scope_anchor and not hints:
+            return ordered
+
+        def rank(f: str) -> Tuple[int, int, str]:
+            prox = (
+                self._filelist_proximity(scope_anchor, f)
+                if scope_anchor
+                else 100
+            )
+            name_sc = self._rtl_name_similarity(f, hints) if hints else 0
+            return (prox, -name_sc, f)
+
+        return sorted(ordered, key=rank)
+
     def _sort_by_filelist_proximity(
         self,
         files: Sequence[str],
         *,
         scope_anchor: str,
+        module_name: str = "",
+        inst_leaf: str = "",
     ) -> List[str]:
-        if not scope_anchor:
-            return list(files)
-        prox = lambda f: self._filelist_proximity(scope_anchor, f)
-        return sorted(files, key=prox)
+        return self._sort_files_by_resolve_rank(
+            files,
+            scope_anchor=scope_anchor,
+            module_name=module_name,
+            inst_leaf=inst_leaf,
+        )
 
     def _tier0_target_module(
         self,
@@ -1376,14 +1492,16 @@ class PathWalkModuleDb:
 
     def _tier0_scan_file(self, path: str) -> List[str]:
         key = str(Path(path).resolve())
+        if self._skip and source_path_matches(key, self._skip):
+            if key not in self._regex_scanned:
+                self._regex_scanned.add(key)
+                self.files_regex_scanned += 1
+                self._trace(f"pw-db tier0 skip {Path(key).name}")
+            return []
         if key in self._regex_scanned:
             return list(self._file_to_modules.get(key, []))
         self._set_phase("mapping", detail=Path(key).name)
         self._regex_scanned.add(key)
-        if self._skip and source_path_matches(key, self._skip):
-            self.files_regex_scanned += 1
-            self._trace(f"pw-db tier0 skip {Path(key).name}")
-            return []
 
         hit = self._load_regex_sidecar(key)
         if hit is not None:
@@ -1430,8 +1548,12 @@ class PathWalkModuleDb:
             for src in pool
             if src not in self._regex_scanned and src not in self._tier0_inflight
         ]
-        if scope_anchor and pending:
-            pending = self._sort_by_filelist_proximity(pending, scope_anchor=scope_anchor)
+        if pending:
+            pending = self._sort_files_by_resolve_rank(
+                pending,
+                scope_anchor=scope_anchor,
+                module_name=target_module,
+            )
         return self._tier0_scan_sources(
             pending,
             target_module=self._tier0_target_module(target_module, policy=policy),
@@ -1445,6 +1567,7 @@ class PathWalkModuleDb:
         scope_anchor: str = "",
         policy: ResolvePolicy = RESOLVE_CONFIDENT,
         scope_pool: Optional[Sequence[str]] = None,
+        inst_leaf: str = "",
     ) -> List[str]:
         ordered = list(dict.fromkeys(str(Path(f).resolve()) for f in files))
         preferred = self._prefer_file.get(module_name)
@@ -1456,9 +1579,25 @@ class PathWalkModuleDb:
             scoped = set(scope_pool)
             in_scope = [f for f in ordered if f in scoped]
             out_scope = [f for f in ordered if f not in scoped]
-            in_scope = self._sort_by_filelist_proximity(in_scope, scope_anchor=scope_anchor)
-            out_scope = self._sort_by_filelist_proximity(out_scope, scope_anchor=scope_anchor)
+            in_scope = self._sort_files_by_resolve_rank(
+                in_scope,
+                scope_anchor=scope_anchor,
+                module_name=module_name,
+                inst_leaf=inst_leaf,
+            )
+            out_scope = self._sort_files_by_resolve_rank(
+                out_scope,
+                scope_anchor=scope_anchor,
+                module_name=module_name,
+                inst_leaf=inst_leaf,
+            )
             ordered = in_scope + out_scope if policy == RESOLVE_RECOVERY else in_scope
+        elif module_name or inst_leaf:
+            ordered = self._sort_files_by_resolve_rank(
+                ordered,
+                module_name=module_name,
+                inst_leaf=inst_leaf,
+            )
         return ordered
 
     def _ensure_regex_candidates(
@@ -1467,8 +1606,12 @@ class PathWalkModuleDb:
         *,
         scope_anchor: str = "",
         policy: ResolvePolicy = RESOLVE_CONFIDENT,
+        inst_leaf: str = "",
     ) -> List[str]:
         from hierwalk.perf import pw_module_file_cap, pw_tier0_global_scan_max
+
+        if self._is_ignored_module(module_name):
+            return []
 
         if scope_anchor:
             scoped_pool = self._scoped_pool_for_policy(scope_anchor, policy=policy)
@@ -1488,6 +1631,7 @@ class PathWalkModuleDb:
                         scope_anchor=scope_anchor,
                         policy=policy,
                         scope_pool=scoped_pool,
+                        inst_leaf=inst_leaf,
                     )
             if policy == RESOLVE_CONFIDENT:
                 return []
@@ -1498,11 +1642,12 @@ class PathWalkModuleDb:
                 for s in self._sources
                 if s not in self._regex_scanned and s not in self._tier0_inflight
             ]
-            if scope_anchor:
-                pending = self._sort_by_filelist_proximity(
-                    pending,
-                    scope_anchor=scope_anchor,
-                )
+            pending = self._sort_files_by_resolve_rank(
+                pending,
+                scope_anchor=scope_anchor,
+                module_name=module_name,
+                inst_leaf=inst_leaf,
+            )
             self._regex_queue = pending
 
         workers = _resolve_pw_db_jobs(self._jobs, len(self._sources))
@@ -1546,11 +1691,12 @@ class PathWalkModuleDb:
                 if src not in self._regex_scanned and src not in self._tier0_inflight
             ]
             if remaining:
-                if scope_anchor:
-                    remaining = self._sort_by_filelist_proximity(
-                        remaining,
-                        scope_anchor=scope_anchor,
-                    )
+                remaining = self._sort_files_by_resolve_rank(
+                    remaining,
+                    scope_anchor=scope_anchor,
+                    module_name=module_name,
+                    inst_leaf=inst_leaf,
+                )
                 self._tier0_scan_sources(
                     remaining[: pw_tier0_global_scan_max()],
                     target_module=self._tier0_target_module(module_name, policy=policy),
@@ -1568,6 +1714,7 @@ class PathWalkModuleDb:
             scope_anchor=scope_anchor,
             policy=policy,
             scope_pool=scope_pool,
+            inst_leaf=inst_leaf,
         )
 
     def _parent_instance_edges(
@@ -1585,11 +1732,13 @@ class PathWalkModuleDb:
         avoid_file: str = "",
         scope_anchor: str = "",
         policy: ResolvePolicy = RESOLVE_CONFIDENT,
+        inst_leaf: str = "",
     ) -> List[str]:
         candidates = self._ensure_regex_candidates(
             module_name,
             scope_anchor=scope_anchor,
             policy=policy,
+            inst_leaf=inst_leaf,
         )
         if not candidates:
             return []
@@ -2097,6 +2246,9 @@ class PathWalkModuleDb:
         *policy=confident* searches direct child filelists only and defers on miss.
         *policy=recovery* may expand subtree/global pools to finish deferred work.
         """
+        if self._is_ignored_module(module_name):
+            return False
+
         if self._index_has_resolved_module(
             module_name,
             expect_inst=expect_inst,
@@ -2126,6 +2278,7 @@ class PathWalkModuleDb:
             avoid_file=avoid,
             scope_anchor=scope_anchor,
             policy=policy,
+            inst_leaf=expect_inst[1] if expect_inst is not None else "",
         )
         scope_note = ""
         if scope_anchor and scoped_pool is not None:
@@ -2215,6 +2368,7 @@ class PathWalkModuleDb:
                             avoid_file=avoid,
                             scope_anchor=scope_anchor,
                             policy=policy,
+                            inst_leaf=expect_inst[1] if expect_inst is not None else "",
                         )
                         continue
                 continue
@@ -2308,6 +2462,7 @@ class PathWalkModuleDb:
             avoid_file=avoid,
             scope_anchor=scope_anchor,
             policy=policy,
+            inst_leaf=inst_leaf,
         )
         scope_note = ""
         if scope_anchor and scoped_pool is not None:
@@ -2448,6 +2603,7 @@ class PathWalkModuleDb:
                             avoid_file=avoid,
                             scope_anchor=scope_anchor,
                             policy=policy,
+                            inst_leaf=inst_leaf,
                         )
                         continue
                 continue

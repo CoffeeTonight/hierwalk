@@ -161,6 +161,12 @@ def parse_connect_endpoint(
     index: Optional[DesignIndex] = None,
     top: str = "",
 ) -> Tuple[str, Optional[str]]:
+    """
+    Split *spec* into ``(inst_path, port_or_signal_tail)``.
+
+    Intermediate dotted segments are instances only. Port/wire/reg resolution
+    applies to the **last** segment of *spec* (when its parent row exists).
+    """
     text = spec.strip()
     parts = text.split(".")
     if len(parts) >= 2 and index is not None:
@@ -176,12 +182,16 @@ def parse_connect_endpoint(
             return parent, leaf
     if text in rows_by_path:
         return text, None
-    for i in range(len(parts) - 1, 0, -1):
+    # Only the final spec segment may be port/wire/reg; earlier segments are instances.
+    last_idx = len(parts) - 1
+    for i in range(last_idx, 0, -1):
+        if i != last_idx:
+            continue
         hier = ".".join(parts[:i])
         row = rows_by_path.get(hier)
         if row is None:
             continue
-        tail = ".".join(parts[i:])
+        tail = parts[-1]
         if not tail:
             return hier, None
         if index is not None:
@@ -195,8 +205,7 @@ def parse_connect_endpoint(
                 param_ctx=_row_param_ctx_optional(row),
             ):
                 return hier, tail
-        if "." not in tail:
-            return hier, tail
+        return hier, tail
     return text, None
 
 
@@ -209,11 +218,29 @@ def _row_param_ctx_optional(row: FlatRow) -> Optional[Mapping[str, str]]:
     return None
 
 
-def _port_param_ctx(index: DesignIndex, row: FlatRow, top: str) -> Mapping[str, str]:
+def param_ctx_usable_for_dims(ctx: Mapping[str, str]) -> bool:
+    """True when *ctx* has concrete values suitable for parametric bit indexing."""
+    if not ctx:
+        return False
+    return all(str(v).strip() != k for k, v in ctx.items())
+
+
+def _port_param_ctx(
+    index: DesignIndex,
+    row: FlatRow,
+    top: str,
+    *,
+    resolve_param_dims: bool = False,
+) -> Mapping[str, str]:
+    stored = row.param_ctx
+    if resolve_param_dims and top and not param_ctx_usable_for_dims(stored):
+        refined = refine_param_ctx_for_path(index, top, row.full_path)
+        if refined.ok and refined.param_ctx:
+            return refined.param_ctx
     if row.param_ctx_folded:
-        return row.param_ctx
-    if row.param_ctx:
-        return row.param_ctx
+        return stored
+    if stored:
+        return stored
     if top:
         refined = refine_param_ctx_for_path(index, top, row.full_path)
         if refined.ok and refined.param_ctx:

@@ -119,6 +119,24 @@ def normalize_index_strategy_mode(mode: str) -> str:
     )
 
 
+def _parse_connect_phase(spec: Mapping[str, Any]) -> str:
+    """Parse ``connect_phase`` / ``verification_phase`` for text vs logical conn."""
+    raw = _first_ci(
+        spec,
+        "connect_phase",
+        "connect-phase",
+        "verification_phase",
+        "verification-phase",
+        "phase",
+    )
+    phase = str(raw or "both").strip().lower()
+    if phase in ("text", "logical", "both"):
+        return phase
+    raise ValueError(
+        f"connect_phase must be text, logical, or both (got {raw!r})"
+    )
+
+
 def _validate_conn_check_spec(spec: Mapping[str, Any], *, label: str) -> None:
     checks = _mapping_get_ci(spec, "checks")
     check_connect = _first_ci(spec, "check_connect", "check-connect")
@@ -280,42 +298,48 @@ def _merge_full_index_fields(
 
     ignore_raw = _first_ci(spec, "ignore_path", "ignore-path")
     if ignore_raw is not None:
-        out = replace(
-            out,
-            ignore_path=tuple(_parse_string_list(ignore_raw, field="ignore_path")),
-        )
+        ignore_path = tuple(_parse_string_list(ignore_raw, field="ignore_path"))
+        if ignore_path:
+            out = replace(out, ignore_path=ignore_path)
 
     ignore_file_raw = _first_ci(spec, "ignore_path_file", "ignore-path-file")
     if ignore_file_raw is not None:
-        out = replace(
-            out,
-            ignore_path_file=tuple(
-                _resolve_path(base, p) or p
-                for p in _parse_string_list(ignore_file_raw, field="ignore_path_file")
-            ),
+        ignore_path_file = tuple(
+            _resolve_path(base, p) or p
+            for p in _parse_string_list(ignore_file_raw, field="ignore_path_file")
         )
+        if ignore_path_file:
+            out = replace(out, ignore_path_file=ignore_path_file)
 
     ignore_mod_raw = _first_ci(spec, "ignore_module", "ignore-module")
     if ignore_mod_raw is not None:
-        out = replace(
-            out,
-            ignore_module=tuple(
-                _parse_string_list(ignore_mod_raw, field="ignore_module")
-            ),
+        ignore_module = tuple(
+            _parse_string_list(ignore_mod_raw, field="ignore_module")
         )
+        if ignore_module:
+            out = replace(out, ignore_module=ignore_module)
 
     ignore_fl_raw = _first_ci(spec, "ignore_filelist", "ignore-filelist")
     if ignore_fl_raw is not None:
-        out = replace(
-            out,
-            ignore_filelist=tuple(
-                _parse_string_list(ignore_fl_raw, field="ignore_filelist")
-            ),
+        ignore_filelist = tuple(
+            _parse_string_list(ignore_fl_raw, field="ignore_filelist")
         )
+        if ignore_filelist:
+            out = replace(out, ignore_filelist=ignore_filelist)
 
     jobs_raw = _first_ci(spec, "jobs", "j", "job", "workers")
     if jobs_raw is not None:
         out = replace(out, jobs=_parse_jobs(jobs_raw))
+
+    connect_jobs_raw = _first_ci(
+        spec,
+        "connect_jobs",
+        "connect-jobs",
+        "conn_jobs",
+        "conn-jobs",
+    )
+    if connect_jobs_raw is not None:
+        out = replace(out, connect_jobs=_parse_jobs(connect_jobs_raw))
 
     if _mapping_get_ci(spec, "low_memory") is not None:
         out = replace(out, low_memory=bool(_mapping_get_ci(spec, "low_memory")))
@@ -527,6 +551,7 @@ def run_config_for_test(
             flat_suite_step=True,
             verification_step_kind=entry.kind,
             verification_step_name=entry.name or f"{entry.kind}[{entry.index}]",
+            verification_phase=_parse_connect_phase(spec),
         )
 
     if entry.kind == RUN_IO_TRACE:
@@ -1037,29 +1062,33 @@ def expand_suite_verification_plan(
     expanded: list[Tuple[RunTestEntry, RunConfig]] = []
     expanded.extend(index_steps)
     for entry, run_cfg in verify_steps:
+        if entry.kind != RUN_CONN_CHECK:
+            expanded.append((entry, run_cfg))
+            continue
         name = run_cfg.verification_step_name or entry.name or f"{entry.kind}[{entry.index}]"
-        expanded.append(
-            (
-                entry,
-                replace(
-                    run_cfg,
-                    verification_phase="text",
-                    verification_step_name=f"{name}:text",
-                ),
+        phase = (run_cfg.verification_phase or "both").strip().lower()
+        if phase in ("text", "both"):
+            expanded.append(
+                (
+                    entry,
+                    replace(
+                        run_cfg,
+                        verification_phase="text",
+                        verification_step_name=f"{name}:text",
+                    ),
+                )
             )
-        )
-    for entry, run_cfg in verify_steps:
-        name = run_cfg.verification_step_name or entry.name or f"{entry.kind}[{entry.index}]"
-        expanded.append(
-            (
-                entry,
-                replace(
-                    run_cfg,
-                    verification_phase="logical",
-                    verification_step_name=f"{name}:logical",
-                ),
+        if phase in ("logical", "both"):
+            expanded.append(
+                (
+                    entry,
+                    replace(
+                        run_cfg,
+                        verification_phase="logical",
+                        verification_step_name=f"{name}:logical",
+                    ),
+                )
             )
-        )
     return tuple(expanded)
 
 

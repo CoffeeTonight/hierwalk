@@ -18,6 +18,11 @@ def test_source_path_matches_folder_segment():
     assert not source_path_matches(path, ["pcieinnktop"])
 
 
+def test_source_path_matches_rtl_file_glob():
+    assert source_path_matches("/proj/rtl/DW_blabla.v", ["DW_*"])
+    assert not source_path_matches("/proj/rtl/dw_blabla.v", ["DW_*"])
+
+
 def test_ignore_path_skips_preprocess_for_vendor_tree(tmp_path):
     vendor = tmp_path / "pcielinktop"
     vendor.mkdir()

@@ -388,6 +388,76 @@ def test_tier1_background_prefetch_off_by_default(tmp_path: Path, monkeypatch):
     assert state.mod_db.files_validated < len(flr.source_files)
 
 
+def test_ignore_path_glob_skips_pw_db_tier0(tmp_path: Path, monkeypatch):
+    dw = tmp_path / "DW_blabla.v"
+    dw.write_text("module DW_blabla_inst; endmodule\n", encoding="utf-8")
+    top = tmp_path / "top.v"
+    top.write_text("module top; DW_blabla_inst u (); endmodule\n", encoding="utf-8")
+    fl = tmp_path / "filelist.f"
+    fl.write_text(f"{top.resolve()}\n{dw.resolve()}\n", encoding="utf-8")
+    flr = parse_filelist(str(fl), index_cwd=str(tmp_path))
+
+    tier0_scans: list[str] = []
+    orig_scan = PathWalkModuleDb._tier0_scan_file
+
+    def traced_scan(self, path):
+        tier0_scans.append(Path(path).name)
+        return orig_scan(self, path)
+
+    monkeypatch.setattr(PathWalkModuleDb, "_tier0_scan_file", traced_scan)
+    _index, mod_db = create_path_walk_index(
+        flr,
+        "top",
+        defines={},
+        ignore_paths=["DW_*"],
+        no_cache=True,
+        jobs=1,
+    )
+    assert "DW_blabla.v" not in tier0_scans
+    assert "DW_blabla_inst" not in mod_db._module_to_files
+    assert "top.v" in tier0_scans
+
+
+def test_ignore_module_skips_pw_db_tier0_resolve(tmp_path: Path, monkeypatch):
+    """ignore-module must block pw-db tier0/tier1 resolve, not only DesignIndex stubs."""
+    bb = tmp_path / "bb.v"
+    bb.write_text("module bb_mod(input in); endmodule\n", encoding="utf-8")
+    top = tmp_path / "top.v"
+    top.write_text(
+        """
+        module top;
+          bb_mod u_bb();
+        endmodule
+        """,
+        encoding="utf-8",
+    )
+    fl = tmp_path / "filelist.f"
+    fl.write_text(f"{top.resolve()}\n{bb.resolve()}\n", encoding="utf-8")
+    flr = parse_filelist(str(fl), index_cwd=str(tmp_path))
+
+    tier0_scans: list[str] = []
+    orig_scan = PathWalkModuleDb._tier0_scan_file
+
+    def traced_scan(self, path):
+        tier0_scans.append(Path(path).name)
+        return orig_scan(self, path)
+
+    monkeypatch.setattr(PathWalkModuleDb, "_tier0_scan_file", traced_scan)
+    index, mod_db = create_path_walk_index(
+        flr,
+        "top",
+        defines={},
+        ignore_modules=["bb_mod"],
+        no_cache=True,
+        jobs=1,
+    )
+    assert mod_db._is_ignored_module("bb_mod")
+    assert mod_db.ensure_module_in_index("bb_mod") is False
+    assert "bb_mod" not in mod_db._module_to_files
+    assert "bb.v" not in tier0_scans
+    assert "top.v" in tier0_scans
+
+
 def test_path_walk_walks_through_dup_module_files(tmp_path: Path):
     fl_path, _right = _write_dup_module_design(tmp_path)
     fl = parse_filelist(str(fl_path), index_cwd=str(tmp_path))

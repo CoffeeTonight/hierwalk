@@ -8,12 +8,15 @@ from typing import Any, Iterable, List, Mapping, Optional, Sequence, TextIO
 from hierwalk.lazy_scope import lazy_index_ifdef, lazy_processing_enabled
 from hierwalk.perf import (
     body_param_scan_max,
+    connect_jobs_from_env,
     include_warm_enabled,
     log_large_module_skips,
     low_memory_auto_threshold,
     pw_db_prefetch_enabled,
     pw_db_prefetch_max_files,
     pw_db_prefetch_wait_on_exit,
+    pw_heartbeat_interval_sec,
+    pw_trace_verbose,
     slow_file_log_threshold_sec,
 )
 from hierwalk.preprocess import _define_active
@@ -90,6 +93,21 @@ _BEHAVIOR_ENV_VARS: Sequence[tuple[str, str, str]] = (
         "HIERWALK_PW_DB_PREFETCH_MAX",
         "0",
         "cap tier-1 prefetch files per run (0=no limit)",
+    ),
+    (
+        "HIERWALK_PW_TRACE_VERBOSE",
+        "0",
+        "emit tier0/tier1 pw-db search trace on stderr (1=on)",
+    ),
+    (
+        "HIERWALK_PW_HEARTBEAT",
+        "(unset)",
+        "pw-db heartbeat interval during long resolves (1=30s)",
+    ),
+    (
+        "HIERWALK_CONNECT_JOBS",
+        "(unset)",
+        "path-walk connect-COI worker count (0=auto)",
     ),
     (
         "HIERWALK_LOG_SLOW_FILES",
@@ -229,7 +247,10 @@ def format_config_env_audit_lines(
         f"low_memory_auto_threshold={low_memory_auto_threshold()} "
         f"body_param_scan_max={body_param_scan_max()} "
         f"log_large_modules={int(log_large_module_skips())} "
-        f"slow_file_log_sec={slow if slow is not None else 'off'}"
+        f"slow_file_log_sec={slow if slow is not None else 'off'} "
+        f"pw_trace_verbose={int(pw_trace_verbose())} "
+        f"pw_heartbeat_sec={pw_heartbeat_interval_sec() or 'off'} "
+        f"connect_jobs_env={connect_jobs_from_env()}"
     )
 
     lines.append("config-env: behavioral HIERWALK_* / HCH_INDEX_CWD (effective):")

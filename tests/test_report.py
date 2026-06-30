@@ -37,6 +37,8 @@ def test_run_report_contains_key_fields(tmp_path):
         mode="hierarchy",
     )
     body = "\n".join(report.lines())
+    assert "=== hier-walk report ===" in body
+    assert "--- summary ---" in body
     assert "Elapsed:" in body
     assert "RTL sources:" in body
     assert "Modules:" in body

@@ -10,6 +10,8 @@ from hierwalk.connect_artifacts import (
     archive_run_config_sources,
     connect_output_paths,
     format_connect_hierarchy_tsv,
+    merge_refined_connect_results,
+    reorder_connect_results_to_checks,
     resolve_connect_output_dir,
     snapshot_connect_text_phase,
     prepare_text_connect_request,
@@ -211,6 +213,61 @@ def test_path_walk_writes_text_and_logical_tsv(tmp_path: Path):
     assert "b" in {row["side"] for row in hier_rows}
     assert any(row["status"] == "hit" for row in hier_rows)
     assert any(row["kind"] in ("port", "wire", "signal") for row in hier_rows)
+
+
+def test_hierarchy_port_rtl_uses_longest_walked_inst_prefix(tmp_path: Path):
+    """Sliced port paths must inherit RTL from the parent inst row, not top."""
+    top_v = tmp_path / "top.v"
+    mid_v = tmp_path / "mid.v"
+    top_v.write_text(
+        "module top;\n"
+        "  mid u ();\n"
+        "endmodule\n",
+        encoding="utf-8",
+    )
+    mid_v.write_text(
+        "module mid(input logic [3:0] chain_in);\n"
+        "  assign chain_in[0] = chain_in[1];\n"
+        "endmodule\n",
+        encoding="utf-8",
+    )
+    fl = tmp_path / "design.f"
+    fl.write_text(f"{top_v.resolve()}\n{mid_v.resolve()}\n", encoding="utf-8")
+    flr = parse_filelist(str(fl), index_cwd=str(tmp_path))
+    req = ConnectivityRequest(
+        checks=(
+            ConnectivityCheck(
+                "top.u.chain_in[0]",
+                "top.u.chain_in[1]",
+                check_id="bus",
+            ),
+        ),
+        top="top",
+    )
+    batch, index, state = run_path_walk_connect(
+        req,
+        flr,
+        top="top",
+        no_cache=True,
+        connect_phase="text",
+    )
+    body = format_connect_hierarchy_tsv(
+        batch.results,
+        state.rows_by_path,
+        phase="text",
+        index=index,
+        top="top",
+    )
+    rows = _tsv_rows(body)
+    port_hits = [
+        r
+        for r in rows
+        if r["check_id"] == "bus" and r["kind"] == "port" and r["status"] == "hit"
+    ]
+    assert len(port_hits) == 2
+    for row in port_hits:
+        assert Path(row["rtl"]).name == "mid.v"
+        assert row["module"] == "mid"
 
 
 def test_compact_hierarchy_evidence_drops_redundant_inst_hits():
@@ -453,6 +510,77 @@ def test_prepare_text_connect_request_is_stable():
         top="top",
     )
     assert prepare_text_connect_request(req) is req
+
+
+def test_merge_refined_connect_results_matches_by_check_id_not_index():
+    text_a = ConnectResult(
+        endpoint_a=ConnectEndpoint("top.z", "top", "z", "top", port_found=True),
+        endpoint_b=ConnectEndpoint("top.b", "top", "b", "top", port_found=True),
+        connected=True,
+        mode="port-port",
+        connected_text=True,
+        check_id="second",
+    )
+    text_b = ConnectResult(
+        endpoint_a=ConnectEndpoint("top.a", "top", "a", "top", port_found=True),
+        endpoint_b=ConnectEndpoint("top.c", "top", "c", "top", port_found=True),
+        connected=True,
+        mode="port-port",
+        connected_text=True,
+        check_id="first",
+    )
+    log_a = ConnectResult(
+        endpoint_a=ConnectEndpoint("top.a", "top", "a", "top", port_found=True),
+        endpoint_b=ConnectEndpoint("top.c", "top", "c", "top", port_found=True),
+        connected=False,
+        mode="port-port",
+        errors=["refined miss"],
+        check_id="first",
+    )
+    log_b = ConnectResult(
+        endpoint_a=ConnectEndpoint("top.z", "top", "z", "top", port_found=True),
+        endpoint_b=ConnectEndpoint("top.b", "top", "b", "top", port_found=True),
+        connected=True,
+        mode="port-port",
+        check_id="second",
+    )
+    text_rows = [text_a, text_b]
+    merge_refined_connect_results(text_rows, [log_a, log_b])
+    assert text_a.endpoint_a.port_name == "z"
+    assert text_a.connected is True
+    assert text_a.connected_text is True
+    assert text_b.endpoint_a.port_name == "a"
+    assert text_b.connected is False
+    assert text_b.connected_text is True
+    assert text_b.errors == ["refined miss"]
+
+
+def test_reorder_connect_results_to_checks_restores_request_order():
+    req = ConnectivityRequest(
+        checks=(
+            ConnectivityCheck("top.a", "top.b", check_id="first"),
+            ConnectivityCheck("top.z", "top.y", check_id="second"),
+        ),
+        top="top",
+    )
+    results = (
+        ConnectResult(
+            endpoint_a=ConnectEndpoint("top.z", "top", "z", "top"),
+            endpoint_b=ConnectEndpoint("top.y", "top", "y", "top"),
+            connected=True,
+            mode="port-port",
+            check_id="second",
+        ),
+        ConnectResult(
+            endpoint_a=ConnectEndpoint("top.a", "top", "a", "top"),
+            endpoint_b=ConnectEndpoint("top.b", "top", "b", "top"),
+            connected=True,
+            mode="port-port",
+            check_id="first",
+        ),
+    )
+    ordered = reorder_connect_results_to_checks(req.checks, results)
+    assert [r.check_id for r in ordered] == ["first", "second"]
 
 
 def test_default_verification_artifact_names():

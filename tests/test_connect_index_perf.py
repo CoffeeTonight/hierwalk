@@ -17,6 +17,7 @@ from hierwalk.connect_scan import (
     ModuleConnectIndex,
     _collect_const_assigns_fixed,
     _net_base_in_assign_regex_fast,
+    _net_base_in_port_map_regex_fast,
     binds_digest,
     build_module_connect_index,
     clear_module_connect_index_cache,
@@ -178,6 +179,36 @@ def test_connect_kernels_50k_assign_correctness():
     edge = find_hierarchy_instance(body, "u_tail")
     assert edge is not None
     assert edge.child_module == "leaf"
+
+
+def test_port_map_probe_large_body_uses_index():
+    lines = ["module BIG(input a, output z);", "  wire n0;"]
+    i = 1
+    while len("\n".join(lines)) < 256 * 1024:
+        lines.append(f"  child u_{i} (.a(n{i - 1}), .z(n{i}));")
+        i += 1
+    lines.append("endmodule")
+    body = "\n".join(lines) + "\n"
+    assert len(body) >= 256 * 1024
+    assert _net_base_in_port_map_regex_fast(body, "n2000") is True
+    assert _net_base_in_port_map_regex_fast(body, "missing_port_net") is False
+    t0 = time.perf_counter()
+    assert _net_base_in_port_map_regex_fast(body, "n1999") is True
+    warm = time.perf_counter() - t0
+    assert warm < 0.05
+
+
+def test_assign_probe_50k_miss_then_reprobe_is_fast():
+    body = _large_assign_body()
+    t0 = time.perf_counter()
+    assert _net_base_in_assign_regex_fast(body, "missing_net") is False
+    cold = time.perf_counter() - t0
+    t1 = time.perf_counter()
+    assert _net_base_in_assign_regex_fast(body, "another_missing") is False
+    warm = time.perf_counter() - t1
+    assert _net_base_in_assign_regex_fast(body, "z") is True
+    assert warm < cold / 5
+    assert cold < 30.0
 
 
 _BIND_RTL = """

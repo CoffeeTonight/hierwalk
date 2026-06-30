@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from hierwalk.connect_endpoints import _explain_hierarchy_miss
 from hierwalk.hierarchy_log import (
     format_hierarchy_row_line,
@@ -29,7 +31,7 @@ def _row(path: str, *, file: str = "/rtl/top.v", via: str = "/lists/design.f") -
 def test_format_row_provenance_includes_file_and_filelist():
     row = _row("top.u_child", file="/proj/child.v", via="/proj/filelist.f")
     text = format_row_provenance(row)
-    assert "rtl= /proj/child.v" in text
+    assert "rtl=/proj/child.v" in text
     assert "via_filelist=/proj/filelist.f" in text
     assert "filelist_chain=" in text
 
@@ -53,7 +55,7 @@ def test_explain_hierarchy_miss_lists_children_with_sources():
     )
     joined = "\n".join(errors)
     assert "path stops at 'top'" in joined
-    assert "rtl= /rtl/top.v" in joined
+    assert "rtl=/rtl/top.v" in joined
     assert "top.u_ok" in joined
     assert "via_filelist=" in joined
 
@@ -97,6 +99,7 @@ def test_emit_connect_log_includes_success_endpoint_provenance(tmp_path):
     assert f"rtl={a_rtl}" in line_a
     assert "via_filelist=" in line_a
     import io
+    import re
 
     buf = io.StringIO()
     emit_connect_trace_log(result, stream=buf, check_prefix="ok", rows_by_path=rows)
@@ -106,6 +109,4 @@ def test_emit_connect_log_includes_success_endpoint_provenance(tmp_path):
     assert f"rtl={z_rtl}" in text
     assert "connected:" in text
     assert "path hierarchy (rtl + filelist):" in text
-    import re
-
     assert re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", text)
