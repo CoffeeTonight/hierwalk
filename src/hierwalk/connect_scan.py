@@ -2582,11 +2582,17 @@ def prepare_connect_body(
     from hierwalk.preprocess import _preprocess_conditional_pass
 
     pmap = dict(defines or {})
-    text = _preprocess_conditional_pass(body, pmap, apply_ifdef=True)
-    fold_ctx = dict(defines or {})
-    fold_ctx.update(param_map or {})
+    filtered = _preprocess_conditional_pass(body, pmap, apply_ifdef=True)
+    body_params = collect_connect_module_params("", filtered)
+    full_pmap = resolve_param_map(
+        body_params,
+        parent=pmap,
+        overrides=dict(param_map or {}),
+    )
+    fold_ctx = dict(pmap)
+    fold_ctx.update(full_pmap)
     return prepare_body_for_instance_scan(
-        text,
+        filtered,
         fold_ctx,
         over_approximate_if=over_approximate_if,
     )
@@ -3772,11 +3778,10 @@ def apply_empty_module_passthrough(
 
 
 def _apply_ifdef_only(body: str, defines: Mapping[str, str] | None) -> str:
-    if not defines:
-        return body
-    from hierwalk.preprocess import apply_ifdef_filter
+    from hierwalk.preprocess import _preprocess_conditional_pass
 
-    return apply_ifdef_filter(body, defines)
+    pmap = dict(defines or {})
+    return _preprocess_conditional_pass(body, pmap, apply_ifdef=True)
 
 
 _BIND_STMT_RE = re.compile(
@@ -3864,25 +3869,33 @@ def apply_bind_connectivity(
 
 
 def collect_design_defines(index: object) -> Dict[str, str]:
-    """File-level `` `define `` directives across the indexed RTL."""
+    """Active-branch `` `define `` directives (ifdef order, includes) across RTL."""
     file_modules = getattr(index, "file_modules", None)
     if not isinstance(file_modules, Mapping):
         return {}
     from pathlib import Path
 
-    from hierwalk.preprocess import _collect_define_undef
+    from hierwalk.preprocess import preprocess_file_for_index
 
+    inc = [Path(p) for p in getattr(index, "_preprocess_include_dirs", ()) or ()]
+    skip = tuple(getattr(index, "_skip_path_patterns", ()) or ())
     out: Dict[str, str] = {}
     seen: Set[str] = set()
-    for fpath in file_modules:
+    for fpath in sorted(file_modules):
         if fpath in seen:
             continue
         seen.add(fpath)
-        try:
-            text = Path(fpath).read_text(encoding="utf-8", errors="ignore")
-        except OSError:
+        path = Path(fpath)
+        if not path.is_file():
             continue
-        _collect_define_undef(text, out)
+        preprocess_file_for_index(
+            path,
+            inc,
+            out,
+            set(),
+            skip_path_patterns=skip,
+            apply_ifdef=True,
+        )
     return dict(out)
 
 
@@ -4217,19 +4230,19 @@ def _build_module_connect_index_uncached(
     global _build_index_uncached_calls
     _build_index_uncached_calls += 1
     pmap = dict(param_map or {})
-    body_params = collect_connect_module_params("", body)
-    full_pmap = resolve_param_map(body_params, parent=pmap, overrides=pmap)
     if prepared_body is not None:
         text = prepared_body
     elif fold_generate:
         text = prepare_connect_body(
             body,
-            param_map=full_pmap,
+            param_map=pmap,
             defines=defines,
             over_approximate_if=over_approximate_if,
         )
     else:
         text = _apply_ifdef_only(body, defines)
+    body_params = collect_connect_module_params("", text)
+    full_pmap = resolve_param_map(body_params, parent=pmap, overrides=pmap)
     hier_links: Dict[str, List[Tuple[str, str]]] = {}
     hier_ref_targets: Dict[Tuple[str, str], Set[str]] = {}
     if resolve_param_dims:

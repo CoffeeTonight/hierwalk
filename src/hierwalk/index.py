@@ -1076,8 +1076,15 @@ class DesignIndex:
             return list(rec.instances)
 
         raw_params = rec.raw_params
+        compile_defines: Dict[str, str] = dict(self._preprocess_defines)
         if rec.needs_generate_fold:
-            text = self._source_text(rec.file_path, full=True)
+            from hierwalk.preprocess import preprocess_file
+
+            path = Path(rec.file_path)
+            inc = [Path(p) for p in self._preprocess_include_dirs]
+            fold_defs = dict(self._preprocess_defines)
+            text = preprocess_file(path, inc, fold_defs, set())
+            compile_defines = fold_defs
             hdr, full_body = _module_header_body(text, mod_name)
             if full_body:
                 body = full_body
@@ -1088,7 +1095,7 @@ class DesignIndex:
             overrides=overrides,
             parent=parent_ctx,
         )
-        fold_ctx = dict(self._preprocess_defines)
+        fold_ctx = dict(compile_defines)
         fold_ctx.update(pmap)
         ctx_key = _ctx_key(fold_ctx)
         if not overrides and ctx_key == self._default_ctx.get(mod_name):
@@ -1105,7 +1112,7 @@ class DesignIndex:
             raw_params,
             parent_ctx=parent_ctx,
             overrides=overrides,
-            compile_defines=self._preprocess_defines,
+            compile_defines=compile_defines,
         )
         with self._instance_cache_lock:
             hit = self._instance_cache.get(cache_key)

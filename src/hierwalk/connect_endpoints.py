@@ -627,9 +627,12 @@ def _net_exists_in_module(
     if not body:
         return False
     decl_widths = _port_decl_bit_indices(index, row.module, ctx)
+    from hierwalk.connectivity import _effective_defines
+
     mod_idx = build_module_connect_index(
         body,
         param_map=ctx,
+        defines=_effective_defines(index, getattr(index, "_preprocess_defines", {})),
         port_decl_widths=decl_widths,
         port_decl_md_suffixes=_port_decl_md_suffixes(index, row.module, ctx),
     )
@@ -676,9 +679,12 @@ def _explain_port_miss(
     body = _module_body_for_row(index, row)
     if body:
         decl_widths = _port_decl_bit_indices(index, row.module, ctx)
+        from hierwalk.connectivity import _effective_defines
+
         mod_idx = build_module_connect_index(
             body,
             param_map=ctx,
+            defines=_effective_defines(index, getattr(index, "_preprocess_defines", {})),
             port_decl_widths=decl_widths,
             port_decl_md_suffixes=_port_decl_md_suffixes(index, row.module, ctx),
         )

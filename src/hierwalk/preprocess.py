@@ -6,6 +6,7 @@ import os
 import re
 import sys
 import time
+from collections import deque
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from io import StringIO
 from pathlib import Path
@@ -26,6 +27,14 @@ _DEFINE_LINE_RE = re.compile(
     r"^\s*`define\s+([A-Za-z_]\w*)(?:\s+(.*))?$",
     re.IGNORECASE | re.MULTILINE,
 )
+_DEFINE_INLINE_RE = re.compile(
+    r"`define\s+([A-Za-z_]\w*)(?:\s+([^`\n]*))?",
+    re.IGNORECASE,
+)
+_UNDEF_INLINE_RE = re.compile(
+    r"`undef\s+([A-Za-z_]\w*)",
+    re.IGNORECASE,
+)
 _UNDEF_LINE_RE = re.compile(
     r"^\s*`undef\s+([A-Za-z_]\w*)\s*$",
     re.IGNORECASE | re.MULTILINE,
@@ -37,6 +46,10 @@ _INCLUDE_RE = re.compile(
 _MACRO_USE_RE = re.compile(r"`([A-Za-z_]\w*)")
 _BIND_LINE_RE = re.compile(r"^\s*bind\b", re.IGNORECASE | re.MULTILINE)
 _INCLUDE_LINE_RE = re.compile(r"^\s*`include\b", re.IGNORECASE)
+_INCLUDE_LINE_PARSE_RE = re.compile(
+    r"^\s*`include\s+([<\"])([^\">]+)[\">]\s*$",
+    re.IGNORECASE,
+)
 _LINE_COMMENT_RE = re.compile(r"//[^\n]*")
 _ENDIF_LABEL_COMMENT_RE = re.compile(
     r"^(\s*`(?:endif|else|end))\s*//\s*[A-Za-z_]\w*\s*(.*)$",
@@ -361,7 +374,7 @@ def _expand_macros_on_line(line: str, defines: Mapping[str, str]) -> str:
         if name not in defines:
             return m.group(0)
         body = str(defines[name])
-        if "(" in body:
+        if body.lstrip().startswith("("):
             return m.group(0)
         return body
 
@@ -412,17 +425,149 @@ def _apply_ifdef_control_line(
     return False
 
 
+def _read_raw_source_file(
+    path: Path,
+    skip_path_patterns: Sequence[str] = (),
+) -> str:
+    """Comment-stripped RTL source without include/define/ifdef preprocessing."""
+    key = path.resolve()
+    if _should_skip_preprocess_path(key, skip_path_patterns):
+        return _IGNORE_PATH_STUB
+    cache_key = _include_cache_key(key, skip_path_patterns)
+    if cache_key is not None:
+        hit = _INCLUDE_UNIT_CACHE.get(cache_key)
+        if hit is not None:
+            return hit
+    try:
+        raw = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return ""
+    text = strip_comments_for_instance_scan(raw)
+    if cache_key is not None:
+        _INCLUDE_UNIT_CACHE[cache_key] = text
+    return text
+
+
+def _match_include_line(line: str) -> Optional[Tuple[str, str]]:
+    m = _INCLUDE_LINE_PARSE_RE.match(line.strip())
+    if m is None:
+        return None
+    return m.group(1), m.group(2).strip()
+
+
+def _expand_macros_with_repass(
+    text: str,
+    defines: MutableMapping[str, str],
+    *,
+    apply_ifdef: bool,
+    max_rounds: int = 8,
+) -> str:
+    """Expand macros; if expansion embeds `` `ifdef `` text, re-run conditional pass."""
+    cur = text
+    for _ in range(max_rounds):
+        nxt = _expand_macros_on_line(cur, defines)
+        if nxt == cur:
+            break
+        if "`" in nxt and _IFDEF_RE.search(nxt):
+            nxt = _preprocess_conditional_pass(
+                nxt,
+                defines,
+                apply_ifdef=apply_ifdef,
+            )
+        cur = nxt
+    return cur
+
+
+def _apply_inline_define_undef_segment(
+    segment: str,
+    stack: List[Tuple[bool, bool, bool]],
+    defines: MutableMapping[str, str],
+) -> None:
+    if not segment or not _stack_active(stack):
+        return
+    for dm in _DEFINE_INLINE_RE.finditer(segment):
+        defines[dm.group(1)] = (dm.group(2) or "1").strip()
+    for um in _UNDEF_INLINE_RE.finditer(segment):
+        defines.pop(um.group(1), None)
+
+
+def _reconstruct_preserve_ifdef_line(
+    line: str,
+    stack: List[Tuple[bool, bool, bool]],
+    defines: MutableMapping[str, str],
+) -> str:
+    """Keep all conditional branches; update stack; macro-expand active spans only."""
+    pieces: List[str] = []
+    pos = 0
+    while True:
+        m = _IFDEF_RE.search(line, pos)
+        if not m:
+            rest = line[pos:]
+            if rest:
+                _apply_inline_define_undef_segment(rest, stack, defines)
+                if _stack_active(stack):
+                    pieces.append(
+                        _expand_macros_with_repass(rest, defines, apply_ifdef=False)
+                    )
+                else:
+                    pieces.append(rest)
+            break
+        before = line[pos : m.start()]
+        if before:
+            _apply_inline_define_undef_segment(before, stack, defines)
+            if _stack_active(stack):
+                pieces.append(
+                    _expand_macros_with_repass(before, defines, apply_ifdef=False)
+                )
+            else:
+                pieces.append(before)
+        pieces.append(line[m.start() : m.end()])
+        raw = m.group(0).lower()
+        if raw.startswith("`ifdef"):
+            _apply_ifdef_directive("ifdef", (m.group(1) or "").strip(), stack, defines)
+        elif raw.startswith("`ifndef"):
+            _apply_ifdef_directive("ifndef", (m.group(1) or "").strip(), stack, defines)
+        elif raw.startswith("`elsif"):
+            _apply_ifdef_directive("elsif", (m.group(2) or "").strip(), stack, defines)
+        elif raw.startswith("`else"):
+            _apply_ifdef_directive("else", "", stack, defines)
+        else:
+            _apply_ifdef_directive("endif", "", stack, defines)
+        pos = m.end()
+    return "".join(pieces)
+
+
+def _line_has_inline_ifdef(line: str) -> bool:
+    return bool(_IFDEF_RE.search(line))
+
+
+def _enqueue_include_lines(
+    queue: deque[Tuple[str, Path]],
+    *,
+    inc_path: Path,
+    skip_path_patterns: Sequence[str],
+) -> None:
+    raw = _read_raw_source_file(inc_path, skip_path_patterns)
+    if not raw:
+        return
+    for line in reversed(list(_iter_text_lines(raw))):
+        queue.appendleft((line, inc_path))
+
+
 def _preprocess_conditional_pass(
     text: str,
     defines: MutableMapping[str, str],
     *,
     apply_ifdef: bool,
+    source_file: Optional[Path] = None,
+    include_dirs: Sequence[Path] = (),
+    visiting: Optional[Set[Path]] = None,
+    skip_path_patterns: Sequence[str] = (),
 ) -> str:
     """
-    Honour `` `ifdef `` / `` `ifndef `` before in-file `` `define `` / `` `undef ``.
+    Single ordered pass: `` `ifdef `` → `` `define ``/`` `undef `` → `` `include `` → macros.
 
-    ``define``/``undef`` lines apply only in currently active conditional branches.
-    When *apply_ifdef* is false, inactive branches are kept for structural index scan.
+    ``include`` expands only in active conditional branches (when *source_file* is set).
     """
     if not text:
         return text
@@ -432,6 +577,16 @@ def _preprocess_conditional_pass(
     stack: List[Tuple[bool, bool, bool]] = []
     out = StringIO()
     first = True
+    src = source_file if source_file is not None else Path(".")
+    line_queue: deque[Tuple[str, Path]] = deque(
+        (raw_line, src) for raw_line in _iter_text_lines(text)
+    )
+    visiting_paths: Set[Path] = set(visiting or ())
+    if source_file is not None:
+        try:
+            visiting_paths.add(source_file.resolve())
+        except OSError:
+            pass
 
     def _write(segment: str) -> None:
         nonlocal first
@@ -443,7 +598,8 @@ def _preprocess_conditional_pass(
             out.write("\n")
         out.write(segment)
 
-    for raw_line in _iter_text_lines(text):
+    while line_queue:
+        raw_line, line_src = line_queue.popleft()
         if needs_comment_strip or rtl_after_ifdef_label_comment(raw_line):
             line = strip_line_for_ifdef_scan(raw_line)
         else:
@@ -461,14 +617,44 @@ def _preprocess_conditional_pass(
             if _stack_active(stack):
                 defines.pop(undef_name, None)
             continue
-        if _INCLUDE_LINE_RE.match(line):
+
+        inc = _match_include_line(line)
+        if inc is not None:
+            if not _stack_active(stack):
+                continue
+            if source_file is None:
+                continue
+            bracket, name = inc
+            inc_path = _resolve_include(name, bracket, line_src, include_dirs)
+            if inc_path is None:
+                _write(f"/* hierwalk: missing include {name} */")
+                continue
+            try:
+                inc_key = inc_path.resolve()
+            except OSError:
+                inc_key = inc_path
+            if inc_key in visiting_paths:
+                _write(f"/* hierwalk: include cycle {inc_path} */")
+                continue
+            if _should_skip_preprocess_path(inc_key, skip_path_patterns):
+                _write(_IGNORE_PATH_STUB)
+                continue
+            visiting_paths.add(inc_key)
+            _enqueue_include_lines(
+                line_queue,
+                inc_path=inc_path,
+                skip_path_patterns=skip_path_patterns,
+            )
             continue
 
         if apply_ifdef:
             segments = _emit_ifdef_line_segments(line, stack, defines, preprocessed=True)
             if not segments:
                 continue
-            joined = " ".join(_expand_macros_on_line(seg, defines) for seg in segments)
+            joined = " ".join(
+                _expand_macros_with_repass(seg, defines, apply_ifdef=True)
+                for seg in segments
+            )
             _write(joined)
             continue
 
@@ -476,8 +662,12 @@ def _preprocess_conditional_pass(
             _write(line)
             continue
 
+        if _line_has_inline_ifdef(line):
+            _write(_reconstruct_preserve_ifdef_line(line, stack, defines))
+            continue
+
         if _stack_active(stack):
-            _write(_expand_macros_on_line(line, defines))
+            _write(_expand_macros_with_repass(line, defines, apply_ifdef=False))
         else:
             _write(line)
 
@@ -485,7 +675,7 @@ def _preprocess_conditional_pass(
 
 
 def apply_ifdef_filter(text: str, defines: Mapping[str, str]) -> str:
-    defs = dict(defines)
+    defs: Dict[str, str] = dict(defines)
     return _preprocess_conditional_pass(text, defs, apply_ifdef=True)
 
 
@@ -575,7 +765,7 @@ def _expand_macros(text: str, defines: Mapping[str, str]) -> str:
         if name not in defines:
             return m.group(0)
         body = str(defines[name])
-        if "(" in body:
+        if body.lstrip().startswith("("):
             return m.group(0)
         return body
 
@@ -687,35 +877,9 @@ def _preprocess_include_unit(
     *,
     skip_path_patterns: Sequence[str] = (),
 ) -> str:
-    """Expand includes only; `` `define ``/`` `ifdef `` run in conditional pass."""
-    key = path.resolve()
-    if _should_skip_preprocess_path(key, skip_path_patterns):
-        return _IGNORE_PATH_STUB
-    if key in visiting:
-        return f"/* hierwalk: include cycle {path} */"
-    visiting.add(key)
-
-    cache_key = _include_cache_key(key, skip_path_patterns)
-    if cache_key is not None:
-        hit = _INCLUDE_UNIT_CACHE.get(cache_key)
-        if hit is not None:
-            return hit
-
-    try:
-        raw = path.read_text(encoding="utf-8", errors="ignore")
-    except OSError:
-        return ""
-    text = _expand_include_text(
-        strip_comments_for_instance_scan(raw),
-        path,
-        include_dirs,
-        defines,
-        visiting,
-        skip_path_patterns=skip_path_patterns,
-    )
-    if cache_key is not None:
-        _INCLUDE_UNIT_CACHE[cache_key] = text
-    return text
+    """Legacy alias: raw source read (includes run in conditional pass)."""
+    _ = (include_dirs, defines, visiting)
+    return _read_raw_source_file(path, skip_path_patterns)
 
 
 def preprocess_file_for_index(
@@ -750,14 +914,16 @@ def preprocess_file_for_index(
         if hit is not None:
             return _restore_source_preprocess_cache_hit(defines, hit)
     visiting = visiting or set()
-    text = _preprocess_include_unit(
-        path,
-        include_dirs,
+    raw = _read_raw_source_file(path, skip_path_patterns)
+    text = _preprocess_conditional_pass(
+        raw,
         defines,
-        visiting,
+        apply_ifdef=use_ifdef,
+        source_file=path,
+        include_dirs=include_dirs,
+        visiting=visiting,
         skip_path_patterns=skip_path_patterns,
     )
-    text = _preprocess_conditional_pass(text, defines, apply_ifdef=use_ifdef)
     if cache_key is not None:
         _SOURCE_PREPROCESS_CACHE[cache_key] = (
             text,
@@ -786,14 +952,16 @@ def preprocess_file(
         if hit is not None:
             return _restore_source_preprocess_cache_hit(defines, hit)
     visiting = visiting or set()
-    text = _preprocess_include_unit(
-        path,
-        include_dirs,
+    raw = _read_raw_source_file(path, skip_path_patterns)
+    text = _preprocess_conditional_pass(
+        raw,
         defines,
-        visiting,
+        apply_ifdef=True,
+        source_file=path,
+        include_dirs=include_dirs,
+        visiting=visiting,
         skip_path_patterns=skip_path_patterns,
     )
-    text = _preprocess_conditional_pass(text, defines, apply_ifdef=True)
     if re.search(r"^\s*bind\b", text, re.IGNORECASE | re.MULTILINE):
         text = _BIND_LINE_RE.sub("", text)
     if cache_key is not None:
