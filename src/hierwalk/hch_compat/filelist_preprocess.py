@@ -54,6 +54,24 @@ def _strip_comments(line: str) -> str:
     return line.strip()
 
 
+def _nested_filelist_directive(line: str) -> Optional[tuple[str, str]]:
+    """
+    Parse ``-f`` / ``-F`` nested filelist lines (space or tab after the flag).
+
+    Returns ``(kind, path)`` where *kind* is ``-f`` or ``-F``.
+    """
+    stripped = line.strip()
+    if len(stripped) < 3 or stripped[0] != "-":
+        return None
+    flag = stripped[1]
+    if flag not in ("f", "F"):
+        return None
+    rest = stripped[2:].lstrip(" \t")
+    if not rest:
+        return None
+    return f"-{flag}", rest
+
+
 def expand_filelist(
     top_filelist: Union[str, Path],
     env: Optional[Dict[str, str]] = None,
@@ -244,39 +262,32 @@ def expand_filelist(
                 body = line[len("+top+") :].strip()
                 if body and body not in result.top_modules:
                     result.top_modules.append(body)
-            elif line.startswith("-f "):
-                nested = line[3:].strip()
-                np = resolve_path(nested, fpath.parent)
-                chain_text = " -> ".join(str(p) for p in this_chain + [np])
-                if _skip_nested_filelist(np, chain_text):
-                    if on_progress:
-                        on_progress(f"filelist: skip {np.name} (ignore-filelist)")
-                    continue
-                link_nested(fpath, np, "-f")
-                parse_one(
-                    np,
-                    content_base=np.parent,
-                    chain=this_chain,
-                    parent=fpath,
-                    include_kind="-f",
-                )
-            elif line.startswith("-F "):
-                nested = line[3:].strip()
-                np = resolve_path(nested, cwd)
-                chain_text = " -> ".join(str(p) for p in this_chain + [np])
-                if _skip_nested_filelist(np, chain_text):
-                    if on_progress:
-                        on_progress(f"filelist: skip {np.name} (ignore-filelist)")
-                    continue
-                link_nested(fpath, np, "-F")
-                parse_one(
-                    np,
-                    content_base=cwd,
-                    chain=this_chain,
-                    parent=fpath,
-                    include_kind="-F",
-                )
             else:
+                nested_hit = _nested_filelist_directive(line)
+                if nested_hit is not None:
+                    kind, nested = nested_hit
+                    base = cwd if kind == "-F" else fpath.parent
+                    np = resolve_path(nested, base)
+                    if on_progress:
+                        on_progress(f"filelist: nested {kind} {nested!r} -> {np}")
+                        for var in unexpanded_path_vars(str(np)):
+                            on_progress(
+                                f"filelist: WARNING unresolved env in {kind} path: {var}"
+                            )
+                    chain_text = " -> ".join(str(p) for p in this_chain + [np])
+                    if _skip_nested_filelist(np, chain_text):
+                        if on_progress:
+                            on_progress(f"filelist: skip {np.name} (ignore-filelist)")
+                        continue
+                    link_nested(fpath, np, kind)
+                    parse_one(
+                        np,
+                        content_base=np.parent if kind == "-f" else cwd,
+                        chain=this_chain,
+                        parent=fpath,
+                        include_kind=kind,
+                    )
+                    continue
                 tokens = line.split()
                 if len(tokens) >= 2 and tokens[0] in ("-top", "-topmodule"):
                     if tokens[1] not in result.top_modules:

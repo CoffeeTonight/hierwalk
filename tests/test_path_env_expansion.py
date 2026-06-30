@@ -93,6 +93,19 @@ def test_inprocess_libc_setenv_json_filelist_and_rtl(tmp_path: Path):
     assert parsed.source_files[0].resolve() == (rtl / "top.v").resolve()
 
 
+def test_nested_f_with_env_var_path(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("BLA", str(tmp_path / "proj"))
+    nested_dir = tmp_path / "proj" / "design" / "list"
+    nested_dir.mkdir(parents=True)
+    (nested_dir / "blabla_A.f").write_text("chip.v\n", encoding="utf-8")
+    (nested_dir / "chip.v").write_text("module chip; endmodule\n", encoding="utf-8")
+    top = tmp_path / "top.f"
+    top.write_text("-f\t$BLA/design/list/blabla_A.f\n", encoding="utf-8")
+    result = expand_filelist(str(top))
+    assert len(result.source_files) == 1
+    assert result.source_files[0].resolve() == (nested_dir / "chip.v").resolve()
+
+
 def test_emit_filelist_failure_logs_unset_env_and_missing_file(tmp_path: Path, capsys):
     from hierwalk.filelist import emit_filelist_failure, parse_filelist
 
