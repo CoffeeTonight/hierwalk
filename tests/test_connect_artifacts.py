@@ -274,21 +274,56 @@ def test_hierarchy_port_rtl_uses_longest_walked_inst_prefix(tmp_path: Path):
         assert row["module"] == "mid"
 
 
-def test_incremental_hierarchy_writer_appends_each_row(tmp_path: Path):
+def test_compact_hierarchy_final_tsv_keeps_deepest_hit_only(tmp_path: Path):
+    from hierwalk.connect_artifacts import (
+        collect_hierarchy_evidence,
+        compact_hierarchy_evidence,
+        write_hierarchy_evidence_tsv,
+    )
+
     out = tmp_path / "hierarchy.text.tsv"
-    writer = IncrementalHierarchyTsvWriter(out, phase="text")
-    writer.flush_empty()
-    writer.append_row(
-        HierarchyEvidenceRow("c0", "a", "inst", "top", "hit", "TOP", "/rtl/top.v", "", "")
+    rows_by_path = {
+        "top": FlatRow(
+            full_path="top",
+            inst_leaf="top",
+            module="TOP",
+            depth=0,
+            parent_path=None,
+            file="/rtl/top.v",
+        ),
+        "top.u_leaf": FlatRow(
+            full_path="top.u_leaf",
+            inst_leaf="u_leaf",
+            module="leaf",
+            depth=1,
+            parent_path="top",
+            file="/rtl/leaf.v",
+        ),
+    }
+    result = ConnectResult(
+        check_id="c0",
+        endpoint_a=ConnectEndpoint("top.u_leaf.w", "top.u_leaf", "w", "leaf"),
+        endpoint_b=ConnectEndpoint("top.clk", "top", "clk", "TOP", port_found=True),
+        connected=False,
+        mode="",
     )
-    writer.append_row(
-        HierarchyEvidenceRow("c0", "a", "inst", "top.u_leaf", "hit", "leaf", "/rtl/leaf.v", "", "")
+    evidence = compact_hierarchy_evidence(
+        collect_hierarchy_evidence([result], rows_by_path)
     )
+    write_hierarchy_evidence_tsv(out, evidence, phase="text", compact=False)
     body = out.read_text(encoding="utf-8")
-    lines = [ln for ln in body.splitlines() if ln and not ln.startswith("check_id")]
-    assert len(lines) == 2
-    assert any("top\t" in ln and "\thit\t" in ln for ln in lines)
-    assert any("top.u_leaf" in ln for ln in lines)
+    a_hits = [
+        ln
+        for ln in body.splitlines()
+        if ln.startswith("c0\ta\tinst\t") and "\thit\t" in ln
+    ]
+    b_hits = [
+        ln
+        for ln in body.splitlines()
+        if ln.startswith("c0\tb\tinst\t") and "\thit\t" in ln
+    ]
+    assert len(a_hits) == 1 and "top.u_leaf" in a_hits[0]
+    assert len(b_hits) == 1 and "\ttop\t" in b_hits[0]
 
 
 def test_resolve_hierarchy_row_identity_side():
