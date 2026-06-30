@@ -191,6 +191,13 @@ def test_path_walk_connect_writes_hierarchy_tsv_during_walk(tmp_path: Path):
     assert "c0" in text_body
     assert "c1" in text_body
     assert "hit" in text_body or "miss" in text_body
+    # per-line recording keeps intermediate inst hits (no end-of-check compact)
+    c0_inst = [
+        line
+        for line in text_body.splitlines()
+        if line.startswith("c0\t") and "\tinst\t" in line
+    ]
+    assert len(c0_inst) >= 2
 
 
 def test_path_walk_connect_execute_writes_tsv_and_report_log(tmp_path: Path, monkeypatch):

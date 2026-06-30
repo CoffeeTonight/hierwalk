@@ -5,14 +5,18 @@ from __future__ import annotations
 from pathlib import Path
 
 from hierwalk.connect_artifacts import (
+    HierarchyEvidenceRow,
+    IncrementalHierarchyTsvWriter,
     any_text_conn_hit,
     apply_connect_logical_phase,
     archive_run_config_sources,
+    build_hierarchy_row_context,
     connect_output_paths,
     format_connect_hierarchy_tsv,
     merge_refined_connect_results,
     reorder_connect_results_to_checks,
     resolve_connect_output_dir,
+    resolve_hierarchy_row_identity,
     snapshot_connect_text_phase,
     prepare_text_connect_request,
     reorder_connect_checks_by_b_endpoint,
@@ -268,6 +272,33 @@ def test_hierarchy_port_rtl_uses_longest_walked_inst_prefix(tmp_path: Path):
     for row in port_hits:
         assert Path(row["rtl"]).name == "mid.v"
         assert row["module"] == "mid"
+
+
+def test_incremental_hierarchy_writer_appends_each_row(tmp_path: Path):
+    out = tmp_path / "hierarchy.text.tsv"
+    writer = IncrementalHierarchyTsvWriter(out, phase="text")
+    writer.flush_empty()
+    writer.append_row(
+        HierarchyEvidenceRow("c0", "a", "inst", "top", "hit", "TOP", "/rtl/top.v", "", "")
+    )
+    writer.append_row(
+        HierarchyEvidenceRow("c0", "a", "inst", "top.u_leaf", "hit", "leaf", "/rtl/leaf.v", "", "")
+    )
+    body = out.read_text(encoding="utf-8")
+    lines = [ln for ln in body.splitlines() if ln and not ln.startswith("check_id")]
+    assert len(lines) == 2
+    assert any("top\t" in ln and "\thit\t" in ln for ln in lines)
+    assert any("top.u_leaf" in ln for ln in lines)
+
+
+def test_resolve_hierarchy_row_identity_side():
+    from hierwalk.connect_request import ConnectivityCheck
+
+    ctx = build_hierarchy_row_context(
+        ConnectivityCheck("top.u_a.sig", "top.clk", check_id="t")
+    )
+    assert resolve_hierarchy_row_identity(ctx, "top.u_a") == ("t", "a")
+    assert resolve_hierarchy_row_identity(ctx, "top.clk") == ("t", "b")
 
 
 def test_compact_hierarchy_evidence_drops_redundant_inst_hits():

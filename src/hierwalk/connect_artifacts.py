@@ -20,12 +20,86 @@ from hierwalk.connectivity import (
     flatten_connect_results_for_output,
     format_connect_results_tsv,
 )
+from hierwalk.connect_expand import parse_endpoint_elements
 from hierwalk.hierarchy_log import path_spine_prefixes
 from hierwalk.index import DesignIndex
 from hierwalk.models import ConnectEndpoint, ConnectResult, FlatRow
 from hierwalk.run_request import RunConfig
 
 HIERARCHY_KINDS = frozenset({"inst", "port", "wire", "reg"})
+
+
+@dataclass(frozen=True)
+class HierarchyRowContext:
+    """Maps walked paths to (check_id, side) for per-line hierarchy TSV rows."""
+
+    pairs: Tuple[Tuple[str, frozenset[str], frozenset[str]], ...]
+
+
+def _prefixes_for_endpoint_value(spec: object) -> frozenset[str]:
+    _display, elements, _is_list, _is_concat = parse_endpoint_elements(spec)
+    out: set[str] = set()
+    for el in elements:
+        text = str(el).strip()
+        if not text:
+            continue
+        for spec_path in hierarchy_endpoint_specs(text):
+            out.add(spec_path)
+            for prefix in path_spine_prefixes(spec_path):
+                out.add(prefix)
+    return frozenset(out)
+
+
+def build_hierarchy_row_context(chk: ConnectivityCheck) -> HierarchyRowContext:
+    pairs_out: List[Tuple[str, frozenset[str], frozenset[str]]] = []
+    for pair in expand_check_to_pairs(
+        chk.endpoint_a,
+        chk.endpoint_b,
+        check_id=chk.check_id,
+        expand=chk.expand,
+    ):
+        sub_id = (
+            f"{chk.check_id}{pair.sub_id}"
+            if chk.check_id and pair.sub_id
+            else (chk.check_id or pair.sub_id.strip("[]->") or "-")
+        )
+        pairs_out.append(
+            (
+                sub_id,
+                _prefixes_for_endpoint_value(pair.endpoint_a),
+                _prefixes_for_endpoint_value(pair.endpoint_b),
+            )
+        )
+    if not pairs_out:
+        pairs_out.append(
+            (
+                chk.check_id or "-",
+                _prefixes_for_endpoint_value(chk.endpoint_a),
+                _prefixes_for_endpoint_value(chk.endpoint_b),
+            )
+        )
+    return HierarchyRowContext(tuple(pairs_out))
+
+
+def resolve_hierarchy_row_identity(
+    ctx: HierarchyRowContext,
+    path: str,
+) -> Tuple[str, str]:
+    text = (path or "").strip()
+    if not text or not ctx.pairs:
+        return ("", "-")
+    best: Optional[Tuple[str, str]] = None
+    best_len = -1
+    for check_id, a_prefs, b_prefs in ctx.pairs:
+        for side, prefs in (("a", a_prefs), ("b", b_prefs)):
+            for pref in prefs:
+                if text == pref or text.startswith(pref + "."):
+                    if len(pref) > best_len:
+                        best_len = len(pref)
+                        best = (check_id, side)
+    if best is not None:
+        return best
+    return (ctx.pairs[0][0], "-")
 
 
 @dataclass(frozen=True)
@@ -935,11 +1009,25 @@ def write_hierarchy_evidence_tsv(
 
 @dataclass
 class IncrementalHierarchyTsvWriter:
-    """Append hierarchy rows per check; rewrites TSV atomically after each update."""
+    """Record hierarchy evidence one row at a time; rewrite TSV after each append."""
 
     path: Path
     phase: str = "text"
     _rows: List[HierarchyEvidenceRow] = field(default_factory=list)
+    _seen: set[tuple[str, str, str, str, str]] = field(default_factory=set)
+
+    def append_row(self, row: HierarchyEvidenceRow) -> Path:
+        key = (row.check_id, row.side, row.kind, row.path, row.status)
+        if key in self._seen:
+            return self.path.expanduser().resolve()
+        self._seen.add(key)
+        self._rows.append(row)
+        return write_hierarchy_evidence_tsv(
+            self.path,
+            self._rows,
+            phase=self.phase,
+            compact=False,
+        )
 
     def record_check(
         self,

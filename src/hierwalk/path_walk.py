@@ -263,6 +263,7 @@ class PathWalkState:
     _hierarchy_text_writer: object = field(default=None, repr=False)
     _hierarchy_logical_writer: object = field(default=None, repr=False)
     _hierarchy_flush_phase: str = field(default="", repr=False)
+    _hierarchy_row_ctx: object = field(default=None, repr=False)
 
     def _trace_streams(self) -> List[TextIO]:
         out: List[TextIO] = []
@@ -297,9 +298,80 @@ class PathWalkState:
                 title=title,
             )
 
+    def _active_hierarchy_writer(self):
+        phase = str(self._hierarchy_flush_phase or "").strip().lower()
+        if phase == "text":
+            return self._hierarchy_text_writer
+        if phase == "logical":
+            return self._hierarchy_logical_writer
+        return None
+
+    def _record_hierarchy_row(
+        self,
+        *,
+        kind: str,
+        path: str,
+        status: str,
+        module: str = "",
+    ) -> None:
+        writer = self._active_hierarchy_writer()
+        ctx = self._hierarchy_row_ctx
+        if writer is None or ctx is None:
+            return
+        from hierwalk.connect_artifacts import (
+            HierarchyEvidenceRow,
+            IncrementalHierarchyTsvWriter,
+            normalize_hierarchy_kind,
+            resolve_hierarchy_row_identity,
+            _provenance_for_evidence_path,
+        )
+
+        if not isinstance(writer, IncrementalHierarchyTsvWriter):
+            return
+        text = (path or "").strip()
+        if not text:
+            return
+        norm_kind = normalize_hierarchy_kind(kind)
+        if norm_kind not in {"inst", "port", "wire", "reg"}:
+            return
+        check_id, side = resolve_hierarchy_row_identity(ctx, text)
+        if not check_id:
+            return
+        rtl, via_fl, fl_chain = _provenance_for_evidence_path(text, self.rows_by_path)
+        writer.append_row(
+            HierarchyEvidenceRow(
+                check_id=check_id,
+                side=side,
+                kind=norm_kind,
+                path=text,
+                status=status,
+                module=module,
+                rtl=rtl,
+                via_filelist=via_fl,
+                filelist_chain=fl_chain,
+            )
+        )
+
+    def _begin_hierarchy_row_context(self, chk) -> None:
+        from hierwalk.connect_artifacts import build_hierarchy_row_context
+
+        self._hierarchy_row_ctx = build_hierarchy_row_context(chk)
+
+    def _end_hierarchy_row_context(self) -> None:
+        self._hierarchy_row_ctx = None
+
     def _emit_walk_node(self, path: str, *, action: str = "ok") -> None:
         row = self.rows_by_path.get(path)
-        if row is None or not self._walk_trace_enabled():
+        if row is None:
+            return
+        if action == "ok":
+            self._record_hierarchy_row(
+                kind="inst",
+                path=path,
+                status="hit",
+                module=row.module,
+            )
+        if not self._walk_trace_enabled():
             return
         message = f"{action} {path}  module={row.module}"
         if row.file:
@@ -388,13 +460,26 @@ class PathWalkState:
         if not self._walk_trace_enabled():
             return
         parent = self.rows_by_path.get(parent_path)
+        miss_path = f"{parent_path}.{inst_leaf}" if parent_path else inst_leaf
         if parent is None:
+            self._record_hierarchy_row(
+                kind="inst",
+                path=miss_path,
+                status="miss",
+                module="",
+            )
             self._emit_walk(
                 f"miss inst={inst_leaf} under {parent_path} "
                 f"(cause=no-parent; {reason})  "
                 f"(no parent elaboration row)"
             )
             return
+        self._record_hierarchy_row(
+            kind="inst",
+            path=miss_path,
+            status="miss",
+            module=parent.module,
+        )
         self._emit_walk(
             format_path_walk_miss_line(
                 parent_path,
@@ -887,6 +972,12 @@ class PathWalkState:
                 hit=hit,
                 module=row.module,
             )
+        )
+        self._record_hierarchy_row(
+            kind=kind,
+            path=target,
+            status="hit" if hit else "miss",
+            module=row.module,
         )
         self._emit_walk(
             format_signal_tail_line(
@@ -1425,6 +1516,13 @@ class PathWalkState:
         if path in self.rows_by_path:
             self._clear_pending_misses(path)
             self._unblock_walk_prefix(path)
+            hit_row = self.rows_by_path[path]
+            self._record_hierarchy_row(
+                kind="inst",
+                path=path,
+                status="hit",
+                module=hit_row.module,
+            )
             return True
         if path == self.top:
             self.ensure_root()
@@ -2449,32 +2547,6 @@ def _extend_path_walk_for_specs(
     state.flush_pending_misses()
 
 
-def _flush_hierarchy_tsv_for_check(state: PathWalkState, chk) -> None:
-    """Write hierarchy.text.tsv / hierarchy.tsv as soon as a check's walk finishes."""
-    phase = str(state._hierarchy_flush_phase or "").strip().lower()
-    if phase == "text":
-        writer = state._hierarchy_text_writer
-    elif phase == "logical":
-        writer = state._hierarchy_logical_writer
-    else:
-        return
-    if writer is None:
-        return
-    from hierwalk.connect_artifacts import IncrementalHierarchyTsvWriter
-
-    if not isinstance(writer, IncrementalHierarchyTsvWriter):
-        return
-    out = writer.record_check(
-        chk,
-        state.rows_by_path,
-        rows=state.rows(),
-        signal_tails=state._signal_tail_records,
-        index=state.index,
-        top=state.top,
-    )
-    state._emit_walk(f"hierarchy-{phase} written {out}")
-
-
 def _walk_hierarchy_for_check(
     state: PathWalkState,
     chk,
@@ -2483,21 +2555,23 @@ def _walk_hierarchy_for_check(
     seen_lca: Optional[Set[Tuple[str, str]]] = None,
 ) -> None:
     """Per-check hierarchy walk + deduped LCA subtree (J-003)."""
-    specs = endpoint_specs_from_checks([chk])
-    if specs:
-        _walk_specs_with_recovery(state, specs, jobs=jobs)
-    a = _cached_walk_target_from_spec(chk.endpoint_a, state)
-    b = _cached_walk_target_from_spec(chk.endpoint_b, state)
-    key = (a, b)
-    if seen_lca is not None:
-        if key in seen_lca:
+    state._begin_hierarchy_row_context(chk)
+    try:
+        specs = endpoint_specs_from_checks([chk])
+        if specs:
+            _walk_specs_with_recovery(state, specs, jobs=jobs)
+        a = _cached_walk_target_from_spec(chk.endpoint_a, state)
+        b = _cached_walk_target_from_spec(chk.endpoint_b, state)
+        key = (a, b)
+        if seen_lca is not None:
+            if key in seen_lca:
+                return
+            seen_lca.add(key)
+        if state._is_walk_blocked(a) and state._is_walk_blocked(b):
             return
-        seen_lca.add(key)
-    if state._is_walk_blocked(a) and state._is_walk_blocked(b):
-        _flush_hierarchy_tsv_for_check(state, chk)
-        return
-    state.ensure_lca_subtree(a, b)
-    _flush_hierarchy_tsv_for_check(state, chk)
+        state.ensure_lca_subtree(a, b)
+    finally:
+        state._end_hierarchy_row_context()
 
 
 def _extend_path_walk_connect(
@@ -2671,17 +2745,6 @@ def _init_hierarchy_tsv_writers(
         )
         writer.flush_empty()
         state._hierarchy_logical_writer = writer
-
-
-def _backfill_hierarchy_tsv(
-    state: PathWalkState,
-    request: ConnectivityRequest,
-    *,
-    phase: str,
-) -> None:
-    state._hierarchy_flush_phase = phase
-    for chk in request.checks:
-        _flush_hierarchy_tsv_for_check(state, chk)
 
 
 def _path_walk_trace_emit(
@@ -3375,15 +3438,13 @@ def run_path_walk_connect(
             do_text=do_text,
             do_logical=do_logical,
         )
-        if do_logical and not do_text:
-            _backfill_hierarchy_tsv(state, request, phase="logical")
         try:
             batch: Optional[ConnectivityBatchResult] = None
             if do_text:
+                state._hierarchy_flush_phase = "text"
                 if not use_connect_pipeline or reuse_suite_session:
-                    _backfill_hierarchy_tsv(state, request, phase="text")
-                else:
-                    state._hierarchy_flush_phase = "text"
+                    for chk in request.checks:
+                        _walk_hierarchy_for_check(state, chk, jobs=jobs)
                 if timing_rec is not None:
                     timing_rec.begin_step("text-conn", "connect-coi")
                 t_coi = time.perf_counter()
@@ -3490,7 +3551,8 @@ def run_path_walk_connect(
                 conn_session.clear_cache()
                 try:
                     finalize_logical_walk_before_connect(state, request)
-                    _backfill_hierarchy_tsv(state, request, phase="logical")
+                    for chk in request.checks:
+                        _walk_hierarchy_for_check(state, chk, jobs=jobs)
                     walk_rows = state.rows()
                     conn_session.rows = walk_rows
                     conn_session.elab_index = ElabIndex.from_rows_by_path(
