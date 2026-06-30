@@ -159,6 +159,16 @@ def test_nested_f_chain_only_directives_until_quoted_rtl(tmp_path: Path):
     assert result.source_files[0].resolve() == (rtl / "chip.v").resolve()
 
 
+def test_dash_v_rtl_becomes_index_source(tmp_path: Path):
+    rtl = tmp_path / "chip.v"
+    rtl.write_text("module blabla; endmodule\n", encoding="utf-8")
+    fl = tmp_path / "design.f"
+    fl.write_text(f"-v {rtl}\n", encoding="utf-8")
+    result = expand_filelist(str(fl))
+    assert len(result.source_files) == 1
+    assert result.source_files[0].resolve() == rtl.resolve()
+
+
 def test_nested_f_chain_only_directives_until_dash_v_rtl(tmp_path: Path):
     rtl = tmp_path / "rtl"
     rtl.mkdir()
@@ -168,7 +178,7 @@ def test_nested_f_chain_only_directives_until_dash_v_rtl(tmp_path: Path):
     top = tmp_path / "top.f"
     top.write_text(f"-f {leaf}\n", encoding="utf-8")
     result = expand_filelist(str(top))
-    assert result.source_files == []
+    assert len(result.source_files) == 1
     assert len(result.library_files) == 1
     assert filelist_has_rtl(parse_filelist(str(top)))
 

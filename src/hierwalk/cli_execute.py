@@ -12,6 +12,7 @@ from hierwalk.coverage_audit import compute_coverage_audit
 from hierwalk.cache import (
     get_cached_elab,
     load_or_build_index,
+    resolve_effective_run_top,
     resolve_run_work_dir,
     resolve_top_label,
     set_active_work_dir,
@@ -67,6 +68,16 @@ from hierwalk.inst_trace import (
 
 from hierwalk.top_find import find_top_modules, resolve_top_modules
 from hierwalk.run_request import RunConfig
+
+
+def _check_endpoint_roots(request: Optional[ConnectivityRequest]) -> list[str]:
+    if request is None:
+        return []
+    out: list[str] = []
+    for chk in request.checks:
+        for ep in (chk.endpoint_a, chk.endpoint_b):
+            out.append(str(ep))
+    return out
 from hierwalk.verification_timing import (
     get_active_recorder,
     record_connect_check,
@@ -257,11 +268,12 @@ def execute_run(cfg: RunConfig, ap) -> int:
     if path_walk_mode:
         if on_progress:
             on_progress("path-walk: on-demand index (endpoint paths only)")
-        top_for_walk = (
-            cfg.top
-            or (connect_request.top if connect_request else "")
-            or (cfg.inst_trace.top if cfg.inst_trace else "")
-            or (fl.top_modules[0] if fl.top_modules else "")
+        top_for_walk = resolve_effective_run_top(
+            cfg_top=cfg.top or "",
+            connect_top=connect_request.top if connect_request else "",
+            inst_trace_top=cfg.inst_trace.top if cfg.inst_trace else "",
+            filelist_tops=fl.top_modules,
+            check_endpoints=_check_endpoint_roots(connect_request),
         )
         if not top_for_walk:
             print("path-walk requires --top or JSON top", file=sys.stderr)
@@ -666,7 +678,13 @@ def execute_run(cfg: RunConfig, ap) -> int:
     try:
         tops = resolve_top_modules(
             index,
-            top=cfg.top or (connect_request.top if connect_request else ""),
+            top=resolve_effective_run_top(
+                cfg_top=cfg.top or "",
+                connect_top=connect_request.top if connect_request else "",
+                inst_trace_top=cfg.inst_trace.top if cfg.inst_trace else "",
+                filelist_tops=fl.top_modules,
+                check_endpoints=_check_endpoint_roots(connect_request),
+            ),
             filelist_tops=fl.top_modules,
             all_tops=cfg.all_tops,
         )

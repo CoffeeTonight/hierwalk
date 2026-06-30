@@ -290,6 +290,11 @@ def expand_filelist(
                 vp = resolve_path(v_arg, base)
                 if vp not in result.library_files:
                     result.library_files.append(vp)
+                add_source(
+                    vp,
+                    via_filelist=fpath,
+                    chain=this_chain,
+                )
             elif (y_arg := _dash_switch_arg(line, "y")) is not None:
                 yp = resolve_path(y_arg, base)
                 if yp not in result.library_dirs:

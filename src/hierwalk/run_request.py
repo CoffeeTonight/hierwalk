@@ -301,6 +301,13 @@ def _parse_jobs(data: Any) -> int:
 _JOBS_KEY_ALIASES = ("jobs", "j", "job", "workers", "parallel")
 
 
+def _nonempty_top_name(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    name = str(value).strip()
+    return name or None
+
+
 def _mapping_get_ci(data: Mapping[str, Any], key: str) -> Any:
     if key in data:
         return data[key]
@@ -608,7 +615,7 @@ def parse_run_request_json(
         raise ValueError("run request JSON must be an object")
 
     base = base_dir or Path.cwd()
-    filelist = str(data.get("filelist") or "").strip()
+    filelist = str(_mapping_get_ci(data, "filelist") or "").strip()
     if not filelist:
         raise ValueError("run request needs 'filelist'")
 
@@ -679,7 +686,7 @@ def parse_run_request_json(
 
     return RunConfig(
         filelist=_resolve_path(base, filelist) or filelist,
-        top=str(data.get("top") or "").strip() or None,
+        top=_nonempty_top_name(str(_mapping_get_ci(data, "top") or "").strip() or None),
         find_top=bool(data.get("find_top")) or mode == "find-top",
         all_tops=bool(data.get("all_tops", False)),
         output=_resolve_path(base, str(data.get("output") or "-")) or "-",
