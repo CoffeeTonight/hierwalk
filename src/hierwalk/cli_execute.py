@@ -34,8 +34,8 @@ from hierwalk.hierarchy_log import emit_hierarchy_rows_log, emit_path_provenance
 from hierwalk.report import RunReport, default_log_path, emit_run_report, phase_log_path
 from hierwalk.path_chain import attach_path_chains, format_path_chain_compact
 from hierwalk.search_spec import effective_search_spec, execute_search_spec
-from hierwalk.connect_request import ConnectivityCheck, ConnectivityRequest
-from hierwalk.connectivity import (
+from hierwalk.connect.shared.request import ConnectivityCheck, ConnectivityRequest
+from hierwalk.connect.session import (
     check_connectivity,
     emit_connect_trace_log,
     format_connect_results_tsv,
@@ -43,7 +43,7 @@ from hierwalk.connectivity import (
     run_connectivity_request,
 )
 from hierwalk.path_walk import run_path_walk_connect, run_path_walk_index
-from hierwalk.connect_artifacts import (
+from hierwalk.connect.pipeline.artifacts import (
     connect_output_paths,
     missing_verification_artifacts,
 )
@@ -201,7 +201,7 @@ def execute_run(cfg: RunConfig, ap) -> int:
     )
     cache_dir = work_dir
     set_active_work_dir(work_dir)
-    from hierwalk.connect_artifacts import archive_run_config_sources
+    from hierwalk.connect.pipeline.artifacts import archive_run_config_sources
 
     archived_configs = archive_run_config_sources(work_dir, cfg)
     if not cfg.quiet:
@@ -244,7 +244,7 @@ def execute_run(cfg: RunConfig, ap) -> int:
             audit_defines = dict(fl.defines)
             audit_defines.update(audit_extra)
         else:
-            from hierwalk.connect_scan import collect_design_defines
+            from hierwalk.connect.logical.scan import collect_design_defines
             from hierwalk.index import DesignIndex
 
             audit_sources = [str(p) for p in fl.source_files]

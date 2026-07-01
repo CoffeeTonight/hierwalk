@@ -7,16 +7,16 @@ from pathlib import Path
 
 import pytest
 
-from hierwalk.connect_expand import (
+from hierwalk.connect.shared.expand import (
     build_expand_meta,
     expand_check_to_pairs,
     parse_endpoint_elements,
 )
-from hierwalk.connect_request import (
+from hierwalk.connect.shared.request import (
     parse_connect_request_json,
     connect_request_to_json,
 )
-from hierwalk.connectivity import check_connectivity, run_connectivity_request
+from hierwalk.connect.session import check_connectivity, run_connectivity_request
 from hierwalk.elab import elaborate
 from hierwalk.index import DesignIndex
 

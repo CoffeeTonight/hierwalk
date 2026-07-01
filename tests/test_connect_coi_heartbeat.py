@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 
-from hierwalk.connectivity import _ConnectCoiHeartbeat
+from hierwalk.connect.session import _ConnectCoiHeartbeat
 
 
 def test_connect_coi_heartbeat_disabled_without_env(monkeypatch):

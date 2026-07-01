@@ -132,7 +132,7 @@ def test_path_walk_connect_trace_writes_pw_db_to_run_log(tmp_path: Path):
     fl_path = tmp_path / "design.f"
     fl_path.write_text(f"{a_v.resolve()}\n{b_v.resolve()}\n", encoding="utf-8")
     fl = parse_filelist(str(fl_path), index_cwd=str(tmp_path))
-    from hierwalk.connect_request import ConnectivityCheck, ConnectivityRequest
+    from hierwalk.connect.shared.request import ConnectivityCheck, ConnectivityRequest
     from hierwalk.path_walk import run_path_walk_connect
 
     log_path = tmp_path / "out.tsv.hier-walk.log"
@@ -156,7 +156,7 @@ def test_path_walk_connect_trace_writes_pw_db_to_run_log(tmp_path: Path):
 
 
 def test_path_walk_connect_writes_hierarchy_tsv_during_walk(tmp_path: Path):
-    from hierwalk.connect_request import ConnectivityCheck, ConnectivityRequest
+    from hierwalk.connect.shared.request import ConnectivityCheck, ConnectivityRequest
     from hierwalk.path_walk import run_path_walk_connect
 
     top_v = tmp_path / "top.v"

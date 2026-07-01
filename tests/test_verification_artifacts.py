@@ -10,9 +10,9 @@ from pathlib import Path
 import pytest
 
 from hierwalk.cli_execute import execute_run
-from hierwalk.connect_artifacts import connect_output_paths, missing_verification_artifacts
+from hierwalk.connect.pipeline.artifacts import connect_output_paths, missing_verification_artifacts
 from hierwalk.filelist import parse_filelist
-from hierwalk.connect_request import ConnectivityCheck, ConnectivityRequest
+from hierwalk.connect.shared.request import ConnectivityCheck, ConnectivityRequest
 from hierwalk.path_walk import run_path_walk_connect
 from hierwalk.run_request import RunConfig
 from hierwalk.run_tests import build_test_run_configs, expand_suite_verification_plan, parse_flat_run_suite

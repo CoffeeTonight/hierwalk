@@ -6,11 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from hierwalk.connect_request import ConnectivityCheck, ConnectivityRequest
-from hierwalk.connectivity import run_connectivity_request
+from hierwalk.connect.shared.request import ConnectivityCheck, ConnectivityRequest
+from hierwalk.connect.session import run_connectivity_request
 from hierwalk.elab import elaborate
 from hierwalk.index import DesignIndex
-from hierwalk.validate_connect import (
+from hierwalk.connect.pipeline.validate import (
     OracleKind,
     compare_connect_batches,
     files_for_endpoint_specs,
@@ -74,7 +74,7 @@ def test_compare_detects_fp_risk():
     request = ConnectivityRequest(
         checks=(ConnectivityCheck("a", "b", "x"),),
     )
-    from hierwalk.connectivity import ConnectResult
+    from hierwalk.connect.session import ConnectResult
     from hierwalk.models import ConnectEndpoint
 
     def _res(connected: bool) -> ConnectResult:

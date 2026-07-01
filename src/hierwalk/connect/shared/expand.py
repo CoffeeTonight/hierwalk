@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
-from hierwalk.connect_scan import (
+from hierwalk.connect.logical.scan import (
     _expand_concat_elements,
     _is_const_literal,
     _split_concat_top_level,

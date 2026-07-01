@@ -8,16 +8,16 @@ import json
 
 import pytest
 
-from hierwalk.connect_expand import build_expand_meta, expand_check_to_pairs
-from hierwalk.connect_request import (
+from hierwalk.connect.shared.expand import build_expand_meta, expand_check_to_pairs
+from hierwalk.connect.shared.request import (
     connect_request_to_json,
     parse_connect_request_json,
 )
-from hierwalk.connectivity import (
+from hierwalk.connect.session import (
     ConnectivitySession,
     format_connect_results_tsv,
 )
-from hierwalk.connect_scan import build_module_connect_index, lookup_edge_prov
+from hierwalk.connect.logical.scan import build_module_connect_index, lookup_edge_prov
 from hierwalk.elab import elaborate
 from hierwalk.index import DesignIndex
 from hierwalk.waypoint_fanout import (

@@ -1,9 +1,9 @@
-"""Text-conn COI dedup: coarse slice keys, logical conn unaffected."""
+"""Text-conn grep dedup: coarse base keys, logical conn unaffected."""
 
 from __future__ import annotations
 
-from hierwalk.connect_request import ConnectivityCheck, ConnectivityRequest
-from hierwalk.connectivity import ConnectivitySession
+from hierwalk.connect.shared.request import ConnectivityCheck, ConnectivityRequest
+from hierwalk.connect.session import ConnectivitySession
 from hierwalk.elab import elaborate
 from hierwalk.index import DesignIndex
 
@@ -84,8 +84,8 @@ def test_logical_run_request_does_not_dedup_slices(tmp_path):
     assert all(r.connected for r in batch.results)
 
 
-def test_text_coi_dedup_batch_rejects_unwired_slice(tmp_path):
-    """Batch COI dedup must not fan out a wired slice verdict onto unwired bits."""
+def test_text_coi_dedup_batch_coarse_blooms_unwired_slice(tmp_path):
+    """Text grep: base-level bloom may pass unwired slice bits (logical refines)."""
     rtl = tmp_path / "top.v"
     rtl.write_text(
         """
@@ -118,12 +118,12 @@ def test_text_coi_dedup_batch_rejects_unwired_slice(tmp_path):
     batch = session.run_text_request(request)
     by_id = {r.check_id: r.connected for r in batch.results}
     assert by_id["wired"] is True
-    assert by_id["unwired"] is False
-    assert batch.text_coi_unique == 2
+    assert by_id["unwired"] is True
+    assert batch.text_coi_unique == 1
 
 
-def test_text_coi_dedup_bloom_rejects_unwired_slice(tmp_path):
-    """Text-conn: literal slice-only assigns must not bloom-unwire other bits."""
+def test_text_coi_dedup_bloom_coarse_passes_unwired_slice(tmp_path):
+    """Text grep: coarse base bloom may pass unwired slice bits."""
     rtl = tmp_path / "top.v"
     rtl.write_text(
         """
@@ -152,14 +152,67 @@ def test_text_coi_dedup_bloom_rejects_unwired_slice(tmp_path):
     wired = session.check("top.data[0]", "top.out[0]")
     assert wired.connected
     unwired = session.check("top.data[3]", "top.out[3]")
-    assert not unwired.connected
+    assert unwired.connected
+
+    session.resolve_param_dims = True
+    logical = session.check("top.data[3]", "top.out[3]")
+    assert not logical.connected
+
+
+def test_text_grep_passes_zero_mult_logical_disconnects(tmp_path):
+    """``assign a = b * 0``: text sees RHS name; logical masks non-propagating drive."""
+    rtl = tmp_path / "top.v"
+    rtl.write_text(
+        """
+        module top;
+          wire a, b;
+          assign a = b * 0;
+        endmodule
+        """,
+        encoding="utf-8",
+    )
+    index = DesignIndex.build({str(rtl.resolve()): rtl.read_text(encoding="utf-8")})
+    _, rows = elaborate(index, "top")
+    text = ConnectivitySession(
+        rows=rows, index=index, top="top", resolve_param_dims=False
+    )
+    assert text.check("top.b", "top.a").connected is True
+
+    logical = ConnectivitySession(
+        rows=rows, index=index, top="top", resolve_param_dims=True
+    )
+    assert logical.check("top.b", "top.a").connected is False
+
+
+def test_text_grep_passes_masked_and_logical_disconnects(tmp_path):
+    """``assign dst = src & 1'b0``: text grep passes; logical tie-off masks."""
+    rtl = tmp_path / "top.v"
+    rtl.write_text(
+        """
+        module top(input src, output dst);
+          assign dst = src & 1'b0;
+        endmodule
+        """,
+        encoding="utf-8",
+    )
+    index = DesignIndex.build({str(rtl.resolve()): rtl.read_text(encoding="utf-8")})
+    _, rows = elaborate(index, "top")
+    text = ConnectivitySession(
+        rows=rows, index=index, top="top", resolve_param_dims=False
+    )
+    assert text.check("top.src", "top.dst").connected is True
+
+    logical = ConnectivitySession(
+        rows=rows, index=index, top="top", resolve_param_dims=True
+    )
+    assert logical.check("top.src", "top.dst").connected is False
 
 
 def test_fanout_resolves_shared_endpoint_once(tmp_path):
     from unittest.mock import patch
 
-    from hierwalk.connect_endpoints import resolve_endpoint
-    from hierwalk.connect_request import parse_connect_request_json
+    from hierwalk.connect.shared.endpoints import resolve_endpoint
+    from hierwalk.connect.shared.request import parse_connect_request_json
     from hierwalk.elab import elaborate
     from hierwalk.index import DesignIndex
 
@@ -192,7 +245,7 @@ def test_fanout_resolves_shared_endpoint_once(tmp_path):
     )
 
     with patch(
-        "hierwalk.connectivity.resolve_endpoint",
+        "hierwalk.connect.shared.resolve_cache.resolve_endpoint",
         wraps=resolve_endpoint,
     ) as mock_resolve:
         batch = session.run_text_request(request)

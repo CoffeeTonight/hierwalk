@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from hierwalk.connect_artifacts import connect_output_paths
-from hierwalk.connect_expand import (
+from hierwalk.connect.pipeline.artifacts import connect_output_paths
+from hierwalk.connect.shared.expand import (
     build_expand_meta,
     hierarchy_endpoint_specs,
     parse_list_display_spec,
@@ -194,7 +194,7 @@ def test_conn_ignore_path_dw_glob_merge_and_pw_db(suite_bundle):
     assert conn_cfg.ignore_path == ("DW_*",)
 
     from hierwalk.filelist import parse_filelist
-    from hierwalk.connect_request import ConnectivityCheck, ConnectivityRequest
+    from hierwalk.connect.shared.request import ConnectivityCheck, ConnectivityRequest
     from hierwalk.path_walk import run_path_walk_connect
 
     flr = parse_filelist(str(root / "filelist.f"), index_cwd=str(root))

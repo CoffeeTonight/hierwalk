@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from hierwalk.connect_request import ConnectivityCheck, ConnectivityRequest
+from hierwalk.connect.shared.request import ConnectivityCheck, ConnectivityRequest
 from hierwalk.filelist import parse_filelist
 from hierwalk.path_walk import run_path_walk_connect
 
@@ -56,11 +56,11 @@ def test_connect_pipeline_resolves_deep_endpoints(tmp_path: Path, monkeypatch):
 
 
 def test_bind_memo_hit_skips_bind_rescan(tmp_path: Path):
-    from hierwalk.connect_endpoints import (
+    from hierwalk.connect.shared.endpoints import (
         _clear_module_index_key_memo,
         _resolve_module_index_key,
     )
-    from hierwalk.connect_scan import collect_bind_records_for_module
+    from hierwalk.connect.logical.scan import collect_bind_records_for_module
     from hierwalk.index import DesignIndex
 
     rtl = tmp_path / "top.v"
@@ -80,7 +80,7 @@ def test_bind_memo_hit_skips_bind_rescan(tmp_path: Path):
         index, "top", {}, None, ff_barrier=False, over_approximate_if=True
     )
     with patch(
-        "hierwalk.connect_endpoints.collect_bind_records_for_module",
+        "hierwalk.connect.shared.endpoints.collect_bind_records_for_module",
         wraps=collect_bind_records_for_module,
     ) as spy:
         _resolve_module_index_key(
@@ -90,7 +90,7 @@ def test_bind_memo_hit_skips_bind_rescan(tmp_path: Path):
 
 
 def test_tier1_defines_cached_until_index_changes(tmp_path: Path):
-    from hierwalk.connectivity import _effective_defines
+    from hierwalk.connect.session import _effective_defines
     from hierwalk.index import DesignIndex
     from hierwalk.path_walk_db import PathWalkModuleDb
 
@@ -101,7 +101,7 @@ def test_tier1_defines_cached_until_index_changes(tmp_path: Path):
     db = PathWalkModuleDb([path], index, defines={})
 
     with patch(
-        "hierwalk.connectivity._effective_defines",
+        "hierwalk.connect.session._effective_defines",
         wraps=_effective_defines,
     ) as spy:
         db._tier1_defines()
@@ -111,7 +111,7 @@ def test_tier1_defines_cached_until_index_changes(tmp_path: Path):
 
     db._invalidate_tier1_defines_cache()
     with patch(
-        "hierwalk.connectivity._effective_defines",
+        "hierwalk.connect.session._effective_defines",
         wraps=_effective_defines,
     ) as spy2:
         db._tier1_defines()
@@ -119,7 +119,7 @@ def test_tier1_defines_cached_until_index_changes(tmp_path: Path):
 
 
 def test_tier1_defines_survives_module_growth_without_rescan(tmp_path: Path):
-    from hierwalk.connectivity import _effective_defines
+    from hierwalk.connect.session import _effective_defines
     from hierwalk.index import DesignIndex, ModuleRecord
     from hierwalk.path_walk_db import PathWalkModuleDb
 
@@ -140,7 +140,7 @@ def test_tier1_defines_survives_module_growth_without_rescan(tmp_path: Path):
     index._rebuild_file_modules()
 
     with patch(
-        "hierwalk.connectivity._effective_defines",
+        "hierwalk.connect.session._effective_defines",
         wraps=_effective_defines,
     ) as spy:
         db._tier1_defines()
@@ -149,7 +149,7 @@ def test_tier1_defines_survives_module_growth_without_rescan(tmp_path: Path):
 
 
 def test_design_bind_index_scans_once_per_design(tmp_path: Path):
-    from hierwalk.connect_scan import (
+    from hierwalk.connect.logical.scan import (
         clear_bind_records_memo,
         collect_bind_records_for_module,
     )
@@ -173,9 +173,10 @@ def test_design_bind_index_scans_once_per_design(tmp_path: Path):
     index = DesignIndex.build({str(rtl.resolve()): rtl.read_text(encoding="utf-8")})
     clear_bind_records_memo()
     with patch(
-        "hierwalk.connect_scan._scan_design_bind_index",
+        "hierwalk.connect.logical.scan.core._scan_design_bind_index",
         wraps=__import__(
-            "hierwalk.connect_scan", fromlist=["_scan_design_bind_index"]
+            "hierwalk.connect.logical.scan.core",
+            fromlist=["_scan_design_bind_index"],
         )._scan_design_bind_index,
     ) as spy:
         collect_bind_records_for_module(index, "top")
@@ -185,7 +186,7 @@ def test_design_bind_index_scans_once_per_design(tmp_path: Path):
 
 
 def test_connectivity_defines_cache_ignores_module_growth(tmp_path: Path):
-    from hierwalk.connectivity import ConnectivitySession
+    from hierwalk.connect.session import ConnectivitySession
     from hierwalk.elab import elaborate
     from hierwalk.index import DesignIndex, ModuleRecord
 
@@ -213,14 +214,14 @@ def test_connectivity_defines_cache_ignores_module_growth(tmp_path: Path):
     index._rebuild_file_modules()
 
     with patch(
-        "hierwalk.connect_scan.collect_design_defines",
+        "hierwalk.connect.logical.scan.collect_design_defines",
     ) as spy:
         session.effective_defines()
     assert spy.call_count == 0
 
 
 def test_bind_scan_skipped_when_design_has_no_bind(tmp_path: Path):
-    from hierwalk.connect_scan import (
+    from hierwalk.connect.logical.scan import (
         _scan_design_bind_index,
         clear_bind_records_memo,
         collect_bind_records_for_module,
@@ -235,7 +236,7 @@ def test_bind_scan_skipped_when_design_has_no_bind(tmp_path: Path):
     index = DesignIndex.build({str(rtl.resolve()): rtl.read_text(encoding="utf-8")})
     clear_bind_records_memo()
     with patch(
-        "hierwalk.connect_scan._scan_design_bind_index",
+        "hierwalk.connect.logical.scan.core._scan_design_bind_index",
         wraps=_scan_design_bind_index,
     ) as spy:
         assert collect_bind_records_for_module(index, "top") == []
@@ -273,7 +274,7 @@ def test_tier1_reuses_preprocessed_text_cache(tmp_path: Path):
 def test_port_param_ctx_skips_refine_for_text_conn(tmp_path: Path):
     from dataclasses import replace
 
-    from hierwalk.connect_endpoints import _port_param_ctx
+    from hierwalk.connect.shared.endpoints import _port_param_ctx
     from hierwalk.elab import elaborate
     from hierwalk.index import DesignIndex
 
@@ -283,7 +284,7 @@ def test_port_param_ctx_skips_refine_for_text_conn(tmp_path: Path):
     _, rows = elaborate(index, "top")
     empty_row = replace(rows[0], param_ctx={}, param_ctx_folded=False)
     with patch(
-        "hierwalk.connect_endpoints.refine_param_ctx_for_path",
+        "hierwalk.connect.shared.endpoints.refine_param_ctx_for_path",
     ) as spy:
         _port_param_ctx(index, empty_row, "top", resolve_param_dims=False)
     assert spy.call_count == 0
@@ -292,7 +293,7 @@ def test_port_param_ctx_skips_refine_for_text_conn(tmp_path: Path):
 def test_text_conn_lite_skips_comb_always_and_ff_metadata(tmp_path: Path):
     from unittest.mock import patch
 
-    from hierwalk.connect_scan import (
+    from hierwalk.connect.logical.scan import (
         _parse_comb_always_stmt,
         build_module_connect_index,
         scan_ff_adjacency,
@@ -309,11 +310,11 @@ def test_text_conn_lite_skips_comb_always_and_ff_metadata(tmp_path: Path):
     endmodule
     """
     with patch(
-        "hierwalk.connect_scan._parse_comb_always_stmt",
+        "hierwalk.connect.logical.scan.core._parse_comb_always_stmt",
         wraps=_parse_comb_always_stmt,
     ) as comb_spy:
         with patch(
-            "hierwalk.connect_scan.scan_ff_adjacency",
+            "hierwalk.connect.logical.scan.core.scan_ff_adjacency",
             wraps=scan_ff_adjacency,
         ) as ff_spy:
             build_module_connect_index(
@@ -362,7 +363,7 @@ def test_tier0_worker_reuses_preprocessed_sidecar(tmp_path: Path):
 
 
 def test_suite_session_pipeline_text_conn(tmp_path: Path, monkeypatch):
-    from hierwalk.connect_request import ConnectivityCheck, ConnectivityRequest
+    from hierwalk.connect.shared.request import ConnectivityCheck, ConnectivityRequest
     from hierwalk.filelist import parse_filelist
     from hierwalk.path_walk import (
         clear_path_walk_suite_session,

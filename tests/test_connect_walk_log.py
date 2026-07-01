@@ -6,7 +6,7 @@ import io
 import re
 from pathlib import Path
 
-from hierwalk.connectivity import ConnectivitySession, emit_connect_trace_log
+from hierwalk.connect.session import ConnectivitySession, emit_connect_trace_log
 from hierwalk.elab import elaborate
 from hierwalk.index import DesignIndex
 

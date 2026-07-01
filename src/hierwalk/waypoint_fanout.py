@@ -13,8 +13,8 @@ from hierwalk.cone import (
     _expand_fanout,
     _state_key,
 )
-from hierwalk.connect_endpoints import resolve_endpoint
-from hierwalk.connect_scan import ModuleConnectIndex, lookup_edge_prov, net_representative
+from hierwalk.connect.shared.endpoints import resolve_endpoint
+from hierwalk.connect.logical.scan import ModuleConnectIndex, lookup_edge_prov, net_representative
 from hierwalk.index import DesignIndex
 from hierwalk.inst_trace import _ports_for_instance
 from hierwalk.models import ConnectEndpoint, ConnectResult, ElabIndex, FlatRow

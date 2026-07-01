@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from hierwalk.connect_scan import split_statements
+from hierwalk.connect.logical.scan import split_statements
 
 
 def test_split_statements_line_fast_on_large_assign_block():

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from hierwalk.connect_expand import build_expand_meta, expand_check_to_pairs
-from hierwalk.connect_request import parse_connect_request_json
-from hierwalk.connectivity import (
+from hierwalk.connect.shared.expand import build_expand_meta, expand_check_to_pairs
+from hierwalk.connect.shared.request import parse_connect_request_json
+from hierwalk.connect.session import (
     ConnectivitySession,
     format_connect_results_tsv,
     run_connectivity_request,
@@ -123,8 +123,8 @@ def _fan_concat_by_pair(batch):
     }
 
 
-def test_braced_concat_text_conn_bit_precise(tmp_path):
-    """Text-conn (resolve_param_dims=False) must keep braced-concat bit precision."""
+def test_braced_concat_text_conn_coarse_grep(tmp_path):
+    """Text grep blooms braced-concat bases; logical conn keeps bit precision."""
     verilog = """
     module top;
       wire wa, wb, wc, wq;
@@ -149,9 +149,12 @@ def test_braced_concat_text_conn_bit_precise(tmp_path):
     session.resolve_param_dims = False
     text_batch = session.run_text_request(req)
     by_pair = _fan_concat_by_pair(text_batch)
-    assert by_pair[("top.wa", "top.wq")] is False
-    assert by_pair[("top.wc", "top.wq")] is False
+    assert by_pair[("top.wa", "top.wq")] is True
+    assert by_pair[("top.wc", "top.wq")] is True
     assert by_pair[("top.wb", "top.wq")] is True
+
+    session.resolve_param_dims = True
+    assert session.check("top.wa", "top.wq").connected is False
 
 
 def test_braced_concat_arity_fallback_implicit_bus(tmp_path):
@@ -179,13 +182,13 @@ def test_braced_concat_arity_fallback_implicit_bus(tmp_path):
     session = ConnectivitySession(rows=rows, index=index, top=top)
     session.resolve_param_dims = False
     by_pair = _fan_concat_by_pair(session.run_text_request(req))
-    assert by_pair[("top.wa", "top.wq")] is False
-    assert by_pair[("top.wc", "top.wq")] is False
+    assert by_pair[("top.wa", "top.wq")] is True
+    assert by_pair[("top.wc", "top.wq")] is True
     assert by_pair[("top.wb", "top.wq")] is True
 
 
-def test_braced_concat_path_walk_text_bit_precise(tmp_path, monkeypatch):
-    """Path-walk text-conn pipeline must not collapse braced-concat bits."""
+def test_braced_concat_path_walk_text_coarse_grep(tmp_path, monkeypatch):
+    """Path-walk text-conn pipeline uses coarse grep bloom (not bit-precise)."""
     monkeypatch.setenv("HIERWALK_CONNECT_JOBS", "4")
     verilog = """
     module top;
@@ -221,6 +224,6 @@ def test_braced_concat_path_walk_text_bit_precise(tmp_path, monkeypatch):
         no_cache=True,
     )
     by_pair = _fan_concat_by_pair(batch)
-    assert by_pair[("top.wa", "top.wq")] is False
-    assert by_pair[("top.wc", "top.wq")] is False
+    assert by_pair[("top.wa", "top.wq")] is True
+    assert by_pair[("top.wc", "top.wq")] is True
     assert by_pair[("top.wb", "top.wq")] is True

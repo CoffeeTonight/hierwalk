@@ -9,7 +9,7 @@ import sys
 import time
 from pathlib import Path
 
-from hierwalk.connect_request import ConnectivityCheck, ConnectivityRequest
+from hierwalk.connect.shared.request import ConnectivityCheck, ConnectivityRequest
 from hierwalk.filelist import parse_filelist
 from hierwalk.path_walk import clear_path_walk_suite_session, run_path_walk_connect
 

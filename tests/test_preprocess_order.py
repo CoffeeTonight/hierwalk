@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from hierwalk.connect_scan import collect_design_defines, design_parse_sources, prepare_connect_body
+from hierwalk.connect.logical.scan import collect_design_defines, design_parse_sources, prepare_connect_body
 from hierwalk.index import DesignIndex, scan_preprocessed
 from hierwalk.preprocess import (
     accumulate_defines_from_file,

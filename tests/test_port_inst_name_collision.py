@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from hierwalk.connect_endpoints import parse_connect_endpoint, resolve_endpoint
-from hierwalk.connectivity import check_connectivity
-from hierwalk.connect_request import ConnectivityCheck, ConnectivityRequest
+from hierwalk.connect.shared.endpoints import parse_connect_endpoint, resolve_endpoint
+from hierwalk.connect.session import check_connectivity
+from hierwalk.connect.shared.request import ConnectivityCheck, ConnectivityRequest
 from hierwalk.elab import elaborate
 from hierwalk.filelist import parse_filelist
 from hierwalk.index import DesignIndex

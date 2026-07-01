@@ -5,8 +5,8 @@ from __future__ import annotations
 import os
 from typing import Iterable, List, Optional, Sequence, Set
 
-from hierwalk.connect_expand import endpoint_specs_from_expand
-from hierwalk.connect_request import ConnectivityCheck, ConnectivityRequest
+from hierwalk.connect.shared.expand import endpoint_specs_from_expand
+from hierwalk.connect.shared.request import ConnectivityCheck, ConnectivityRequest
 
 
 def _env_bool(name: str, *, default: bool) -> bool:

@@ -729,7 +729,7 @@ class DesignIndex:
     def effective_defines(
         self, extra: Mapping[str, str] | None = None
     ) -> Dict[str, str]:
-        from hierwalk.connectivity import _effective_defines
+        from hierwalk.connect.session import _effective_defines
 
         merged = dict(self._preprocess_defines)
         if extra:
@@ -841,7 +841,7 @@ class DesignIndex:
             file_filelist_chain=self.file_filelist_chain,
         )
         if parse_sources:
-            from hierwalk.connect_scan import design_parse_sources
+            from hierwalk.connect.logical.scan import design_parse_sources
 
             define_snapshot_sources = [
                 p

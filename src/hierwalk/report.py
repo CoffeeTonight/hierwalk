@@ -191,7 +191,7 @@ class RunReport:
             out.append(f"  Search:        {self.search_hits} hits ({pat!r})")
 
         if self.connect_results or self.connect_phase:
-            from hierwalk.connectivity import format_connect_results_report
+            from hierwalk.connect.session import format_connect_results_report
 
             phase = (self.connect_phase or "logical").strip().lower()
             if phase not in ("text", "logical", "both"):

@@ -6,12 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from hierwalk.connect_expand import build_expand_meta, parse_endpoint_elements
-from hierwalk.connect_request import ConnectivityCheck, ConnectivityRequest
-from hierwalk.connectivity import ConnectivitySession
+from hierwalk.connect.shared.expand import build_expand_meta, parse_endpoint_elements
+from hierwalk.connect.shared.request import ConnectivityCheck, ConnectivityRequest
+from hierwalk.connect.session import ConnectivitySession
 from hierwalk.elab import elaborate
 from hierwalk.index import DesignIndex
-from hierwalk.connect_artifacts import (
+from hierwalk.connect.pipeline.artifacts import (
     build_connect_results_from_request,
     collect_hierarchy_evidence,
     format_connect_hierarchy_tsv,
@@ -141,6 +141,8 @@ def test_torture_design_shape():
     assert "`ifndef ZZ_IFNDEF_PING_BODY_" in design.files["zz_common.v"]
     assert "chain_in ^ shallow_return" in design.files["zz_deep_d2.v"]
     assert "assign merge_tap" in design.files["zz_deep_d4.v"]
+    assert "grep_zero_b * 0" in design.files["zz_deep_d4.v"]
+    assert "grep_mask_src & 1'b0" in design.files["zz_deep_d4.v"]
     assert len(design.files) >= DEEP_DEPTH + SHALLOW_DEPTH + 6
     assert "zz_fake_deep.v" in design.files
     assert DW_VENDOR_RTL in design.files
@@ -395,6 +397,29 @@ def test_check_connectivity_parametric_strb(torture_bundle, tmp_path: Path):
         f"{DEEP_D3}.strb_in[3]",
     )
     assert result.connected
+
+
+def test_zigzag_text_grep_bug_patterns(torture_bundle, tmp_path: Path):
+    """Today's text-grep patterns: zero-mult / masked-and pass text, fail logical."""
+    fl_path, design = torture_bundle
+    index, rows = _full_elab_index(design, fl_path.parent)
+    text = ConnectivitySession(
+        rows=rows, index=index, top=TOP, resolve_param_dims=False
+    )
+    logical = ConnectivitySession(
+        rows=rows, index=index, top=TOP, resolve_param_dims=True
+    )
+    assert text.check(f"{DEEP_D4}.grep_zero_b", f"{DEEP_D4}.grep_zero_a").connected
+    assert not logical.check(
+        f"{DEEP_D4}.grep_zero_b", f"{DEEP_D4}.grep_zero_a"
+    ).connected
+    assert text.check(f"{DEEP_D4}.grep_mask_src", f"{DEEP_D4}.grep_mask_dst").connected
+    assert not logical.check(
+        f"{DEEP_D4}.grep_mask_src", f"{DEEP_D4}.grep_mask_dst"
+    ).connected
+    assert text.check(
+        f"{DEEP_D4}.chain_in[1][2]", f"{DEEP_D4}.merge_tap"
+    ).connected
 
 
 def test_check_connectivity_text_vs_logical_strb(torture_bundle, tmp_path: Path):

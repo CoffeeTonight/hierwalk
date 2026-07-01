@@ -27,6 +27,13 @@ from hierwalk.inst_scan import (
     _skip_balanced,
 )
 
+from hierwalk.connect.logical.scan.types import (
+    BindRecord,
+    ConnectEdgeProv,
+    ModuleConnectIndex,
+    binds_digest,
+)
+
 _IDENT_TOKEN_RE = re.compile(r"(?:\\(?:[A-Za-z_]\w*|\S+)|[A-Za-z_]\w*)")
 _SIZED_LITERAL_RE = re.compile(
     r"\d+'[bdhBDH][0-9a-fA-FxzXZ?_]+",
@@ -46,84 +53,6 @@ _HIER_REF_RE = re.compile(
     r"\s*\.\s*"
     r"((?:\\(?:[A-Za-z_]\w*|\S+)|[A-Za-z_]\w*)(?:\s*\[[^\]]+\])*)"
 )
-
-
-@dataclass
-class BindRecord:
-    """``bind target cell inst (...);`` attached to *target* module."""
-
-    cell: str
-    inst_leaf: str
-    ports: List[Tuple[str, str]]
-
-
-def binds_digest(binds: Sequence[BindRecord]) -> str:
-    """Stable digest of bind records targeting one module."""
-    if not binds:
-        return "0" * 16
-    hasher = hashlib.sha256()
-    for rec in sorted(binds, key=lambda b: (b.cell, b.inst_leaf)):
-        hasher.update(rec.cell.encode("utf-8"))
-        hasher.update(b"\0")
-        hasher.update(rec.inst_leaf.encode("utf-8"))
-        hasher.update(b"\0")
-        for port, expr in sorted(rec.ports):
-            hasher.update(port.encode("utf-8"))
-            hasher.update(b"\0")
-            hasher.update(expr.encode("utf-8"))
-            hasher.update(b"\0")
-    return hasher.hexdigest()[:16]
-
-
-@dataclass(frozen=True)
-class ConnectEdgeProv:
-    line: int
-    kind: str
-
-
-@dataclass
-class ModuleConnectIndex:
-    """Pre-compressed intra-module connectivity + fast hierarchy hooks."""
-
-    inst_ports: Dict[str, List[Tuple[str, str]]] = field(default_factory=dict)
-    net_rep: Dict[str, str] = field(default_factory=dict)
-    rep_adj: Dict[str, Set[str]] = field(default_factory=dict)
-    net_to_children: Dict[str, List[Tuple[str, str]]] = field(default_factory=dict)
-    expr_roots: Dict[str, FrozenSet[str]] = field(default_factory=dict)
-    hier_links: Dict[str, List[Tuple[str, str]]] = field(default_factory=dict)
-    hier_ref_targets: Dict[Tuple[str, str], Set[str]] = field(default_factory=dict)
-    edge_prov: Dict[Tuple[str, str], ConnectEdgeProv] = field(default_factory=dict)
-    inst_stmt_lines: Dict[str, int] = field(default_factory=dict)
-    ff_net_lines: Dict[str, int] = field(default_factory=dict)
-    ff_d_roots: FrozenSet[str] = field(default_factory=frozenset)
-    ff_q_roots: FrozenSet[str] = field(default_factory=frozenset)
-    vector_bases: FrozenSet[str] = field(default_factory=frozenset)
-    vector_scalar_rep: Dict[str, str] = field(default_factory=dict)
-    bit_precise_bases: FrozenSet[str] = field(default_factory=frozenset)
-    resolve_param_dims: bool = True
-
-    def copy(self) -> ModuleConnectIndex:
-        """Shallow copy of mutable fields (safe before in-place bind folding)."""
-        return ModuleConnectIndex(
-            inst_ports={k: list(v) for k, v in self.inst_ports.items()},
-            net_rep=dict(self.net_rep),
-            rep_adj={k: set(v) for k, v in self.rep_adj.items()},
-            net_to_children={k: list(v) for k, v in self.net_to_children.items()},
-            expr_roots=dict(self.expr_roots),
-            hier_links={k: list(v) for k, v in self.hier_links.items()},
-            hier_ref_targets={
-                k: set(v) for k, v in self.hier_ref_targets.items()
-            },
-            edge_prov=dict(self.edge_prov),
-            inst_stmt_lines=dict(self.inst_stmt_lines),
-            ff_net_lines=dict(self.ff_net_lines),
-            ff_d_roots=self.ff_d_roots,
-            ff_q_roots=self.ff_q_roots,
-            vector_bases=self.vector_bases,
-            vector_scalar_rep=dict(self.vector_scalar_rep),
-            bit_precise_bases=self.bit_precise_bases,
-            resolve_param_dims=self.resolve_param_dims,
-        )
 
 
 def _clean_body(body: str) -> str:
@@ -1981,14 +1910,30 @@ def _is_self_cancel_expr(expr: str) -> bool:
     return False
 
 
+def _grep_assign_rhs_roots(
+    expr: str,
+    param_map: Mapping[str, str] | None = None,
+) -> Set[str]:
+    """Text-conn: any identifier appearing on the assign RHS (no constant-fold mask)."""
+    pmap = dict(param_map or {})
+    roots = set(extract_connect_nodes(expr, pmap))
+    for inst, port in extract_hier_refs(expr):
+        roots.discard(inst)
+        roots.discard(port)
+    return roots
+
+
 def _effective_assign_rhs_roots(
     expr: str,
     param_map: Mapping[str, str] | None = None,
     *,
     zero_nets: Mapping[str, int] | None = None,
     over_approximate_if: bool = True,
+    grep_only: bool = False,
 ) -> Set[str]:
     """Drop constant tie-offs and opaque function-call RHS from structural COI."""
+    if grep_only:
+        return _grep_assign_rhs_roots(expr, param_map)
     pmap = dict(param_map or {})
     znets = dict(zero_nets or {})
     text = _strip_outer_parens(expr.strip().rstrip(";"))
@@ -2025,6 +1970,7 @@ def _effective_assign_rhs_roots(
                     pmap,
                     zero_nets=znets,
                     over_approximate_if=over_approximate_if,
+                    grep_only=grep_only,
                 )
             if over_approximate_if:
                 return (
@@ -2033,16 +1979,22 @@ def _effective_assign_rhs_roots(
                         pmap,
                         zero_nets=znets,
                         over_approximate_if=over_approximate_if,
+                        grep_only=grep_only,
                     )
                     | _effective_assign_rhs_roots(
                         when_false,
                         pmap,
                         zero_nets=znets,
                         over_approximate_if=over_approximate_if,
+                        grep_only=grep_only,
                     )
                 )
             return _effective_assign_rhs_roots(
-                when_false, pmap, zero_nets=znets, over_approximate_if=over_approximate_if
+                when_false,
+                pmap,
+                zero_nets=znets,
+                over_approximate_if=over_approximate_if,
+                grep_only=grep_only,
             )
 
     and_pos = _find_top_level_op(text, "&")
@@ -2063,9 +2015,20 @@ def _effective_assign_rhs_roots(
         left = text[:or_pos].strip()
         right = text[or_pos + 1 :].strip()
         if _is_zero_literal(left):
-            return _effective_assign_rhs_roots(right, param_map, zero_nets=znets)
+            return _effective_assign_rhs_roots(
+                right, param_map, zero_nets=znets, grep_only=grep_only
+            )
         if _is_zero_literal(right):
-            return _effective_assign_rhs_roots(left, param_map, zero_nets=znets)
+            return _effective_assign_rhs_roots(
+                left, param_map, zero_nets=znets, grep_only=grep_only
+            )
+
+    mul_pos = _find_top_level_op(text, "*")
+    if mul_pos is not None:
+        left = text[:mul_pos].strip()
+        right = text[mul_pos + 1 :].strip()
+        if _is_zero_literal(left) or _is_zero_literal(right):
+            return set()
 
     roots = extract_connect_nodes(text, param_map)
     for inst, port in extract_hier_refs(text):
@@ -2870,6 +2833,7 @@ def _parse_assign_stmt(
     stmt_line: int = 0,
     iface_insts: Optional[Set[str]] = None,
     braced_concat_bases: Optional[Set[str]] = None,
+    grep_only: bool = False,
 ) -> None:
     pmap = dict(param_map or {})
     if not _stmt_starts_with(stmt, "assign"):
@@ -2922,6 +2886,7 @@ def _parse_assign_stmt(
         pmap,
         zero_nets=zero_nets,
         over_approximate_if=over_approximate_if,
+        grep_only=grep_only,
     )
     if not rhs_roots:
         return
@@ -3381,6 +3346,7 @@ def scan_assign_adjacency(
     iface_insts: Optional[Set[str]] = None,
     braced_concat_bases: Optional[Set[str]] = None,
     skip_comb_always: bool = False,
+    grep_only: bool = False,
 ) -> Dict[str, Set[str]]:
     consts, pmap = _collect_const_assigns_fixed(body, param_map=param_map)
     zero_nets = {
@@ -3414,6 +3380,7 @@ def scan_assign_adjacency(
             stmt_line=stmt_line,
             iface_insts=iface_insts,
             braced_concat_bases=braced_concat_bases,
+            grep_only=grep_only,
         )
         _parse_decl_alias_stmt(stmt, adj, param_map=pmap, zero_nets=zero_nets)
         _parse_primitive_gate_stmt(stmt, adj)
@@ -3429,9 +3396,10 @@ def scan_assign_adjacency(
                 edge_prov=edge_prov,
                 stmt_line=stmt_line,
             )
-    const_driven = _collect_const_driven_lhs(body, param_map=pmap)
-    if const_driven:
-        _prune_const_driven_adjacency(adj, const_driven)
+    if not grep_only:
+        const_driven = _collect_const_driven_lhs(body, param_map=pmap)
+        if const_driven:
+            _prune_const_driven_adjacency(adj, const_driven)
     _seed_assign_drive_bases_cache(body, adj.keys())
     return adj
 
@@ -4493,7 +4461,7 @@ def clear_module_connect_index_cache() -> None:
     global _build_index_uncached_calls, _build_index_mem_hits
     clear_module_connect_index_mem_cache()
     clear_bind_records_memo()
-    from hierwalk.connect_endpoints import (
+    from hierwalk.connect.shared.endpoints import (
         _clear_module_index_key_memo,
         clear_module_connect_sidecar_cache,
     )
@@ -4721,18 +4689,12 @@ def _build_module_connect_index_uncached(
         iface_insts=iface_insts,
         braced_concat_bases=braced_concat_bases,
         skip_comb_always=text_conn_lite,
+        grep_only=text_conn_lite,
     )
     bit_precise_bases: FrozenSet[str] = frozenset()
     if not resolve_param_dims:
-        bit_precise_bases = _compute_bit_precise_bases(
-            assign_adj,
-            extra=braced_concat_bases or None,
-            scalar_bases_extra=_scalar_bases_from_inst_ports(inst_ports, full_pmap),
-        )
-        _promote_slice_edges_to_bases(
-            assign_adj,
-            skip_bases=set(bit_precise_bases) or None,
-        )
+        # Text-conn: coarse grep bloom only — never mark bases bit-precise.
+        _promote_slice_edges_to_bases(assign_adj)
     _expand_hier_bit_links(
         hier_links,
         hier_ref_targets,
@@ -4872,15 +4834,10 @@ def _build_module_connect_index_uncached(
 
 
 def _coarse_net_representative(mod_idx: ModuleConnectIndex, net: str) -> str:
-    """Text-conn bloom filter: collapse unknown slice selects to base bus rep."""
-    base, suffix = _split_net_base_suffix(net)
+    """Text-conn grep pass: collapse slice selects to the base bus rep."""
+    base, _suffix = _split_net_base_suffix(net)
     if not base or base == net:
         return net
-    if (
-        base in mod_idx.bit_precise_bases
-        and _is_literal_slice_suffix(suffix)
-    ):
-        return mod_idx.net_rep.get(net, net)
     base_hit = mod_idx.net_rep.get(base)
     if base_hit is not None:
         return base_hit

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from hierwalk.connect_request import ConnectivityCheck, ConnectivityRequest
+from hierwalk.connect.shared.request import ConnectivityCheck, ConnectivityRequest
 from hierwalk.filelist import parse_filelist
 from hierwalk.path_walk import (
     _path_trie_branch_points,

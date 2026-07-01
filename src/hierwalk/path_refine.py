@@ -45,7 +45,7 @@ _module_chunk_cache: Dict[_ModuleChunkCacheKey, Tuple[str, str, str]] = {}
 
 
 def _effective_defines_digest(index: DesignIndex) -> str:
-    from hierwalk.connect_scan import _defines_digest
+    from hierwalk.connect.logical.scan import _defines_digest
 
     return _defines_digest(index.effective_defines())
 

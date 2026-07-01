@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Mapping, Optional, Sequence, Set, TextIO, Tuple
 
-from hierwalk.connect_endpoints import (
+from hierwalk.connect.shared.endpoints import (
     DeclNetCache,
     _lca,
     _module_body_for_row,
@@ -27,12 +27,12 @@ from hierwalk.connect_endpoints import (
     net_exists_in_module_fast,
     wire_tail_exists_fast,
 )
-from hierwalk.connect_scan import (
+from hierwalk.connect.logical.scan import (
     _net_base_in_assign_regex_fast,
     _net_base_in_port_map_regex_fast,
 )
-from hierwalk.connect_request import ConnectivityRequest
-from hierwalk.connectivity import ConnectivityBatchResult, ConnectivitySession
+from hierwalk.connect.shared.request import ConnectivityRequest
+from hierwalk.connect.session import ConnectivityBatchResult, ConnectivitySession
 from hierwalk.filelist import FilelistResult
 from hierwalk.ignore_path import (
     partition_sources,
@@ -843,7 +843,7 @@ class PathWalkState:
         if row.param_ctx_folded or row.param_ctx:
             ctx = dict(row.param_ctx)
         else:
-            from hierwalk.connect_endpoints import _port_param_ctx
+            from hierwalk.connect.shared.endpoints import _port_param_ctx
 
             ctx = dict(_port_param_ctx(self.index, row, self.top))
         self._param_ctx_cache[row.full_path] = ctx
@@ -862,7 +862,7 @@ class PathWalkState:
         row: FlatRow,
     ) -> Tuple[Optional[str], float]:
         """Return (kind, check_ms) where kind is port|wire|reg or None."""
-        from hierwalk.connect_endpoints import classify_signal_tail_kind
+        from hierwalk.connect.shared.endpoints import classify_signal_tail_kind
 
         t0 = time.perf_counter()
 
@@ -890,7 +890,7 @@ class PathWalkState:
         row: FlatRow,
         check_ms: float,
     ) -> None:
-        from hierwalk.connect_artifacts import SignalTailRecord
+        from hierwalk.connect.pipeline.artifacts import SignalTailRecord
 
         target = target_path or (
             f"{parent_path}.{tail}" if parent_path and tail else parent_path or tail
@@ -1464,7 +1464,7 @@ class PathWalkState:
             if self._is_target_terminal_tail(cur, remainder, path):
                 row = self.rows_by_path.get(cur)
                 if row is not None:
-                    from hierwalk.connect_endpoints import _port_exists
+                    from hierwalk.connect.shared.endpoints import _port_exists
 
                     seg = self._inst_leaf_prefix(remainder)
                     body = self._cached_module_body(row)
@@ -2468,7 +2468,7 @@ def _extend_path_walk_for_specs(
 
 def _hierarchy_tsv_incremental_ready(state: PathWalkState, phase: str) -> bool:
     """True when incremental writer already materialized hierarchy rows on disk."""
-    from hierwalk.connect_artifacts import IncrementalHierarchyTsvWriter
+    from hierwalk.connect.pipeline.artifacts import IncrementalHierarchyTsvWriter
 
     if phase == "text":
         writer = state._hierarchy_text_writer
@@ -2490,7 +2490,7 @@ def _flush_hierarchy_tsv_for_check(state: PathWalkState, chk) -> None:
         return
     if writer is None:
         return
-    from hierwalk.connect_artifacts import IncrementalHierarchyTsvWriter
+    from hierwalk.connect.pipeline.artifacts import IncrementalHierarchyTsvWriter
 
     if not isinstance(writer, IncrementalHierarchyTsvWriter):
         return
@@ -2582,8 +2582,8 @@ def _pipeline_path_walk_text_conn(
     on_progress: Optional[Callable[[str], None]] = None,
 ) -> ConnectivityBatchResult:
     """Interleave per-check hierarchy walk with parallel text-COI workers (J-003/J-004)."""
-    from hierwalk.connect_artifacts import prepare_text_connect_request
-    from hierwalk.connectivity import _ConnectCoiHeartbeat, _resolve_connect_jobs
+    from hierwalk.connect.pipeline.artifacts import prepare_text_connect_request
+    from hierwalk.connect.session import _ConnectCoiHeartbeat, _resolve_connect_jobs
     from hierwalk.verification_timing import record_connect_check
 
     text_request = prepare_text_connect_request(request)
@@ -2715,7 +2715,7 @@ def _init_hierarchy_tsv_writers(
     do_text: bool,
     do_logical: bool,
 ) -> None:
-    from hierwalk.connect_artifacts import IncrementalHierarchyTsvWriter
+    from hierwalk.connect.pipeline.artifacts import IncrementalHierarchyTsvWriter
 
     if do_text:
         writer = IncrementalHierarchyTsvWriter(
@@ -3262,7 +3262,7 @@ def run_path_walk_connect(
     text-COI in parallel (shared ``mod_cache``); pipeline mode interleaves
     per-check hierarchy with connect workers when ``connect_jobs`` > 1.
     """
-    from hierwalk.connectivity import _resolve_connect_jobs
+    from hierwalk.connect.session import _resolve_connect_jobs
     from hierwalk.perf import connect_jobs_from_env
     defines = dict(fl.defines)
     defines.update(extra_defines or {})
@@ -3398,7 +3398,7 @@ def run_path_walk_connect(
                 rows=walk_rows,
             ),
         )
-        from hierwalk.connect_artifacts import (
+        from hierwalk.connect.pipeline.artifacts import (
             apply_connect_logical_phase,
             connect_output_paths,
             format_connect_hierarchy_tsv,

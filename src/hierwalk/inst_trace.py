@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Dict, IO, List, Mapping, Optional, Sequence, Set, Tuple
 
 from hierwalk.cone import ConeBoundary, ConeResult, fanin_cone, fanout_cone
-from hierwalk.connect_endpoints import resolve_endpoint
+from hierwalk.connect.shared.endpoints import resolve_endpoint
 from hierwalk.index import DesignIndex
 from hierwalk.models import FlatRow, PortInfo
 from hierwalk.params import resolve_param_map

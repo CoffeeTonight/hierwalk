@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from hierwalk.cli import _build_parser
-from hierwalk.connect_request import try_parse_connect_request_json
+from hierwalk.connect.shared.request import try_parse_connect_request_json
 from hierwalk.run_request import (
     merge_options_from_connect_batch_json,
     resolve_effective_run_mode,

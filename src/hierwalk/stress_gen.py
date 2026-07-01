@@ -7,7 +7,7 @@ import textwrap
 from dataclasses import dataclass, field
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
-from hierwalk.connect_request import (
+from hierwalk.connect.shared.request import (
     ConnectivityCheck,
     ConnectivityRequest,
     connect_request_to_json,
@@ -1307,7 +1307,7 @@ def run_stress_trial(
     import tempfile
     from pathlib import Path
 
-    from hierwalk.connectivity import check_connectivity
+    from hierwalk.connect.session import check_connectivity
     from hierwalk.elab import elaborate
     from hierwalk.index import DesignIndex
 

@@ -7,9 +7,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, FrozenSet, IO, List, Mapping, Optional, Sequence, Set, Tuple
 
-from hierwalk.connect_endpoints import _module_index
-from hierwalk.connect_scan import ModuleConnectIndex, net_representative
-from hierwalk.connectivity import resolve_endpoint
+from hierwalk.connect.shared.endpoints import _module_index
+from hierwalk.connect.logical.scan import ModuleConnectIndex, net_representative
+from hierwalk.connect.session import resolve_endpoint
 from hierwalk.index import DesignIndex
 from hierwalk.models import FlatRow
 from hierwalk.trace_stop import TraceStopPolicy, trace_stop_boundary_kind

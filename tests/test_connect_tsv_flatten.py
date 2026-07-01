@@ -5,8 +5,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from hierwalk.connect_request import parse_connect_request_json
-from hierwalk.connectivity import (
+from hierwalk.connect.shared.request import parse_connect_request_json
+from hierwalk.connect.session import (
     flatten_connect_results,
     format_connect_results_tsv,
     run_connectivity_request,

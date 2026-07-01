@@ -497,7 +497,7 @@ def run_vuln_trial(*, seed: Optional[int] = None) -> Tuple[VulnDesign, VulnTrial
     import tempfile
     from pathlib import Path
 
-    from hierwalk.connectivity import check_connectivity
+    from hierwalk.connect.session import check_connectivity
     from hierwalk.elab import elaborate
     from hierwalk.index import DesignIndex
 

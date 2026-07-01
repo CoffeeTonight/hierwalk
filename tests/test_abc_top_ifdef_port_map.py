@@ -8,7 +8,7 @@ from pathlib import Path
 
 from _env import subprocess_env as _subprocess_env
 
-from hierwalk.connect_scan import instance_port_maps, prepare_connect_body
+from hierwalk.connect.logical.scan import instance_port_maps, prepare_connect_body
 from hierwalk.index import scan_preprocessed
 from hierwalk.inst_scan import slim_body_for_instance_scan
 from hierwalk.preprocess import apply_ifdef_filter, clear_include_unit_cache, preprocess_file_for_index

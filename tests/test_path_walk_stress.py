@@ -6,7 +6,7 @@ import re
 
 import pytest
 
-from hierwalk.connect_request import ConnectivityRequest
+from hierwalk.connect.shared.request import ConnectivityRequest
 from hierwalk.filelist import parse_filelist
 from hierwalk.path_walk import run_path_walk_connect
 from hierwalk.path_walk_stress_gen import (

@@ -8,7 +8,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
-from hierwalk.connect_request import (
+from hierwalk.connect.shared.request import (
     ConnectivityRequest,
     load_connect_request,
     parse_connect_request_json,

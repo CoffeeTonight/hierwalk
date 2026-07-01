@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from hierwalk.connect_request import (
+from hierwalk.connect.shared.request import (
     ConnectivityCheck,
     ConnectivityRequest,
     parse_connect_request_json,

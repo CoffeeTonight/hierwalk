@@ -1,0 +1,297 @@
+"""Text-conn pair checks (grep pass, not propagation)."""
+
+from __future__ import annotations
+
+import threading
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+
+from hierwalk.connect.shared.endpoints import _prune_rows_lca
+from hierwalk.connect.shared.modes import _has_port, _is_ancestor, _mode
+from hierwalk.connect.shared.resolve_cache import (
+    EndpointResolveCache,
+    resolve_endpoint_cached,
+)
+from hierwalk.connect.text.dedup import (
+    fanout_text_result,
+    text_dedup_key,
+)
+from hierwalk.connect.text.index import TextGrepCache
+from hierwalk.connect.text.walk import (
+    bidirectional_text_grep,
+    forward_text_grep_to_scope,
+    text_connect_note,
+)
+from hierwalk.connect.logical.walk_log import build_walk_notes
+from hierwalk.index import DesignIndex
+from hierwalk.models import ConnectEndpoint, ConnectResult, ElabIndex, FlatRow
+
+
+def connect_pair_text(
+    endpoint_a: str,
+    endpoint_b: str,
+    *,
+    rows: Sequence[FlatRow],
+    index: DesignIndex,
+    top: str,
+    effective_defines: Mapping[str, str],
+    trace: bool,
+    strict_generate: bool,
+    ff_barrier: bool,
+    over_approximate_if: Optional[bool],
+    text_grep_cache: TextGrepCache,
+    param_ctx_cache: Dict[str, Mapping[str, str]],
+    check_id: str,
+    elab_index: Optional[ElabIndex],
+    rows_by_path: Optional[Mapping[str, FlatRow]],
+    endpoint_cache: Optional[EndpointResolveCache] = None,
+    endpoint_cache_lock: Optional[threading.Lock] = None,
+) -> ConnectResult:
+    """
+    Text-conn: name grep only — not whether a value actually propagates.
+
+    ``assign a = b * 0`` passes text-conn because *b* appears on the RHS.
+    Logical-conn applies constant-fold / tie-off masks and reports disconnect.
+    """
+    lookup = (
+        rows_by_path
+        if rows_by_path is not None
+        else (elab_index.rows_by_path if elab_index is not None else None)
+    )
+    ep_a, err_a = resolve_endpoint_cached(
+        endpoint_a,
+        rows,
+        index,
+        top=top,
+        rows_by_path=lookup,
+        cache=endpoint_cache,
+        cache_lock=endpoint_cache_lock,
+    )
+    ep_b, err_b = resolve_endpoint_cached(
+        endpoint_b,
+        rows,
+        index,
+        top=top,
+        rows_by_path=lookup,
+        cache=endpoint_cache,
+        cache_lock=endpoint_cache_lock,
+    )
+    errors = list(err_a) + list(err_b)
+
+    if errors:
+        mode = _mode(ep_a, ep_b) if ep_a.module and ep_b.module else "unknown"
+        return ConnectResult(
+            ep_a,
+            ep_b,
+            False,
+            mode,
+            errors=errors,
+            check_id=check_id,
+        )
+
+    if _has_port(ep_a) and not ep_a.port_found:
+        return ConnectResult(
+            ep_a, ep_b, False, _mode(ep_a, ep_b), errors=errors, check_id=check_id
+        )
+    if _has_port(ep_b) and not ep_b.port_found:
+        return ConnectResult(
+            ep_a, ep_b, False, _mode(ep_a, ep_b), errors=errors, check_id=check_id
+        )
+
+    pruned = _prune_rows_lca(rows, ep_a.inst_path, ep_b.inst_path)
+    mode = _mode(ep_a, ep_b)
+
+    if mode == "port-port":
+        start = (ep_a.inst_path, ep_a.port_name or "")
+        goal = (ep_b.inst_path, ep_b.port_name or "")
+        ok, hops, mod_n, diag = bidirectional_text_grep(
+            start,
+            goal,
+            rows=pruned,
+            index=index,
+            top=top,
+            defines=effective_defines,
+            trace=trace,
+            strict_generate=strict_generate,
+            over_approximate_if=over_approximate_if,
+            grep_cache=text_grep_cache,
+            param_ctx_cache=param_ctx_cache,
+            elab_index=elab_index,
+        )
+        walk_notes: List[str] = []
+        if not ok and diag is not None:
+            walk_notes = build_walk_notes(
+                diag,
+                rows_by_path=lookup or {},
+                start=start,
+                goal=goal,
+            )
+        return ConnectResult(
+            ep_a,
+            ep_b,
+            ok,
+            mode,
+            hops=hops,
+            errors=errors,
+            note=text_connect_note(ok, mod_n),
+            check_id=check_id,
+            walk_notes=walk_notes,
+            coi_walk=diag,
+        )
+
+    if mode == "port-hierarchy":
+        port_ep = ep_a if _has_port(ep_a) else ep_b
+        hier_ep = ep_b if _has_port(ep_a) else ep_a
+        start = (port_ep.inst_path, port_ep.port_name or "")
+        ok, hops, mod_n, diag = forward_text_grep_to_scope(
+            start,
+            hier_ep.inst_path,
+            rows=pruned,
+            index=index,
+            top=top,
+            defines=effective_defines,
+            trace=trace,
+            strict_generate=strict_generate,
+            over_approximate_if=over_approximate_if,
+            grep_cache=text_grep_cache,
+            param_ctx_cache=param_ctx_cache,
+            elab_index=elab_index,
+        )
+        walk_notes: List[str] = []
+        if not ok and diag is not None:
+            walk_notes = build_walk_notes(
+                diag,
+                rows_by_path=lookup or {},
+                start=start,
+                goal=(hier_ep.inst_path, ""),
+            )
+        return ConnectResult(
+            ep_a,
+            ep_b,
+            ok,
+            mode,
+            hops=hops,
+            errors=errors,
+            note=text_connect_note(ok, mod_n, hier=True),
+            check_id=check_id,
+            walk_notes=walk_notes,
+            coi_walk=diag,
+        )
+
+    return ConnectResult(
+        ep_a,
+        ep_b,
+        ep_a.inst_path == ep_b.inst_path
+        or _is_ancestor(ep_a.inst_path, ep_b.inst_path)
+        or _is_ancestor(ep_b.inst_path, ep_a.inst_path),
+        "hierarchy-hierarchy",
+        errors=errors,
+        note="same or ancestor/descendant (no port trace)",
+        check_id=check_id,
+    )
+
+
+_connect_pair_text = connect_pair_text
+
+
+def connect_pair_text_deduped(
+    endpoint_a: str,
+    endpoint_b: str,
+    *,
+    rows: Sequence[FlatRow],
+    index: DesignIndex,
+    top: str,
+    effective_defines: Mapping[str, str],
+    trace: bool,
+    strict_generate: bool,
+    ff_barrier: bool,
+    over_approximate_if: Optional[bool],
+    text_grep_cache: TextGrepCache,
+    param_ctx_cache: Dict[str, Mapping[str, str]],
+    check_id: str,
+    elab_index: Optional[ElabIndex],
+    rows_by_path: Mapping[str, FlatRow],
+    dedup_cache: Dict[Tuple[Any, ...], ConnectResult],
+    dedup_stats: List[int],
+    dedup_lock: Optional[threading.Lock] = None,
+    endpoint_cache: Optional[EndpointResolveCache] = None,
+    endpoint_cache_lock: Optional[threading.Lock] = None,
+) -> ConnectResult:
+    lookup = rows_by_path
+    ep_a, err_a = resolve_endpoint_cached(
+        endpoint_a,
+        rows,
+        index,
+        top=top,
+        rows_by_path=lookup,
+        cache=endpoint_cache,
+        cache_lock=endpoint_cache_lock,
+    )
+    ep_b, err_b = resolve_endpoint_cached(
+        endpoint_b,
+        rows,
+        index,
+        top=top,
+        rows_by_path=lookup,
+        cache=endpoint_cache,
+        cache_lock=endpoint_cache_lock,
+    )
+    errors = list(err_a) + list(err_b)
+    key = text_dedup_key(ep_a, ep_b, errors)
+    dedup_stats[0] += 1
+
+    if dedup_lock is not None:
+        with dedup_lock:
+            hit = dedup_cache.get(key)
+    else:
+        hit = dedup_cache.get(key)
+    if hit is not None:
+        return fanout_text_result(
+            hit,
+            spec_a=endpoint_a,
+            spec_b=endpoint_b,
+            ep_a=ep_a,
+            ep_b=ep_b,
+            check_id=check_id,
+        )
+
+    result = connect_pair_text(
+        endpoint_a,
+        endpoint_b,
+        rows=rows,
+        index=index,
+        top=top,
+        effective_defines=effective_defines,
+        trace=trace,
+        strict_generate=strict_generate,
+        ff_barrier=ff_barrier,
+        over_approximate_if=over_approximate_if,
+        text_grep_cache=text_grep_cache,
+        param_ctx_cache=param_ctx_cache,
+        check_id=check_id,
+        elab_index=elab_index,
+        rows_by_path=rows_by_path,
+        endpoint_cache=endpoint_cache,
+        endpoint_cache_lock=endpoint_cache_lock,
+    )
+
+    if dedup_lock is not None:
+        with dedup_lock:
+            existing = dedup_cache.get(key)
+            if existing is not None:
+                return fanout_text_result(
+                    existing,
+                    spec_a=endpoint_a,
+                    spec_b=endpoint_b,
+                    ep_a=ep_a,
+                    ep_b=ep_b,
+                    check_id=check_id,
+                )
+            dedup_cache[key] = result
+            dedup_stats[1] += 1
+    else:
+        dedup_cache[key] = result
+        dedup_stats[1] += 1
+    return result
+
+
+_connect_pair_text_deduped = connect_pair_text_deduped

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from hierwalk.connect_artifacts import (
+from hierwalk.connect.pipeline.artifacts import (
     HierarchyEvidenceRow,
     SignalTailRecord,
     build_connect_results_from_request,
@@ -14,10 +14,10 @@ from hierwalk.connect_artifacts import (
     normalize_connect_results,
     normalize_hierarchy_kind,
 )
-from hierwalk.connect_expand import build_expand_meta, parse_endpoint_elements
-from hierwalk.connect_request import ConnectivityCheck, ConnectivityRequest
-from hierwalk.connectivity import ConnectivitySession, format_connect_results_report
-from hierwalk.connect_endpoints import classify_signal_tail_kind
+from hierwalk.connect.shared.expand import build_expand_meta, parse_endpoint_elements
+from hierwalk.connect.shared.request import ConnectivityCheck, ConnectivityRequest
+from hierwalk.connect.session import ConnectivitySession, format_connect_results_report
+from hierwalk.connect.shared.endpoints import classify_signal_tail_kind
 from hierwalk.elab import elaborate
 from hierwalk.index import DesignIndex
 

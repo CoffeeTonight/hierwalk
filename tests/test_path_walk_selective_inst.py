@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from hierwalk.connect_request import ConnectivityCheck, ConnectivityRequest
+from hierwalk.connect.shared.request import ConnectivityCheck, ConnectivityRequest
 from hierwalk.filelist import parse_filelist
 from hierwalk.path_walk import (
     build_path_walk_state,
@@ -248,7 +248,7 @@ def test_empty_param_ctx_skips_path_refine_on_signal_tail(tmp_path: Path, monkey
 
     monkeypatch.setattr(pr, "refine_param_ctx_for_path", traced_refine)
     monkeypatch.setattr(
-        "hierwalk.connect_endpoints.refine_param_ctx_for_path",
+        "hierwalk.connect.shared.endpoints.refine_param_ctx_for_path",
         traced_refine,
     )
 

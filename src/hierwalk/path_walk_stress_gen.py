@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-from hierwalk.connect_request import ConnectivityCheck, ConnectivityRequest
+from hierwalk.connect.shared.request import ConnectivityCheck, ConnectivityRequest
 
 SET_IDS: Tuple[str, ...] = ("A", "B", "C", "D")
 CROSS_ARMS: Tuple[str, ...] = ("A", "B")
@@ -844,7 +844,7 @@ def write_stress_artifacts(root: Path) -> Tuple[Path, Path, PathWalkStressDesign
         encoding="utf-8",
     )
     req_path = root / "pw_stress.connect.json"
-    from hierwalk.connect_request import write_connect_request
+    from hierwalk.connect.shared.request import write_connect_request
 
     write_connect_request(req_path, build_connect_request(design))
     return fl, req_path, design

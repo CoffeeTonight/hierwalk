@@ -8,7 +8,7 @@ import pytest
 
 import subprocess
 
-from hierwalk.connect_request import load_connect_request
+from hierwalk.connect.shared.request import load_connect_request
 from hierwalk.stress_gen import (
     EXTREME_CONFIG,
     STANDARD_CONFIG,

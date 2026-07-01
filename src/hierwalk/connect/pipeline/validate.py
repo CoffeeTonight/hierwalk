@@ -17,9 +17,10 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
-from hierwalk.connect_endpoints import parse_connect_endpoint
-from hierwalk.connect_request import ConnectivityCheck, ConnectivityRequest, load_connect_request
-from hierwalk.connectivity import ConnectResult, ConnectivityBatchResult, run_connectivity_request
+from hierwalk.connect.session import ConnectivityBatchResult, run_connectivity_request
+from hierwalk.models import ConnectResult
+from hierwalk.connect.shared.endpoints import parse_connect_endpoint
+from hierwalk.connect.shared.request import ConnectivityCheck, ConnectivityRequest, load_connect_request
 from hierwalk.elab import elaborate
 from hierwalk.filelist import parse_filelist
 from hierwalk.index import DesignIndex

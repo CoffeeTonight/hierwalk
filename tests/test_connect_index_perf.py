@@ -8,12 +8,12 @@ from pathlib import Path
 import pytest
 
 from hierwalk.cache import set_active_work_dir
-from hierwalk.connect_endpoints import (
+from hierwalk.connect.shared.endpoints import (
     _module_index,
     _port_decl_bit_indices,
     _port_decl_md_suffixes,
 )
-from hierwalk.connect_scan import (
+from hierwalk.connect.logical.scan import (
     ModuleConnectIndex,
     _collect_const_assigns_fixed,
     _net_base_in_assign_regex_fast,
@@ -27,7 +27,7 @@ from hierwalk.connect_scan import (
     net_representative,
     split_statements,
 )
-from hierwalk.connectivity import ConnectivitySession
+from hierwalk.connect.session import ConnectivitySession
 from hierwalk.elab import elaborate
 from hierwalk.index import DesignIndex, ModuleRecord
 from hierwalk.inst_scan import find_hierarchy_instance
@@ -357,7 +357,7 @@ def test_bind_memo_invalidates_when_bind_file_changes(tmp_path: Path):
         encoding="utf-8",
     )
     index = DesignIndex.build({str(rtl): rtl.read_text(encoding="utf-8")})
-    from hierwalk.connect_endpoints import _resolve_module_index_key
+    from hierwalk.connect.shared.endpoints import _resolve_module_index_key
 
     key1, binds1 = _resolve_module_index_key(
         index, "top", {}, None, ff_barrier=False, over_approximate_if=True

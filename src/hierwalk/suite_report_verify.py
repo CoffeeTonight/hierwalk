@@ -15,13 +15,13 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from dataclasses import replace
 
 from hierwalk.cli_execute import execute_run
-from hierwalk.connect_artifacts import (
+from hierwalk.connect.pipeline.artifacts import (
     archive_run_config_sources,
     connect_output_paths,
     hierarchy_output_basename,
     work_dir_artifact_path,
 )
-from hierwalk.connect_expand import hierarchy_endpoint_specs, parse_list_display_spec
+from hierwalk.connect.shared.expand import hierarchy_endpoint_specs, parse_list_display_spec
 from hierwalk.cache import resolve_run_work_dir, work_base_dir
 from hierwalk.run_request import RUN_CONE_TRACE, RUN_CONN_CHECK, RUN_IO_TRACE, RunConfig
 from hierwalk.suite_conn_policy import CONN_VERDICT_SKIP_IDS

@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
-from hierwalk.connect_expand import (
+from hierwalk.connect.shared.expand import (
     CheckExpandMeta,
     EndpointValue,
     build_expand_meta,

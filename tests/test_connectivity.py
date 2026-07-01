@@ -7,7 +7,7 @@ import subprocess
 from pathlib import Path
 import pytest
 
-from hierwalk.connect_scan import (
+from hierwalk.connect.logical.scan import (
     build_module_connect_index,
     extract_signal_roots,
     net_representative,
@@ -17,15 +17,13 @@ from hierwalk.connect_scan import (
     split_statements,
 )
 from hierwalk.generate_fold import fold_generate_regions
-from hierwalk import connect_endpoints as endpoints_mod
-from hierwalk import connectivity as connectivity_mod
-from hierwalk.connect_request import (
+from hierwalk.connect.shared.request import (
     ConnectivityCheck,
     ConnectivityRequest,
     load_connect_request,
     parse_connect_request_json,
 )
-from hierwalk.connectivity import (
+from hierwalk.connect.session import (
     ConnectivitySession,
     check_connectivity,
     check_connectivity_batch,
@@ -551,7 +549,7 @@ def test_empty_module_port_passthrough(tmp_path):
 
 
 def test_instance_port_maps_multi_dim_array():
-    from hierwalk.connect_scan import instance_port_maps
+    from hierwalk.connect.logical.scan import instance_port_maps
 
     body = """
     md2d_leaf g[0:1][0:2] (.clk(clk), .probe_in(probe_in), .probe_out(leaf_out));
@@ -618,7 +616,7 @@ def test_connectivity_md2_port_per_slice(tmp_path: Path):
 
 
 def test_nested_bracket_select_token_parse():
-    from hierwalk.connect_scan import extract_connect_nodes
+    from hierwalk.connect.logical.scan import extract_connect_nodes
 
     nodes = extract_connect_nodes(
         "leaf_arr[1][LEAF_LP[1:0]]",
@@ -628,12 +626,18 @@ def test_nested_bracket_select_token_parse():
 
 
 def test_constant_tieoff_masks_do_not_connect_src():
-    from hierwalk.connect_scan import _effective_assign_rhs_roots
+    from hierwalk.connect.logical.scan import (
+        _effective_assign_rhs_roots,
+        _grep_assign_rhs_roots,
+    )
 
     assert not _effective_assign_rhs_roots("1'b0")
     assert not _effective_assign_rhs_roots("src & 1'b0")
     assert not _effective_assign_rhs_roots("src ? 1'b0 : 1'b0")
+    assert not _effective_assign_rhs_roots("src * 0")
     assert "src" in _effective_assign_rhs_roots("1'b0 | src")
+    assert "src" in _grep_assign_rhs_roots("src & 1'b0")
+    assert "src" in _grep_assign_rhs_roots("src * 0")
     body = """
     assign dst = src & 1'b0;
     """
@@ -1386,7 +1390,7 @@ def test_connectivity_session_reuses_mod_cache(tmp_path: Path):
     index, rows = _index_and_rows(v, tmp_path)
     session = ConnectivitySession(rows=rows, index=index, top="top")
 
-    from hierwalk.connect_scan import (
+    from hierwalk.connect.logical.scan import (
         clear_module_connect_index_cache,
         module_connect_index_stats,
     )
@@ -1492,7 +1496,7 @@ def test_run_connectivity_request_missing_hierarchy(tmp_path: Path):
 
 
 def test_parse_connect_pairs_json_shapes():
-    from hierwalk.connectivity import parse_connect_pairs_json
+    from hierwalk.connect.session import parse_connect_pairs_json
 
     assert parse_connect_pairs_json(
         [["top.a", "top.b"], ["top.c", "top.d"]]

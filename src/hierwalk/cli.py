@@ -49,8 +49,8 @@ from hierwalk.progress import ProgressHeartbeat, ProgressReporter, progress_call
 from hierwalk.report import RunReport, default_log_path, emit_run_report
 from hierwalk.path_chain import attach_path_chains, format_path_chain_compact
 from hierwalk.path_search import search_hierarchy_path
-from hierwalk.connect_request import ConnectivityCheck, ConnectivityRequest
-from hierwalk.connectivity import (
+from hierwalk.connect.shared.request import ConnectivityCheck, ConnectivityRequest
+from hierwalk.connect.session import (
     check_connectivity,
     format_connect_results_tsv,
     print_connect_trace_reports,

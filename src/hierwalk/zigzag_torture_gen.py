@@ -14,8 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from hierwalk.connect_expand import build_expand_meta
-from hierwalk.connect_request import ConnectivityCheck, ConnectivityRequest
+from hierwalk.connect.shared.expand import build_expand_meta
+from hierwalk.connect.shared.request import ConnectivityCheck, ConnectivityRequest
 from hierwalk.suite_conn_policy import CONN_VERDICT_SKIP_IDS
 
 TOP = "zz_torture_top"
@@ -400,6 +400,10 @@ def _deep_level_body(lvl: int) -> str:
             assign merge_tap = fork_main[1][2] | shallow_return[1][2];
             assign merge_quad = fork_main[1][2] | shallow_return[1][2]
                               | fork_main[0][0] | shallow_return[0][0];
+            wire grep_zero_a, grep_zero_b;
+            assign grep_zero_a = grep_zero_b * 0;
+            wire grep_mask_src, grep_mask_dst;
+            assign grep_mask_dst = grep_mask_src & 1'b0;
             """
         ).strip()
 
@@ -1984,7 +1988,7 @@ def write_stress_artifacts(root: Path) -> Tuple[Path, Path, ZigzagTortureDesign]
         encoding="utf-8",
     )
     req_path = root / "zz_torture.connect.json"
-    from hierwalk.connect_request import write_connect_request
+    from hierwalk.connect.shared.request import write_connect_request
 
     write_connect_request(req_path, build_connect_request(design))
     return fl, req_path, design

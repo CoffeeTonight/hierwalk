@@ -8,19 +8,19 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Sequence, Set, Union
 
-from hierwalk.connect_expand import (
-    aggregate_connect_results,
-    expand_check_to_pairs,
-    hierarchy_endpoint_specs,
-)
-from hierwalk.connect_request import ConnectivityCheck, ConnectivityRequest
-from hierwalk.connectivity import (
+from hierwalk.connect.session import (
     ConnectivitySession,
     flatten_connect_results,
     flatten_connect_results_for_output,
     format_connect_results_tsv,
 )
-from hierwalk.connect_expand import parse_endpoint_elements
+from hierwalk.connect.shared.expand import (
+    aggregate_connect_results,
+    expand_check_to_pairs,
+    hierarchy_endpoint_specs,
+    parse_endpoint_elements,
+)
+from hierwalk.connect.shared.request import ConnectivityCheck, ConnectivityRequest
 from hierwalk.hierarchy_log import path_spine_prefixes
 from hierwalk.index import DesignIndex
 from hierwalk.models import ConnectEndpoint, ConnectResult, FlatRow
@@ -521,7 +521,7 @@ def build_connect_results_from_request(
     coi_error: str = "",
 ) -> List[ConnectResult]:
     """Synthesize per-check rows from JSON endpoints when COI produced none."""
-    from hierwalk.connect_endpoints import resolve_endpoint
+    from hierwalk.connect.shared.endpoints import resolve_endpoint
 
     lookup = session.rows_by_path
     out: List[ConnectResult] = []
@@ -755,7 +755,7 @@ def _resolve_endpoint_for_spec(
     top: str,
     rows: Sequence[FlatRow],
 ) -> ConnectEndpoint:
-    from hierwalk.connect_endpoints import resolve_endpoint
+    from hierwalk.connect.shared.endpoints import resolve_endpoint
 
     ep, _errors = resolve_endpoint(
         spec_path,
@@ -791,7 +791,7 @@ def _endpoint_signal_kind(
     index: Optional[DesignIndex] = None,
     top: str = "",
 ) -> str:
-    from hierwalk.connect_endpoints import classify_signal_tail_kind
+    from hierwalk.connect.shared.endpoints import classify_signal_tail_kind
 
     tail = (ep.port_name or "").strip()
     if not tail and ep.spec and "." in ep.spec:
@@ -910,7 +910,7 @@ def collect_hierarchy_evidence_for_check(
     top: str = "",
 ) -> List[HierarchyEvidenceRow]:
     """Hierarchy hit/miss rows for one check right after path-walk (no COI yet)."""
-    from hierwalk.connect_expand import _placeholder_endpoint
+    from hierwalk.connect.shared.expand import _placeholder_endpoint
 
     pairs = expand_check_to_pairs(
         chk.endpoint_a,
@@ -1286,7 +1286,7 @@ def format_connect_results_report(
     """
     Hierarchy-first connect analysis: inst/port/wire/reg evidence, then COI verdict.
     """
-    from hierwalk.connectivity import (
+    from hierwalk.connect.session import (
         _connected_logical_value,
         _connected_text_value,
     )

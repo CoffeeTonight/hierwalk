@@ -5,8 +5,8 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from hierwalk.connectivity import check_connectivity
-from hierwalk.connect_endpoints import (
+from hierwalk.connect.session import check_connectivity
+from hierwalk.connect.shared.endpoints import (
     is_module_local_signal_name,
     net_exists_in_module_fast,
     parse_connect_endpoint,
@@ -15,7 +15,7 @@ from hierwalk.connect_endpoints import (
 from hierwalk.elab import elaborate
 from hierwalk.index import DesignIndex
 from hierwalk.path_walk import run_path_walk_connect
-from hierwalk.connect_request import ConnectivityCheck, ConnectivityRequest
+from hierwalk.connect.shared.request import ConnectivityCheck, ConnectivityRequest
 from hierwalk.filelist import parse_filelist
 
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import io
 from pathlib import Path
 
-from hierwalk.connect_request import ConnectivityCheck, ConnectivityRequest
+from hierwalk.connect.shared.request import ConnectivityCheck, ConnectivityRequest
 from hierwalk.filelist import parse_filelist
 from hierwalk.path_walk import run_path_walk_connect
 from hierwalk.path_walk_db import RESOLVE_CONFIDENT, RESOLVE_RECOVERY, PathWalkModuleDb

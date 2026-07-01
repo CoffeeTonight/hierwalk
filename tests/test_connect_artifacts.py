@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from hierwalk.connect_artifacts import (
+from hierwalk.connect.pipeline.artifacts import (
     HierarchyEvidenceRow,
     IncrementalHierarchyTsvWriter,
     any_text_conn_hit,
@@ -23,8 +23,8 @@ from hierwalk.connect_artifacts import (
     verification_output_path,
     write_connect_phase_tsv,
 )
-from hierwalk.connectivity import format_connect_results_tsv
-from hierwalk.connect_request import ConnectivityCheck, ConnectivityRequest
+from hierwalk.connect.session import format_connect_results_tsv
+from hierwalk.connect.shared.request import ConnectivityCheck, ConnectivityRequest
 from hierwalk.filelist import parse_filelist
 from hierwalk.models import ConnectEndpoint, ConnectResult, FlatRow
 from hierwalk.path_walk import run_path_walk_connect
@@ -275,8 +275,8 @@ def test_hierarchy_port_rtl_uses_longest_walked_inst_prefix(tmp_path: Path):
 
 
 def test_hierarchy_evidence_for_check_dedup_shared_b_endpoint(tmp_path: Path):
-    from hierwalk.connect_artifacts import collect_hierarchy_evidence_for_check
-    from hierwalk.connect_request import ConnectivityCheck
+    from hierwalk.connect.pipeline.artifacts import collect_hierarchy_evidence_for_check
+    from hierwalk.connect.shared.request import ConnectivityCheck
     from hierwalk.elab import elaborate
     from hierwalk.index import DesignIndex
 
@@ -291,7 +291,7 @@ def test_hierarchy_evidence_for_check_dedup_shared_b_endpoint(tmp_path: Path):
     index = DesignIndex.build({str(rtl): text})
     _, rows = elaborate(index, "top")
     rows_by_path = {row.full_path: row for row in rows}
-    from hierwalk.connect_request import parse_connect_request_json
+    from hierwalk.connect.shared.request import parse_connect_request_json
 
     chk = parse_connect_request_json(
         {
@@ -328,7 +328,7 @@ def test_hierarchy_evidence_for_check_dedup_shared_b_endpoint(tmp_path: Path):
 
 
 def test_compact_hierarchy_final_tsv_keeps_deepest_hit_only(tmp_path: Path):
-    from hierwalk.connect_artifacts import (
+    from hierwalk.connect.pipeline.artifacts import (
         collect_hierarchy_evidence,
         compact_hierarchy_evidence,
         write_hierarchy_evidence_tsv,
@@ -372,7 +372,7 @@ def test_compact_hierarchy_final_tsv_keeps_deepest_hit_only(tmp_path: Path):
 
 
 def test_resolve_hierarchy_row_identity_side():
-    from hierwalk.connect_request import ConnectivityCheck
+    from hierwalk.connect.shared.request import ConnectivityCheck
 
     ctx = build_hierarchy_row_context(
         ConnectivityCheck("top.u_a.sig", "top.clk", check_id="t")
@@ -382,7 +382,7 @@ def test_resolve_hierarchy_row_identity_side():
 
 
 def test_compact_hierarchy_evidence_one_final_row_per_side():
-    from hierwalk.connect_artifacts import (
+    from hierwalk.connect.pipeline.artifacts import (
         HierarchyEvidenceRow,
         compact_hierarchy_evidence,
     )
@@ -402,7 +402,7 @@ def test_compact_hierarchy_evidence_one_final_row_per_side():
 
 
 def test_compact_hierarchy_evidence_drops_redundant_inst_hits():
-    from hierwalk.connect_artifacts import (
+    from hierwalk.connect.pipeline.artifacts import (
         HierarchyEvidenceRow,
         compact_hierarchy_evidence,
     )
@@ -615,7 +615,7 @@ def test_write_connect_phase_tsv_roundtrip(tmp_path: Path):
 
 
 def test_reorder_connect_checks_by_b_endpoint():
-    from hierwalk.connect_request import ConnectivityCheck, ConnectivityRequest
+    from hierwalk.connect.shared.request import ConnectivityCheck, ConnectivityRequest
 
     req = ConnectivityRequest(
         checks=(
@@ -631,7 +631,7 @@ def test_reorder_connect_checks_by_b_endpoint():
 
 
 def test_prepare_text_connect_request_is_stable():
-    from hierwalk.connect_request import ConnectivityCheck, ConnectivityRequest
+    from hierwalk.connect.shared.request import ConnectivityCheck, ConnectivityRequest
 
     req = ConnectivityRequest(
         checks=(ConnectivityCheck("top.miss", "top.b", check_id="m"),),
@@ -712,7 +712,7 @@ def test_reorder_connect_results_to_checks_restores_request_order():
 
 
 def test_default_verification_artifact_names():
-    from hierwalk.connect_artifacts import default_verification_artifact_name
+    from hierwalk.connect.pipeline.artifacts import default_verification_artifact_name
 
     assert default_verification_artifact_name("run_conn_check") == "conn.tsv"
     assert default_verification_artifact_name("run_io_trace") == "io_trace.tsv"

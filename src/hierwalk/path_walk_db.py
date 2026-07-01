@@ -482,7 +482,7 @@ class PathWalkModuleDb:
         return self._cache_root
 
     def _compute_tier1_defines_stamp(self) -> Tuple[Any, ...]:
-        from hierwalk.connect_scan import sources_content_digest
+        from hierwalk.connect.logical.scan import sources_content_digest
 
         return (
             tuple(self._sources),
@@ -500,7 +500,7 @@ class PathWalkModuleDb:
         stamp = self._compute_tier1_defines_stamp()
         if self._tier1_defines_cache is not None and stamp == self._tier1_defines_stamp:
             return dict(self._tier1_defines_cache)
-        from hierwalk.connectivity import _effective_defines
+        from hierwalk.connect.session import _effective_defines
 
         merged = _effective_defines(self._index, self._defines, sources=self._sources)
         self._tier1_defines_cache = dict(merged)

@@ -432,7 +432,7 @@ def test_tier1_background_prefetch_warms_unwalked_files(tmp_path: Path, monkeypa
     fl = tmp_path / "filelist.f"
     fl.write_text("\n".join(str(p.resolve()) for p in files) + "\n", encoding="utf-8")
     flr = parse_filelist(str(fl), index_cwd=str(tmp_path))
-    from hierwalk.connect_request import ConnectivityCheck, ConnectivityRequest
+    from hierwalk.connect.shared.request import ConnectivityCheck, ConnectivityRequest
 
     request = ConnectivityRequest(
         checks=(ConnectivityCheck("target_parent.u_child", "target_parent.u_child"),),
@@ -461,7 +461,7 @@ def test_tier1_background_prefetch_off_by_default(tmp_path: Path, monkeypatch):
     fl = tmp_path / "filelist.f"
     fl.write_text(f"{stub.resolve()}\n{top.resolve()}\n", encoding="utf-8")
     flr = parse_filelist(str(fl), index_cwd=str(tmp_path))
-    from hierwalk.connect_request import ConnectivityCheck, ConnectivityRequest
+    from hierwalk.connect.shared.request import ConnectivityCheck, ConnectivityRequest
 
     request = ConnectivityRequest(
         checks=(ConnectivityCheck("top", "top"),),
@@ -579,7 +579,7 @@ def test_tier0_hides_ifdef_gated_module(tmp_path: Path):
 def test_path_walk_walks_through_dup_module_files(tmp_path: Path):
     fl_path, _right = _write_dup_module_design(tmp_path)
     fl = parse_filelist(str(fl_path), index_cwd=str(tmp_path))
-    from hierwalk.connect_request import ConnectivityCheck, ConnectivityRequest
+    from hierwalk.connect.shared.request import ConnectivityCheck, ConnectivityRequest
 
     request = ConnectivityRequest(
         checks=(ConnectivityCheck("top.u_parent.u_child.in", "top.u_parent.u_child.in"),),

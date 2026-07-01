@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
-from hierwalk.connect_scan import BindRecord
+from hierwalk.connect.logical.scan import BindRecord
 
 _cache_key_locks: Dict[Tuple[int, object], threading.Lock] = {}
 _cache_key_locks_guard = threading.Lock()
@@ -29,6 +29,7 @@ def _shared_cache_lock(cache: Dict, key: object) -> threading.Lock:
 
 
 ModuleIndexCacheKey = Tuple[str, str, str, str, str, bool, bool, bool]
+TextGrepIndexCacheKey = ModuleIndexCacheKey
 
 
 def _mod_cache_lock(
@@ -65,7 +66,7 @@ def make_module_index_cache_key(
     )
 
 from hierwalk.cache import _pickle_load, get_active_work_dir
-from hierwalk.connect_scan import (
+from hierwalk.connect.logical.scan import (
     ModuleConnectIndex,
     _clean_body,
     _collect_declared_net_names,
@@ -300,8 +301,12 @@ def wire_tail_exists_fast(
     if _net_base_declared_fast(body, base):
         return True
     if param_ctx:
-        return net_base_in_assign_probe(body, base, param_map=param_ctx)
-    return _net_base_in_assign_regex_fast(body, base)
+        if net_base_in_assign_probe(body, base, param_map=param_ctx):
+            return True
+        return net_base_in_port_map_probe(body, base, param_map=param_ctx)
+    if _net_base_in_assign_regex_fast(body, base):
+        return True
+    return _net_base_in_port_map_regex_fast(body, base)
 
 
 def _nearest_hierarchy_row(
@@ -635,7 +640,7 @@ def _net_exists_in_module(
     body = _module_body_for_row(index, row)
     if not body:
         return False
-    from hierwalk.connectivity import _effective_defines
+    from hierwalk.connect.session import _effective_defines
 
     eff = index.effective_defines()
     decl_widths = _port_decl_bit_indices(index, row.module, ctx, defines=eff)
@@ -688,7 +693,7 @@ def _explain_port_miss(
     ctx = _port_param_ctx(index, row, top)
     body = _module_body_for_row(index, row)
     if body:
-        from hierwalk.connectivity import _effective_defines
+        from hierwalk.connect.session import _effective_defines
 
         eff = index.effective_defines()
         decl_widths = _port_decl_bit_indices(index, row.module, ctx, defines=eff)

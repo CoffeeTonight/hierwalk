@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from hierwalk.connect_endpoints import _explain_hierarchy_miss
+from hierwalk.connect.shared.endpoints import _explain_hierarchy_miss
 from hierwalk.hierarchy_log import (
     format_hierarchy_row_line,
     format_row_provenance,
@@ -82,7 +82,7 @@ def test_scopes_from_hop_detail():
 
 
 def test_emit_connect_log_includes_success_endpoint_provenance(tmp_path):
-    from hierwalk.connectivity import emit_connect_trace_log
+    from hierwalk.connect.session import emit_connect_trace_log
     from hierwalk.hierarchy_log import format_endpoint_provenance_line
     from hierwalk.models import ConnectEndpoint, ConnectResult
 

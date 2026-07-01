@@ -24,6 +24,31 @@ hier-walk run.json -o out.tsv
 **EN** `checks.json` needs `top` and `checks: [{ "id", "a", "b" }, …]`. See `hier-walk --help-config` for all fields.  
 **KO** `checks.json`에는 `top`, `checks: [{ "id", "a", "b" }, …]`가 필요합니다. 전체 필드는 `hier-walk --help-config`.
 
+## Connect layout · connectivity 구조
+
+**EN** Structural connectivity lives under `hierwalk/connect/`:
+
+| Package | Role |
+|---------|------|
+| `connect/shared/` | Module find, preprocess, endpoint resolve, request/expand |
+| `connect/text/` | Text-conn: coarse RHS **name grep** (`text_grep_cache`, `text/walk.py`) |
+| `connect/logical/` | Logical-conn: bit-precise COI / constant-fold (`mod_cache`, `logical/search.py`) |
+| `connect/pipeline/` | Artifacts, validation |
+| `connect/session.py` | `ConnectivitySession` — `run_text_request` vs `run_request` |
+
+Text-conn asks “does this **name** appear on the RHS?” (`assign a = b * 0` → text passes).  
+Logical-conn asks “does the value **actually propagate**?” (same example → logical fails).
+
+**KO** 구조적 connectivity는 `hierwalk/connect/` 아래에 있습니다.
+
+| 패키지 | 역할 |
+|--------|------|
+| `connect/shared/` | 모듈 탐색, 전처리, endpoint resolve, request/expand |
+| `connect/text/` | Text-conn: RHS **이름 grep** (`text_grep_cache`, `text/walk.py`) |
+| `connect/logical/` | Logical-conn: 비트 정밀 COI / 상수 접기 (`mod_cache`) |
+| `connect/pipeline/` | 아티팩트, 검증 |
+| `connect/session.py` | `ConnectivitySession` — `run_text_request` vs `run_request` |
+
 ## Modes · 모드
 
 | Mode | EN | KO |

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from hierwalk.connect_scan import _md_suffixes_for_token, build_module_connect_index
-from hierwalk.connectivity import check_connectivity
+from hierwalk.connect.logical.scan import _md_suffixes_for_token, build_module_connect_index
+from hierwalk.connect.shared.request import ConnectivityCheck
+from hierwalk.connect.session import check_connectivity
 from hierwalk.elab import elaborate
 from hierwalk.index import DesignIndex
 
@@ -46,8 +47,8 @@ def test_build_module_connect_index_parametric_port_width(tmp_path: Path):
     assert "w_e" in idx.net_rep or any("w_e" in k for k in idx.net_rep)
 
 
-def test_parametric_braced_concat_text_conn_bit_precise(tmp_path: Path):
-    """Parametric ``[W-1:0]`` bus + ``{wa,wb,wc}`` must not collapse bits in text-conn."""
+def test_parametric_braced_concat_text_conn_coarse_grep(tmp_path: Path):
+    """Text grep: braced concat blooms to base — all legs may pass."""
     v = """
     module top #(
       parameter int W = 3
@@ -62,8 +63,8 @@ def test_parametric_braced_concat_text_conn_bit_precise(tmp_path: Path):
     rtl.write_text(v, encoding="utf-8")
     index = DesignIndex.build({str(rtl): v})
     _, rows = elaborate(index, "top")
-    from hierwalk.connect_request import parse_connect_request_json
-    from hierwalk.connectivity import ConnectivitySession
+    from hierwalk.connect.shared.request import parse_connect_request_json
+    from hierwalk.connect.session import ConnectivitySession
 
     req = parse_connect_request_json(
         {
@@ -85,9 +86,13 @@ def test_parametric_braced_concat_text_conn_bit_precise(tmp_path: Path):
         (sr.endpoint_a.spec, sr.endpoint_b.spec): sr.connected
         for sr in parent.sub_results
     }
-    assert by_pair[("top.wa", "top.wq")] is False
-    assert by_pair[("top.wc", "top.wq")] is False
+    assert by_pair[("top.wa", "top.wq")] is True
+    assert by_pair[("top.wc", "top.wq")] is True
     assert by_pair[("top.wb", "top.wq")] is True
+
+    session.resolve_param_dims = True
+    logical = session.check("top.wa", "top.wq")
+    assert logical.connected is False
 
 
 def test_text_conn_port_or_expr_does_not_bridge_operands(tmp_path: Path):
@@ -105,7 +110,7 @@ def test_text_conn_port_or_expr_does_not_bridge_operands(tmp_path: Path):
     rtl.write_text(v, encoding="utf-8")
     index = DesignIndex.build({str(rtl): v})
     _, rows = elaborate(index, "top")
-    from hierwalk.connectivity import ConnectivitySession
+    from hierwalk.connect.session import ConnectivitySession
 
     session = ConnectivitySession(
         rows=rows,
@@ -132,7 +137,7 @@ def test_text_conn_port_xor_expr_does_not_bridge_operands(tmp_path: Path):
     rtl.write_text(v, encoding="utf-8")
     index = DesignIndex.build({str(rtl): v})
     _, rows = elaborate(index, "top")
-    from hierwalk.connectivity import ConnectivitySession
+    from hierwalk.connect.session import ConnectivitySession
 
     session = ConnectivitySession(
         rows=rows,
@@ -159,7 +164,7 @@ def test_text_conn_port_xor_expr_keeps_operand_to_port(tmp_path: Path):
     rtl.write_text(v, encoding="utf-8")
     index = DesignIndex.build({str(rtl): v})
     _, rows = elaborate(index, "top")
-    from hierwalk.connectivity import ConnectivitySession
+    from hierwalk.connect.session import ConnectivitySession
 
     session = ConnectivitySession(
         rows=rows,
@@ -197,7 +202,7 @@ def test_text_conn_scalar_port_map_survives_slice_or_assign(tmp_path: Path):
     rtl.write_text(v, encoding="utf-8")
     index = DesignIndex.build({str(rtl): v})
     _, rows = elaborate(index, "top")
-    from hierwalk.connectivity import ConnectivitySession
+    from hierwalk.connect.session import ConnectivitySession
 
     session = ConnectivitySession(
         rows=rows,
@@ -211,8 +216,56 @@ def test_text_conn_scalar_port_map_survives_slice_or_assign(tmp_path: Path):
     assert session.check("top.chain_in[1][2]", "top.merge_tap").connected is True
 
 
-def test_text_conn_md_bus_slice_bit_precise(tmp_path: Path):
-    """Literal ``[i][j]`` assigns must not bloom-unwire other MD elements in text-conn."""
+def test_text_conn_fork_blackbox_without_child_inst_row(tmp_path: Path):
+    """Text grep crosses simple inst port maps when child inst is not hierarchy-walked."""
+    v = """
+    module zz_y_fork (
+      input  logic [2:0][3:0] din,
+      output logic [2:0][3:0] main_out,
+      output logic [2:0][3:0] decoy_out
+    );
+      assign main_out = din;
+      assign decoy_out = 12'b0;
+    endmodule
+    module top;
+      logic [2:0][3:0] chain_in, fork_main, merge_tap;
+      zz_y_fork u_fork (
+        .din(chain_in),
+        .main_out(fork_main),
+        .decoy_out()
+      );
+      assign merge_tap = fork_main[1][2];
+    endmodule
+    """
+    rtl = tmp_path / "top.v"
+    rtl.write_text(v, encoding="utf-8")
+    index = DesignIndex.build({str(rtl): v})
+    _, rows = elaborate(index, "top")
+    top_row = next(r for r in rows if r.full_path == "top")
+    from hierwalk.connect.session import ConnectivitySession
+    from hierwalk.models import ElabIndex
+
+    session = ConnectivitySession(
+        rows=[top_row],
+        index=index,
+        top="top",
+        resolve_param_dims=False,
+        elab_index=ElabIndex.from_rows_by_path(
+            {top_row.full_path: top_row},
+            rows=[top_row],
+        ),
+    )
+    result = session.text_check_entry(
+        ConnectivityCheck("top.chain_in[1][2]", "top.merge_tap", "fork_bb"),
+        trace=False,
+        dedup_cache={},
+        dedup_stats=[0, 0],
+    )
+    assert result.connected is True
+
+
+def test_text_conn_md_bus_slice_coarse_grep(tmp_path: Path):
+    """Text grep blooms MD bus bases; logical conn keeps per-element precision."""
     v = """
     module top;
       logic [1:0][2:0] a, b;
@@ -223,7 +276,7 @@ def test_text_conn_md_bus_slice_bit_precise(tmp_path: Path):
     rtl.write_text(v, encoding="utf-8")
     index = DesignIndex.build({str(rtl): v})
     _, rows = elaborate(index, "top")
-    from hierwalk.connectivity import ConnectivitySession
+    from hierwalk.connect.session import ConnectivitySession
 
     session = ConnectivitySession(
         rows=rows,
@@ -232,6 +285,9 @@ def test_text_conn_md_bus_slice_bit_precise(tmp_path: Path):
         resolve_param_dims=False,
     )
     assert session.check("top.a[0][1]", "top.b[0][1]").connected is True
+    assert session.check("top.a[0][2]", "top.b[0][2]").connected is True
+
+    session.resolve_param_dims = True
     assert session.check("top.a[0][2]", "top.b[0][2]").connected is False
 
 
@@ -250,7 +306,7 @@ def test_text_conn_indexed_concat_port_map_bit_precise(tmp_path: Path):
     rtl.write_text(v, encoding="utf-8")
     index = DesignIndex.build({str(rtl): v})
     _, rows = elaborate(index, "top")
-    from hierwalk.connectivity import ConnectivitySession
+    from hierwalk.connect.session import ConnectivitySession
 
     session = ConnectivitySession(
         rows=rows,
@@ -280,7 +336,7 @@ def test_text_conn_hier_port_concat_bit_precise(tmp_path: Path):
     rtl.write_text(v, encoding="utf-8")
     index = DesignIndex.build({str(rtl): v})
     _, rows = elaborate(index, "top")
-    from hierwalk.connectivity import ConnectivitySession
+    from hierwalk.connect.session import ConnectivitySession
 
     session = ConnectivitySession(
         rows=rows,
@@ -310,7 +366,7 @@ def test_text_conn_skips_parametric_dim_resolution(tmp_path: Path):
     rtl.write_text(v, encoding="utf-8")
     index = DesignIndex.build({str(rtl): v})
     _, rows = elaborate(index, "top")
-    from hierwalk.connectivity import ConnectivitySession
+    from hierwalk.connect.session import ConnectivitySession
 
     text_session = ConnectivitySession(
         rows=rows,
@@ -349,7 +405,7 @@ def test_text_conn_bloom_filter_accepts_slice_when_bus_connected(tmp_path: Path)
     rtl.write_text(v, encoding="utf-8")
     index = DesignIndex.build({str(rtl): v})
     _, rows = elaborate(index, "top")
-    from hierwalk.connectivity import ConnectivitySession
+    from hierwalk.connect.session import ConnectivitySession
 
     text_session = ConnectivitySession(
         rows=rows,
@@ -383,11 +439,11 @@ def test_refine_param_ctx_for_top_only_path(tmp_path: Path):
 
 def test_port_param_ctx_refines_path_walk_rows_when_resolve_param_dims(tmp_path: Path):
     """Path-walk folded rows with empty ctx must refine under logical COI."""
-    from hierwalk.connect_endpoints import _port_param_ctx
+    from hierwalk.connect.shared.endpoints import _port_param_ctx
     from hierwalk.filelist import parse_filelist
     from hierwalk.models import FlatRow
     from hierwalk.path_walk import create_path_walk_index, build_path_walk_state
-    from hierwalk.connect_request import ConnectivityCheck, ConnectivityRequest
+    from hierwalk.connect.shared.request import ConnectivityCheck, ConnectivityRequest
 
     v = """
     module top #(

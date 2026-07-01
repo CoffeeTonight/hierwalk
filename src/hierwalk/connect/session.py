@@ -1,10 +1,9 @@
-"""Structural COI connectivity (public API and batch session)."""
+"""Connectivity session orchestration (text + logical batch entry points)."""
 
 from __future__ import annotations
 
 import math
 import os
-import re
 import sys
 import threading
 import time
@@ -12,88 +11,37 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, Dict, IO, List, Mapping, Optional, Sequence, Tuple, Union
 
-from hierwalk.connect_endpoints import (
-    _module_index,
-    _port_param_ctx,
-    _prune_rows_lca,
+from hierwalk.connect.logical.pair import connect_pair as _connect_pair
+from hierwalk.connect.logical.scan import (
+    ModuleConnectIndex,
+    build_module_connect_index,
+    collect_design_defines,
+)
+from hierwalk.connect.logical.search import _resolve_over_approximate_if
+from hierwalk.connect.shared.endpoints import (
     parse_connect_endpoint,
     resolve_endpoint,
 )
-from hierwalk.connect_expand import (
+from hierwalk.connect.shared.expand import (
     aggregate_connect_results,
     expand_check_to_pairs,
 )
-from hierwalk.connect_request import (
+from hierwalk.connect.shared.request import (
     ConnectivityCheck,
     ConnectivityRequest,
     load_connect_request,
     parse_connect_request_json,
 )
-from hierwalk.connect_scan import (
-    ModuleConnectIndex,
-    build_module_connect_index,
-    collect_design_defines,
+from hierwalk.connect.shared.resolve_cache import (
+    EndpointResolveCache,
+    resolve_endpoint_cached as _resolve_endpoint_cached,
 )
-from hierwalk.connect_search import (
-    _bidirectional_coi,
-    _connect_note,
-    _forward_coi_to_scope,
-    _resolve_over_approximate_if,
+from hierwalk.connect.text.index import TextGrepCache
+from hierwalk.connect.text.pair import (
+    connect_pair_text_deduped as _connect_pair_text_deduped,
 )
 from hierwalk.index import DesignIndex
 from hierwalk.models import ConnectEndpoint, ConnectHop, ConnectResult, ElabIndex, FlatRow
-
-EndpointResolveCache = Dict[str, Tuple[ConnectEndpoint, Tuple[str, ...]]]
-
-
-def _copy_connect_endpoint(ep: ConnectEndpoint) -> ConnectEndpoint:
-    return ConnectEndpoint(
-        spec=ep.spec,
-        inst_path=ep.inst_path,
-        port_name=ep.port_name,
-        module=ep.module,
-        port_found=ep.port_found,
-    )
-
-
-def _resolve_endpoint_cached(
-    spec: str,
-    rows: Sequence[FlatRow],
-    index: DesignIndex,
-    *,
-    top: str,
-    rows_by_path: Optional[Mapping[str, FlatRow]] = None,
-    cache: Optional[EndpointResolveCache] = None,
-    cache_lock: Optional[threading.Lock] = None,
-) -> Tuple[ConnectEndpoint, List[str]]:
-    """Resolve one endpoint spec; reuse prior result when *cache* is shared."""
-    text = (spec or "").strip()
-    if cache is not None and text:
-        if cache_lock is not None:
-            with cache_lock:
-                hit = cache.get(text)
-        else:
-            hit = cache.get(text)
-        if hit is not None:
-            ep, errs = hit
-            return _copy_connect_endpoint(ep), list(errs)
-    ep, errs = resolve_endpoint(
-        spec,
-        rows,
-        index,
-        top=top,
-        require_port=False,
-        rows_by_path=rows_by_path,
-    )
-    if cache is not None and text:
-        stored = (ep, tuple(errs))
-        if cache_lock is not None:
-            with cache_lock:
-                cache.setdefault(text, stored)
-        else:
-            cache.setdefault(text, stored)
-    return ep, errs
-
 
 __all__ = [
     "ConnectivityBatchResult",
@@ -128,7 +76,10 @@ def format_connect_trace_report(
     """Multi-line evidence report for a connectivity result."""
     import io
 
-    from hierwalk.connect_walk_log import emit_connect_walk_report, format_connect_log_line
+    from hierwalk.connect.logical.walk_log import (
+        emit_connect_walk_report,
+        format_connect_log_line,
+    )
     from hierwalk.hierarchy_log import format_endpoint_provenance_line
 
     buf = io.StringIO()
@@ -201,7 +152,7 @@ def emit_connect_trace_log(
                 rows_by_path=rows_by_path,
             )
         return
-    from hierwalk.connect_walk_log import (
+    from hierwalk.connect.logical.walk_log import (
         _emit_line,
         emit_connect_walk_report,
     )
@@ -257,7 +208,7 @@ def format_connect_results_report(
     top: str = "",
 ) -> List[str]:
     """Hierarchy-first connect report (inst/port/wire/reg), then COI verdict."""
-    from hierwalk.connect_artifacts import (
+    from hierwalk.connect.pipeline.artifacts import (
         SignalTailRecord,
         format_connect_results_report as _format_analysis_report,
     )
@@ -340,7 +291,7 @@ def _effective_defines(
     *,
     sources: Optional[Sequence[str]] = None,
 ) -> Dict[str, str]:
-    from hierwalk.connect_scan import design_parse_sources
+    from hierwalk.connect.logical.scan import design_parse_sources
 
     if sources is None:
         sources = design_parse_sources(index)
@@ -422,447 +373,6 @@ class _ConnectCoiHeartbeat:
         self._on_emit(msg)
 
 
-def _connect_pair(
-    endpoint_a: str,
-    endpoint_b: str,
-    *,
-    rows: Sequence[FlatRow],
-    index: DesignIndex,
-    top: str,
-    effective_defines: Mapping[str, str],
-    trace: bool = False,
-    strict_generate: bool = False,
-    ff_barrier: bool = True,
-    over_approximate_if: Optional[bool] = None,
-    mod_cache: Dict[Tuple[str, str, str, str, str, bool, bool, bool], ModuleConnectIndex],
-    param_ctx_cache: Dict[str, Mapping[str, str]],
-    check_id: str = "",
-    elab_index: Optional[ElabIndex] = None,
-    rows_by_path: Optional[Mapping[str, FlatRow]] = None,
-    resolve_param_dims: bool = True,
-    endpoint_cache: Optional[EndpointResolveCache] = None,
-    endpoint_cache_lock: Optional[threading.Lock] = None,
-) -> ConnectResult:
-    lookup = (
-        rows_by_path
-        if rows_by_path is not None
-        else (elab_index.rows_by_path if elab_index is not None else None)
-    )
-    ep_a, err_a = _resolve_endpoint_cached(
-        endpoint_a,
-        rows,
-        index,
-        top=top,
-        rows_by_path=lookup,
-        cache=endpoint_cache,
-        cache_lock=endpoint_cache_lock,
-    )
-    ep_b, err_b = _resolve_endpoint_cached(
-        endpoint_b,
-        rows,
-        index,
-        top=top,
-        rows_by_path=lookup,
-        cache=endpoint_cache,
-        cache_lock=endpoint_cache_lock,
-    )
-    errors = list(err_a) + list(err_b)
-
-    if errors:
-        mode = _mode(ep_a, ep_b) if ep_a.module and ep_b.module else "unknown"
-        return ConnectResult(
-            ep_a,
-            ep_b,
-            False,
-            mode,
-            errors=errors,
-            check_id=check_id,
-        )
-
-    if _has_port(ep_a) and not ep_a.port_found:
-        return ConnectResult(
-            ep_a, ep_b, False, _mode(ep_a, ep_b), errors=errors, check_id=check_id
-        )
-    if _has_port(ep_b) and not ep_b.port_found:
-        return ConnectResult(
-            ep_a, ep_b, False, _mode(ep_a, ep_b), errors=errors, check_id=check_id
-        )
-
-    pruned = _prune_rows_lca(rows, ep_a.inst_path, ep_b.inst_path)
-    mode = _mode(ep_a, ep_b)
-
-    if mode == "port-port":
-        start = (ep_a.inst_path, ep_a.port_name or "")
-        goal = (ep_b.inst_path, ep_b.port_name or "")
-        ok, hops, mod_n, diag = _bidirectional_coi(
-            start,
-            goal,
-            rows=pruned,
-            index=index,
-            top=top,
-            defines=effective_defines,
-            trace=trace,
-            strict_generate=strict_generate,
-            ff_barrier=ff_barrier,
-            over_approximate_if=over_approximate_if,
-            mod_cache=mod_cache,
-            param_ctx_cache=param_ctx_cache,
-            elab_index=elab_index,
-            resolve_param_dims=resolve_param_dims,
-        )
-        walk_notes: List[str] = []
-        if not ok and diag is not None:
-            from hierwalk.connect_walk_log import build_walk_notes
-
-            walk_notes = build_walk_notes(
-                diag,
-                rows_by_path=lookup or {},
-                start=start,
-                goal=goal,
-            )
-        return ConnectResult(
-            ep_a,
-            ep_b,
-            ok,
-            mode,
-            hops=hops,
-            errors=errors,
-            note=_connect_note(ok, mod_n),
-            check_id=check_id,
-            walk_notes=walk_notes,
-            coi_walk=diag,
-        )
-
-    if mode == "port-hierarchy":
-        port_ep = ep_a if _has_port(ep_a) else ep_b
-        hier_ep = ep_b if _has_port(ep_a) else ep_a
-        start = (port_ep.inst_path, port_ep.port_name or "")
-        ok, hops, mod_n, diag = _forward_coi_to_scope(
-            start,
-            hier_ep.inst_path,
-            rows=pruned,
-            index=index,
-            top=top,
-            defines=effective_defines,
-            trace=trace,
-            strict_generate=strict_generate,
-            ff_barrier=ff_barrier,
-            over_approximate_if=over_approximate_if,
-            mod_cache=mod_cache,
-            param_ctx_cache=param_ctx_cache,
-            elab_index=elab_index,
-            resolve_param_dims=resolve_param_dims,
-        )
-        walk_notes: List[str] = []
-        if not ok and diag is not None:
-            from hierwalk.connect_walk_log import build_walk_notes
-
-            walk_notes = build_walk_notes(
-                diag,
-                rows_by_path=lookup or {},
-                start=start,
-                goal=(hier_ep.inst_path, ""),
-            )
-        return ConnectResult(
-            ep_a,
-            ep_b,
-            ok,
-            mode,
-            hops=hops,
-            errors=errors,
-            note=_connect_note(ok, mod_n, hier=True),
-            check_id=check_id,
-            walk_notes=walk_notes,
-            coi_walk=diag,
-        )
-
-    return ConnectResult(
-        ep_a,
-        ep_b,
-        ep_a.inst_path == ep_b.inst_path
-        or _is_ancestor(ep_a.inst_path, ep_b.inst_path)
-        or _is_ancestor(ep_b.inst_path, ep_a.inst_path),
-        "hierarchy-hierarchy",
-        errors=errors,
-        note="same or ancestor/descendant (no port trace)",
-        check_id=check_id,
-    )
-
-
-def _coarse_text_inst_path(inst_path: str) -> str:
-    if not inst_path:
-        return ""
-    return ".".join(part.split("[", 1)[0] for part in inst_path.split("."))
-
-
-def _coarse_text_port_base(port_name: str) -> str:
-    if not port_name:
-        return ""
-    return port_name.split("[", 1)[0].split(".", 1)[0]
-
-
-def _literal_port_slice_suffix(port_name: str) -> str:
-    """First-dimension literal ``[N]`` suffix for text-conn dedup, else ``\"\"``."""
-    base = _coarse_text_port_base(port_name)
-    if not port_name or not base or port_name == base:
-        return ""
-    rest = port_name[len(base) :]
-    first = rest.split(".", 1)[0]
-    if re.match(r"^(?:\[\d+\])+$", first):
-        return first
-    return ""
-
-
-def _text_coi_slice_tag_for_endpoint(
-    ep: ConnectEndpoint,
-    *,
-    mod_cache: Dict[Tuple[str, str, str, str, str, bool, bool, bool], ModuleConnectIndex],
-    index: DesignIndex,
-    rows_by_path: Mapping[str, FlatRow],
-    param_ctx_cache: Mapping[str, Mapping[str, str]],
-    effective_defines: Mapping[str, str],
-    strict_generate: bool,
-    ff_barrier: bool,
-    over_approximate_if: Optional[bool],
-) -> str:
-    """Include literal slice in dedup key when the module marks the port base bit-precise."""
-    suffix = _literal_port_slice_suffix(ep.port_name or "")
-    if not suffix or not ep.module:
-        return ""
-    row = rows_by_path.get(ep.inst_path)
-    param_ctx: Mapping[str, str] = {}
-    if row is not None:
-        cached = param_ctx_cache.get(ep.inst_path)
-        if cached is not None:
-            param_ctx = cached
-        else:
-            param_ctx = _port_param_ctx(
-                index, row, ep.inst_path, resolve_param_dims=False
-            )
-    mod_idx = _module_index(
-        mod_cache,
-        index,
-        ep.module,
-        param_ctx,
-        defines=effective_defines,
-        over_approximate_if=_resolve_over_approximate_if(
-            strict_generate,
-            over_approximate_if,
-        ),
-        ff_barrier=ff_barrier,
-        resolve_param_dims=False,
-    )
-    base = _coarse_text_port_base(ep.port_name or "")
-    if base in mod_idx.bit_precise_bases:
-        return suffix
-    return ""
-
-
-def _text_coi_dedup_key(
-    ep_a: ConnectEndpoint,
-    ep_b: ConnectEndpoint,
-    errors: Sequence[str],
-    *,
-    slice_a: str = "",
-    slice_b: str = "",
-) -> Tuple[Any, ...]:
-    """Coarse text-conn COI key: strip slice/index from inst paths and port names."""
-    mode = _mode(ep_a, ep_b) if ep_a.module and ep_b.module else "unknown"
-    if errors:
-        return (
-            "err",
-            mode,
-            _coarse_text_inst_path(ep_a.inst_path),
-            _coarse_text_port_base(ep_a.port_name or ""),
-            _coarse_text_inst_path(ep_b.inst_path),
-            _coarse_text_port_base(ep_b.port_name or ""),
-            tuple(errors),
-        )
-    if (_has_port(ep_a) and not ep_a.port_found) or (
-        _has_port(ep_b) and not ep_b.port_found
-    ):
-        return (
-            "port-miss",
-            mode,
-            _coarse_text_inst_path(ep_a.inst_path),
-            _coarse_text_port_base(ep_a.port_name or ""),
-            bool(ep_a.port_found),
-            _coarse_text_inst_path(ep_b.inst_path),
-            _coarse_text_port_base(ep_b.port_name or ""),
-            bool(ep_b.port_found),
-        )
-    return (
-        "coi",
-        mode,
-        _coarse_text_inst_path(ep_a.inst_path),
-        _coarse_text_port_base(ep_a.port_name or ""),
-        slice_a,
-        _coarse_text_inst_path(ep_b.inst_path),
-        _coarse_text_port_base(ep_b.port_name or ""),
-        slice_b,
-    )
-
-
-def _fanout_text_coi_result(
-    template: ConnectResult,
-    *,
-    spec_a: str,
-    spec_b: str,
-    ep_a: ConnectEndpoint,
-    ep_b: ConnectEndpoint,
-    check_id: str,
-) -> ConnectResult:
-    """Copy a deduped text COI verdict onto a leaf check (original specs/endpoints)."""
-    return ConnectResult(
-        ConnectEndpoint(
-            spec_a,
-            ep_a.inst_path,
-            ep_a.port_name,
-            ep_a.module,
-            ep_a.port_found,
-        ),
-        ConnectEndpoint(
-            spec_b,
-            ep_b.inst_path,
-            ep_b.port_name,
-            ep_b.module,
-            ep_b.port_found,
-        ),
-        template.connected,
-        template.mode,
-        hops=list(template.hops),
-        errors=list(template.errors),
-        note=template.note,
-        check_id=check_id,
-        walk_notes=list(template.walk_notes),
-        coi_walk=template.coi_walk,
-    )
-
-
-def _connect_pair_text_deduped(
-    endpoint_a: str,
-    endpoint_b: str,
-    *,
-    rows: Sequence[FlatRow],
-    index: DesignIndex,
-    top: str,
-    effective_defines: Mapping[str, str],
-    trace: bool,
-    strict_generate: bool,
-    ff_barrier: bool,
-    over_approximate_if: Optional[bool],
-    mod_cache: Dict[Tuple[str, str, str, str, str, bool, bool, bool], ModuleConnectIndex],
-    param_ctx_cache: Dict[str, Mapping[str, str]],
-    check_id: str,
-    elab_index: Optional[ElabIndex],
-    rows_by_path: Mapping[str, FlatRow],
-    dedup_cache: Dict[Tuple[Any, ...], ConnectResult],
-    dedup_stats: List[int],
-    dedup_lock: Optional[threading.Lock] = None,
-    endpoint_cache: Optional[EndpointResolveCache] = None,
-    endpoint_cache_lock: Optional[threading.Lock] = None,
-) -> ConnectResult:
-    lookup = rows_by_path
-    ep_a, err_a = _resolve_endpoint_cached(
-        endpoint_a,
-        rows,
-        index,
-        top=top,
-        rows_by_path=lookup,
-        cache=endpoint_cache,
-        cache_lock=endpoint_cache_lock,
-    )
-    ep_b, err_b = _resolve_endpoint_cached(
-        endpoint_b,
-        rows,
-        index,
-        top=top,
-        rows_by_path=lookup,
-        cache=endpoint_cache,
-        cache_lock=endpoint_cache_lock,
-    )
-    errors = list(err_a) + list(err_b)
-    slice_a = _text_coi_slice_tag_for_endpoint(
-        ep_a,
-        mod_cache=mod_cache,
-        index=index,
-        rows_by_path=rows_by_path,
-        param_ctx_cache=param_ctx_cache,
-        effective_defines=effective_defines,
-        strict_generate=strict_generate,
-        ff_barrier=ff_barrier,
-        over_approximate_if=over_approximate_if,
-    )
-    slice_b = _text_coi_slice_tag_for_endpoint(
-        ep_b,
-        mod_cache=mod_cache,
-        index=index,
-        rows_by_path=rows_by_path,
-        param_ctx_cache=param_ctx_cache,
-        effective_defines=effective_defines,
-        strict_generate=strict_generate,
-        ff_barrier=ff_barrier,
-        over_approximate_if=over_approximate_if,
-    )
-    key = _text_coi_dedup_key(ep_a, ep_b, errors, slice_a=slice_a, slice_b=slice_b)
-    dedup_stats[0] += 1
-
-    if dedup_lock is not None:
-        with dedup_lock:
-            hit = dedup_cache.get(key)
-    else:
-        hit = dedup_cache.get(key)
-    if hit is not None:
-        return _fanout_text_coi_result(
-            hit,
-            spec_a=endpoint_a,
-            spec_b=endpoint_b,
-            ep_a=ep_a,
-            ep_b=ep_b,
-            check_id=check_id,
-        )
-
-    result = _connect_pair(
-        endpoint_a,
-        endpoint_b,
-        rows=rows,
-        index=index,
-        top=top,
-        effective_defines=effective_defines,
-        trace=trace,
-        strict_generate=strict_generate,
-        ff_barrier=ff_barrier,
-        over_approximate_if=over_approximate_if,
-        mod_cache=mod_cache,
-        param_ctx_cache=param_ctx_cache,
-        check_id=check_id,
-        elab_index=elab_index,
-        rows_by_path=rows_by_path,
-        resolve_param_dims=False,
-        endpoint_cache=endpoint_cache,
-        endpoint_cache_lock=endpoint_cache_lock,
-    )
-
-    if dedup_lock is not None:
-        with dedup_lock:
-            existing = dedup_cache.get(key)
-            if existing is not None:
-                return _fanout_text_coi_result(
-                    existing,
-                    spec_a=endpoint_a,
-                    spec_b=endpoint_b,
-                    ep_a=ep_a,
-                    ep_b=ep_b,
-                    check_id=check_id,
-                )
-            dedup_cache[key] = result
-            dedup_stats[1] += 1
-    else:
-        dedup_cache[key] = result
-        dedup_stats[1] += 1
-    return result
-
-
 @dataclass
 class ConnectivitySession:
     """
@@ -885,6 +395,7 @@ class ConnectivitySession:
         Tuple[str, str, str, str, str, bool, bool, bool],
         ModuleConnectIndex,
     ] = field(default_factory=dict)
+    text_grep_cache: TextGrepCache = field(default_factory=dict)
     param_ctx_cache: Dict[str, Mapping[str, str]] = field(default_factory=dict)
     endpoint_resolve_cache: EndpointResolveCache = field(
         default_factory=dict,
@@ -911,7 +422,7 @@ class ConnectivitySession:
         self._refresh_effective_defines()
 
     def _refresh_effective_defines(self) -> Dict[str, str]:
-        from hierwalk.connect_scan import design_parse_sources, sources_content_digest
+        from hierwalk.connect.logical.scan import design_parse_sources, sources_content_digest
 
         srcs = (
             list(self.sources)
@@ -945,6 +456,7 @@ class ConnectivitySession:
 
     def clear_cache(self) -> None:
         self.mod_cache.clear()
+        self.text_grep_cache.clear()
         self.param_ctx_cache.clear()
         self.endpoint_resolve_cache.clear()
         self._effective_defines_stamp = ((), (), "")
@@ -1130,7 +642,7 @@ class ConnectivitySession:
         jobs: int = 0,
         on_progress: Optional[Any] = None,
     ) -> ConnectivityBatchResult:
-        from hierwalk.validate_connect import waypoint_perf_warnings
+        from hierwalk.connect.pipeline.validate import waypoint_perf_warnings
 
         use_trace = request.trace if trace is None else trace
         perf_notes = tuple(waypoint_perf_warnings(request))
@@ -1193,7 +705,7 @@ class ConnectivitySession:
         rows: Optional[Sequence[FlatRow]] = None,
         elab_index: Optional[ElabIndex] = None,
     ) -> ConnectResult:
-        """Single text-phase check with shared coarse COI dedup cache."""
+        """Single text-phase check with shared coarse grep dedup cache."""
         active_rows = self.rows if rows is None else rows
         if elab_index is not None:
             active_elab = elab_index
@@ -1227,7 +739,7 @@ class ConnectivitySession:
                 strict_generate=self.strict_generate,
                 ff_barrier=self.ff_barrier,
                 over_approximate_if=self.over_approximate_if,
-                mod_cache=self.mod_cache,
+                text_grep_cache=self.text_grep_cache,
                 param_ctx_cache=self.param_ctx_cache,
                 check_id=sub_id,
                 elab_index=active_elab,
@@ -1259,7 +771,7 @@ class ConnectivitySession:
                     strict_generate=self.strict_generate,
                     ff_barrier=self.ff_barrier,
                     over_approximate_if=self.over_approximate_if,
-                    mod_cache=self.mod_cache,
+                    text_grep_cache=self.text_grep_cache,
                     param_ctx_cache=self.param_ctx_cache,
                     check_id=sub_id,
                     elab_index=active_elab,
@@ -1290,12 +802,12 @@ class ConnectivitySession:
         record_timing: bool = False,
     ) -> ConnectivityBatchResult:
         """
-        Text-conn batch: coarse COI dedup across slice-expanded leaf checks.
+        Text-conn batch: coarse grep dedup across slice-expanded leaf checks.
 
         Use only for the text phase (``resolve_param_dims=False``). Logical conn
-        must call :meth:`run_request` so each leaf keeps its own COI search.
+        must call :meth:`run_request` for full bit-precise COI.
         """
-        from hierwalk.validate_connect import waypoint_perf_warnings
+        from hierwalk.connect.pipeline.validate import waypoint_perf_warnings
 
         use_trace = request.trace if trace is None else trace
         perf_notes = tuple(waypoint_perf_warnings(request))
@@ -1379,7 +891,7 @@ class ConnectivitySession:
             self.strict_generate,
             self.over_approximate_if,
         )
-        from hierwalk.connect_endpoints import _shared_cache_lock
+        from hierwalk.connect.shared.endpoints import _shared_cache_lock
 
         path = row.full_path
         hit = self.param_ctx_cache.get(path)
@@ -1521,7 +1033,7 @@ def run_connectivity_request(
     top_name = request.top or top
     if not top_name and rows:
         top_name = rows[0].full_path.split(".", 1)[0]
-    from hierwalk.connect_scan import design_parse_sources
+    from hierwalk.connect.logical.scan import design_parse_sources
 
     session_defines = dict(extra_defines or {})
     session_defines.update(request.defines)
@@ -1657,19 +1169,3 @@ def parse_connect_pairs_json(data: Any) -> List[Tuple[str, str]]:
 def load_connect_pairs(path: Union[str, Path]) -> List[Tuple[str, str]]:
     """Backward-compatible pairs loader (text or minimal JSON)."""
     return [(c.endpoint_a, c.endpoint_b) for c in load_connect_request(path).checks]
-
-
-def _has_port(ep: ConnectEndpoint) -> bool:
-    return bool(ep.port_name)
-
-
-def _mode(a: ConnectEndpoint, b: ConnectEndpoint) -> str:
-    if _has_port(a) and _has_port(b):
-        return "port-port"
-    if _has_port(a) or _has_port(b):
-        return "port-hierarchy"
-    return "hierarchy-hierarchy"
-
-
-def _is_ancestor(ancestor: str, path: str) -> bool:
-    return path.startswith(ancestor + ".")
