@@ -90,6 +90,59 @@ def test_parametric_braced_concat_text_conn_bit_precise(tmp_path: Path):
     assert by_pair[("top.wb", "top.wq")] is True
 
 
+def test_text_conn_port_or_expr_does_not_bridge_operands(tmp_path: Path):
+    """``.din(a | b)`` must not let ``a`` reach unrelated nets only wired to ``b``."""
+    v = """
+    module child(input logic din);
+    endmodule
+    module top;
+      wire a, b, q;
+      child u (.din(a | b));
+      assign q = b;
+    endmodule
+    """
+    rtl = tmp_path / "top.v"
+    rtl.write_text(v, encoding="utf-8")
+    index = DesignIndex.build({str(rtl): v})
+    _, rows = elaborate(index, "top")
+    from hierwalk.connectivity import ConnectivitySession
+
+    session = ConnectivitySession(
+        rows=rows,
+        index=index,
+        top="top",
+        resolve_param_dims=False,
+    )
+    assert session.check("top.a", "top.q").connected is False
+    assert session.check("top.b", "top.q").connected is True
+
+
+def test_text_conn_port_xor_expr_keeps_operand_to_port(tmp_path: Path):
+    """XOR port maps still connect each operand to the child port (parent-up path)."""
+    v = """
+    module zz_bridge_ping(input logic [1:0][2:0] din, output logic [1:0][2:0] dout);
+    endmodule
+    module top;
+      wire [1:0][2:0] chain_in, shallow_return, expr_mapped;
+      zz_bridge_ping u (.din(chain_in ^ shallow_return), .dout(expr_mapped));
+    endmodule
+    """
+    rtl = tmp_path / "top.v"
+    rtl.write_text(v, encoding="utf-8")
+    index = DesignIndex.build({str(rtl): v})
+    _, rows = elaborate(index, "top")
+    from hierwalk.connectivity import ConnectivitySession
+
+    session = ConnectivitySession(
+        rows=rows,
+        index=index,
+        top="top",
+        resolve_param_dims=False,
+    )
+    assert session.check("top.chain_in[1][2]", "top.u.din[1][2]").connected is True
+    assert session.check("top.shallow_return[1][2]", "top.u.din[1][2]").connected is True
+
+
 def test_text_conn_hier_port_concat_bit_precise(tmp_path: Path):
     """Instance ``.bus({wa,wb,wc})`` must not parent-up all concat legs at once."""
     v = """

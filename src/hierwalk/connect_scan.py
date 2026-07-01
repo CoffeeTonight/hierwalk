@@ -346,6 +346,17 @@ def _is_braced_concat_rhs(expr: str) -> bool:
     return len(text) >= 2 and text[0] == "{" and text[-1] == "}" and "[" not in text
 
 
+def _is_compound_port_map_expr(expr: str) -> bool:
+    """True when a port-map expr mixes operands (``a|b``, ``x^y``) — no child-down COI."""
+    if _is_braced_concat_rhs(expr):
+        return False
+    text = re.sub(r"\s+", "", expr.strip())
+    if not text:
+        return False
+    scrub = re.sub(r"\[[^\]]+\]", "", text)
+    return bool(re.search(r"[|^&+\-*/%?]", scrub))
+
+
 def _expand_concat_elements(inner: str) -> List[str]:
     """Expand ``{4{a}}`` replications and top-level comma concat pieces."""
     parts = _split_concat_top_level(inner)
@@ -3865,6 +3876,9 @@ def _build_reverse_port_index(
 
     for inst, ports in inst_ports.items():
         for port, expr in ports:
+            if _is_compound_port_map_expr(expr):
+                _cached_expr_roots(expr, expr_cache, param_map=pmap)
+                continue
             if _is_braced_concat_rhs(expr):
                 text = re.sub(r"\s+", "", expr.strip())
                 parts = _expand_concat_elements(text[1:-1])
