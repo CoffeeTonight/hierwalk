@@ -3865,6 +3865,21 @@ def _build_reverse_port_index(
 
     for inst, ports in inst_ports.items():
         for port, expr in ports:
+            if _is_braced_concat_rhs(expr):
+                text = re.sub(r"\s+", "", expr.strip())
+                parts = _expand_concat_elements(text[1:-1])
+                port_base = port.split("[", 1)[0]
+                for i, part in enumerate(parts):
+                    piece = part.strip()
+                    if not piece:
+                        continue
+                    for root in extract_connect_nodes(piece, pmap):
+                        rep = net_rep.get(root, root)
+                        if "[" in port:
+                            _add(rep, inst, port)
+                        else:
+                            _add(rep, inst, f"{port_base}[{i}]")
+                continue
             roots: Set[str] = set()
             for root in _cached_expr_roots(expr, expr_cache, param_map=pmap):
                 roots.add(root)

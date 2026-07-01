@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import sys
 import threading
 import time
@@ -600,10 +601,70 @@ def _coarse_text_port_base(port_name: str) -> str:
     return port_name.split("[", 1)[0].split(".", 1)[0]
 
 
+def _literal_port_slice_suffix(port_name: str) -> str:
+    """First-dimension literal ``[N]`` suffix for text-conn dedup, else ``\"\"``."""
+    base = _coarse_text_port_base(port_name)
+    if not port_name or not base or port_name == base:
+        return ""
+    rest = port_name[len(base) :]
+    first = rest.split(".", 1)[0]
+    if re.match(r"^\[\d+\]$", first):
+        return first
+    return ""
+
+
+def _text_coi_slice_tag_for_endpoint(
+    ep: ConnectEndpoint,
+    *,
+    mod_cache: Dict[Tuple[str, str, str, str, str, bool, bool, bool], ModuleConnectIndex],
+    index: DesignIndex,
+    rows_by_path: Mapping[str, FlatRow],
+    param_ctx_cache: Mapping[str, Mapping[str, str]],
+    effective_defines: Mapping[str, str],
+    strict_generate: bool,
+    ff_barrier: bool,
+    over_approximate_if: Optional[bool],
+) -> str:
+    """Include literal slice in dedup key when the module marks the port base bit-precise."""
+    suffix = _literal_port_slice_suffix(ep.port_name or "")
+    if not suffix or not ep.module:
+        return ""
+    row = rows_by_path.get(ep.inst_path)
+    param_ctx: Mapping[str, str] = {}
+    if row is not None:
+        cached = param_ctx_cache.get(ep.inst_path)
+        if cached is not None:
+            param_ctx = cached
+        else:
+            param_ctx = _port_param_ctx(
+                index, row, ep.inst_path, resolve_param_dims=False
+            )
+    mod_idx = _module_index(
+        mod_cache,
+        index,
+        ep.module,
+        param_ctx,
+        defines=effective_defines,
+        over_approximate_if=_resolve_over_approximate_if(
+            strict_generate,
+            over_approximate_if,
+        ),
+        ff_barrier=ff_barrier,
+        resolve_param_dims=False,
+    )
+    base = _coarse_text_port_base(ep.port_name or "")
+    if base in mod_idx.bit_precise_bases:
+        return suffix
+    return ""
+
+
 def _text_coi_dedup_key(
     ep_a: ConnectEndpoint,
     ep_b: ConnectEndpoint,
     errors: Sequence[str],
+    *,
+    slice_a: str = "",
+    slice_b: str = "",
 ) -> Tuple[Any, ...]:
     """Coarse text-conn COI key: strip slice/index from inst paths and port names."""
     mode = _mode(ep_a, ep_b) if ep_a.module and ep_b.module else "unknown"
@@ -635,8 +696,10 @@ def _text_coi_dedup_key(
         mode,
         _coarse_text_inst_path(ep_a.inst_path),
         _coarse_text_port_base(ep_a.port_name or ""),
+        slice_a,
         _coarse_text_inst_path(ep_b.inst_path),
         _coarse_text_port_base(ep_b.port_name or ""),
+        slice_b,
     )
 
 
@@ -719,7 +782,29 @@ def _connect_pair_text_deduped(
         cache_lock=endpoint_cache_lock,
     )
     errors = list(err_a) + list(err_b)
-    key = _text_coi_dedup_key(ep_a, ep_b, errors)
+    slice_a = _text_coi_slice_tag_for_endpoint(
+        ep_a,
+        mod_cache=mod_cache,
+        index=index,
+        rows_by_path=rows_by_path,
+        param_ctx_cache=param_ctx_cache,
+        effective_defines=effective_defines,
+        strict_generate=strict_generate,
+        ff_barrier=ff_barrier,
+        over_approximate_if=over_approximate_if,
+    )
+    slice_b = _text_coi_slice_tag_for_endpoint(
+        ep_b,
+        mod_cache=mod_cache,
+        index=index,
+        rows_by_path=rows_by_path,
+        param_ctx_cache=param_ctx_cache,
+        effective_defines=effective_defines,
+        strict_generate=strict_generate,
+        ff_barrier=ff_barrier,
+        over_approximate_if=over_approximate_if,
+    )
+    key = _text_coi_dedup_key(ep_a, ep_b, errors, slice_a=slice_a, slice_b=slice_b)
     dedup_stats[0] += 1
 
     if dedup_lock is not None:

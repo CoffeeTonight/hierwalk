@@ -90,6 +90,34 @@ def test_parametric_braced_concat_text_conn_bit_precise(tmp_path: Path):
     assert by_pair[("top.wb", "top.wq")] is True
 
 
+def test_text_conn_hier_port_concat_bit_precise(tmp_path: Path):
+    """Instance ``.bus({wa,wb,wc})`` must not parent-up all concat legs at once."""
+    v = """
+    module child(input logic [2:0] bus);
+    endmodule
+    module top;
+      wire wa, wb, wc, wq;
+      child u (.bus({wa, wb, wc}));
+      assign wq = wb;
+    endmodule
+    """
+    rtl = tmp_path / "top.v"
+    rtl.write_text(v, encoding="utf-8")
+    index = DesignIndex.build({str(rtl): v})
+    _, rows = elaborate(index, "top")
+    from hierwalk.connectivity import ConnectivitySession
+
+    session = ConnectivitySession(
+        rows=rows,
+        index=index,
+        top="top",
+        resolve_param_dims=False,
+    )
+    assert session.check("top.wa", "top.wq").connected is False
+    assert session.check("top.wc", "top.wq").connected is False
+    assert session.check("top.wb", "top.wq").connected is True
+
+
 def test_text_conn_skips_parametric_dim_resolution(tmp_path: Path):
     """Text-conn (structural) must not evaluate ``STRB_MAX`` — decl/assign only."""
     v = """

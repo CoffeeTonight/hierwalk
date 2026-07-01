@@ -10,6 +10,7 @@ from hierwalk.connect_endpoints import ModuleIndexCacheKey, _module_index, _port
 from hierwalk.connect_scan import (
     ModuleConnectIndex,
     _expand_concat_elements,
+    _is_braced_concat_rhs,
     _port_select_suffix,
     _range_to_bit_indices,
     net_representative,
@@ -140,9 +141,9 @@ def _parent_port_map_roots(
         return frozenset({f"{text}[{bit_idx}]"})
     roots = parent_idx.expr_roots.get(expr) or frozenset()
     if roots:
+        if _is_braced_concat_rhs(expr) and bit_idx is None:
+            return frozenset()
         return roots
-    if coarse_slices and "[" in child_net:
-        return parent_idx.expr_roots.get(expr) or frozenset()
     return frozenset()
 
 

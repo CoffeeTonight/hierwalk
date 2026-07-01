@@ -84,6 +84,44 @@ def test_logical_run_request_does_not_dedup_slices(tmp_path):
     assert all(r.connected for r in batch.results)
 
 
+def test_text_coi_dedup_batch_rejects_unwired_slice(tmp_path):
+    """Batch COI dedup must not fan out a wired slice verdict onto unwired bits."""
+    rtl = tmp_path / "top.v"
+    rtl.write_text(
+        """
+        module top #(
+          parameter int W = 4
+        )(
+          input logic [W-1:0] data,
+          output logic [W-1:0] out
+        );
+          assign out[0] = data[0];
+        endmodule
+        """,
+        encoding="utf-8",
+    )
+    index = DesignIndex.build({str(rtl.resolve()): rtl.read_text(encoding="utf-8")})
+    _, rows = elaborate(index, "top")
+    session = ConnectivitySession(
+        rows=rows,
+        index=index,
+        top="top",
+        resolve_param_dims=False,
+    )
+    request = ConnectivityRequest(
+        checks=(
+            ConnectivityCheck("top.data[0]", "top.out[0]", check_id="wired"),
+            ConnectivityCheck("top.data[3]", "top.out[3]", check_id="unwired"),
+        ),
+        top="top",
+    )
+    batch = session.run_text_request(request)
+    by_id = {r.check_id: r.connected for r in batch.results}
+    assert by_id["wired"] is True
+    assert by_id["unwired"] is False
+    assert batch.text_coi_unique == 2
+
+
 def test_text_coi_dedup_bloom_rejects_unwired_slice(tmp_path):
     """Text-conn: literal slice-only assigns must not bloom-unwire other bits."""
     rtl = tmp_path / "top.v"
