@@ -84,22 +84,25 @@ def test_logical_run_request_does_not_dedup_slices(tmp_path):
     assert all(r.connected for r in batch.results)
 
 
-def test_fanout_resolves_shared_endpoint_once(tmp_path):
-    from unittest.mock import patch
-
-    from hierwalk.connect_endpoints import resolve_endpoint
-    from hierwalk.connect_request import parse_connect_request_json
+def test_text_coi_dedup_bloom_rejects_unwired_slice(tmp_path):
+    """Text-conn: literal slice-only assigns must not bloom-unwire other bits."""
+    rtl = tmp_path / "top.v"
+    rtl.write_text(
+        """
+        module top #(
+          parameter int W = 4
+        )(
+          input logic [W-1:0] data,
+          output logic [W-1:0] out
+        );
+          assign out[0] = data[0];
+        endmodule
+        """,
+        encoding="utf-8",
+    )
     from hierwalk.elab import elaborate
     from hierwalk.index import DesignIndex
 
-    rtl = tmp_path / "top.v"
-    rtl.write_text(
-        "module top;\n"
-        "  wire wa, wb, wc, wq;\n"
-        "  assign wq = wb;\n"
-        "endmodule\n",
-        encoding="utf-8",
-    )
     index = DesignIndex.build({str(rtl.resolve()): rtl.read_text(encoding="utf-8")})
     _, rows = elaborate(index, "top")
     session = ConnectivitySession(
@@ -108,30 +111,10 @@ def test_fanout_resolves_shared_endpoint_once(tmp_path):
         top="top",
         resolve_param_dims=False,
     )
-    request = parse_connect_request_json(
-        {
-            "checks": [
-                {
-                    "id": "fan",
-                    "a": ["top.wa", "top.wc", "top.wb"],
-                    "b": "top.wq",
-                }
-            ]
-        }
-    )
-
-    with patch(
-        "hierwalk.connectivity.resolve_endpoint",
-        wraps=resolve_endpoint,
-    ) as mock_resolve:
-        batch = session.run_text_request(request)
-
-    assert batch.results[0].connected is False
-    specs = [call.args[0] for call in mock_resolve.call_args_list]
-    assert specs.count("top.wq") == 1
-    assert specs.count("top.wa") == 1
-    assert specs.count("top.wc") == 1
-    assert specs.count("top.wb") == 1
+    wired = session.check("top.data[0]", "top.out[0]")
+    assert wired.connected
+    unwired = session.check("top.data[3]", "top.out[3]")
+    assert not unwired.connected
 
 
 def test_fanout_resolves_shared_endpoint_once(tmp_path):

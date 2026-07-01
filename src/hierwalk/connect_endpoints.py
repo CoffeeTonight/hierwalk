@@ -250,7 +250,7 @@ def _port_param_ctx(
         return stored
     if stored:
         return stored
-    if top:
+    if resolve_param_dims and top:
         refined = refine_param_ctx_for_path(index, top, row.full_path)
         if refined.ok and refined.param_ctx:
             return refined.param_ctx

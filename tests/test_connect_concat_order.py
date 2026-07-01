@@ -154,6 +154,36 @@ def test_braced_concat_text_conn_bit_precise(tmp_path):
     assert by_pair[("top.wb", "top.wq")] is True
 
 
+def test_braced_concat_arity_fallback_implicit_bus(tmp_path):
+    """Undeclared-width bus uses concat arity for per-bit links (no bus clique)."""
+    verilog = """
+    module top;
+      wire wa, wb, wc, wq;
+      wire bus;
+      assign bus = {wa, wb, wc};
+      assign wq = wb;
+    endmodule
+    """
+    index, rows, top = _elab(verilog, tmp_path)
+    req = parse_connect_request_json(
+        {
+            "checks": [
+                {
+                    "id": "fan",
+                    "a": ["top.wa", "top.wc", "top.wb"],
+                    "b": "top.wq",
+                }
+            ]
+        }
+    )
+    session = ConnectivitySession(rows=rows, index=index, top=top)
+    session.resolve_param_dims = False
+    by_pair = _fan_concat_by_pair(session.run_text_request(req))
+    assert by_pair[("top.wa", "top.wq")] is False
+    assert by_pair[("top.wc", "top.wq")] is False
+    assert by_pair[("top.wb", "top.wq")] is True
+
+
 def test_braced_concat_path_walk_text_bit_precise(tmp_path, monkeypatch):
     """Path-walk text-conn pipeline must not collapse braced-concat bits."""
     monkeypatch.setenv("HIERWALK_CONNECT_JOBS", "4")

@@ -135,6 +135,9 @@ class _Tier0ScanJob:
     skip_patterns: Tuple[str, ...]
     include_dirs: Tuple[str, ...]
     defines: Tuple[Tuple[str, str], ...]
+    defines_digest: str = ""
+    include_closure_digest: str = ""
+    source_digest: str = ""
 
 
 @dataclass(frozen=True)
@@ -189,6 +192,69 @@ def _tier0_save_sidecar_worker(
     tmp.replace(sidecar)
 
 
+def _preprocessed_sidecar_path_worker(
+    cache_root: str,
+    path: str,
+    *,
+    defines_digest: str,
+    include_closure_digest: str,
+) -> Path:
+    return (
+        Path(cache_root)
+        / "preprocessed"
+        / f"{_file_cache_token(path)}_{defines_digest}_{include_closure_digest}.pkl"
+    )
+
+
+def _tier0_load_preprocessed_worker(job: _Tier0ScanJob) -> Optional[str]:
+    if not job.cache_root or not job.defines_digest:
+        return None
+    sidecar = _preprocessed_sidecar_path_worker(
+        job.cache_root,
+        job.path,
+        defines_digest=job.defines_digest,
+        include_closure_digest=job.include_closure_digest,
+    )
+    if not sidecar.is_file():
+        return None
+    try:
+        with sidecar.open("rb") as fh:
+            obj = pickle.load(fh)
+    except (OSError, pickle.PickleError, EOFError, ValueError):
+        return None
+    if not isinstance(obj, _FilePreprocessedCacheEntry):
+        return None
+    if job.source_digest and obj.content_digest != job.source_digest:
+        return None
+    if obj.defines_digest != job.defines_digest:
+        return None
+    if obj.include_closure_digest != job.include_closure_digest:
+        return None
+    return obj.text
+
+
+def _tier0_save_preprocessed_worker(job: _Tier0ScanJob, text: str) -> None:
+    if not job.cache_root or not job.source_digest or not job.defines_digest:
+        return
+    sidecar = _preprocessed_sidecar_path_worker(
+        job.cache_root,
+        job.path,
+        defines_digest=job.defines_digest,
+        include_closure_digest=job.include_closure_digest,
+    )
+    entry = _FilePreprocessedCacheEntry(
+        job.source_digest,
+        job.defines_digest,
+        job.include_closure_digest,
+        text,
+    )
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    tmp = sidecar.with_suffix(sidecar.suffix + ".tmp")
+    with tmp.open("wb") as fh:
+        pickle.dump(entry, fh, protocol=pickle.HIGHEST_PROTOCOL)
+    tmp.replace(sidecar)
+
+
 def _tier0_preprocessed_text_worker(
     path: str,
     include_dirs: Sequence[str],
@@ -218,12 +284,15 @@ def _tier0_worker_scan(job: _Tier0ScanJob) -> _Tier0ScanResult:
         return _Tier0ScanResult(key, cached, True, False, False)
 
     try:
-        text = _tier0_preprocessed_text_worker(
-            key,
-            job.include_dirs,
-            dict(job.defines),
-            job.skip_patterns,
-        )
+        text = _tier0_load_preprocessed_worker(job)
+        if text is None:
+            text = _tier0_preprocessed_text_worker(
+                key,
+                job.include_dirs,
+                dict(job.defines),
+                job.skip_patterns,
+            )
+            _tier0_save_preprocessed_worker(job, text)
     except OSError:
         return _Tier0ScanResult(key, (), False, False, True)
 
@@ -599,18 +668,7 @@ class PathWalkModuleDb:
         return hasher.hexdigest()[:32]
 
     def _tier0_preprocessed_text(self, path: str) -> str:
-        from hierwalk.preprocess import preprocess_file_for_index
-
-        key = str(Path(path).resolve())
-        defs = dict(self._tier1_defines())
-        return preprocess_file_for_index(
-            Path(key),
-            self._include_dirs,
-            defs,
-            set(),
-            skip_path_patterns=self._skip,
-            apply_ifdef=True,
-        )
+        return self._preprocessed_text_for_file(path)
 
     def _regex_sidecar(self, path: str) -> Optional[Path]:
         if self._cache_root is None:
@@ -1389,16 +1447,20 @@ class PathWalkModuleDb:
         return self._tier0_executor
 
     def _tier0_make_job(self, path: str) -> _Tier0ScanJob:
-        digest = self._tier0_scan_digest(path) or ""
+        key = str(Path(path).resolve())
+        digest = self._tier0_scan_digest(key) or ""
         cache_root = str(self._cache_root) if self._cache_root is not None else ""
         defs = self._tier1_defines()
         return _Tier0ScanJob(
-            path=path,
+            path=key,
             cache_root=cache_root,
             content_digest=digest,
             skip_patterns=tuple(self._skip),
             include_dirs=tuple(str(p) for p in self._include_dirs),
             defines=tuple(sorted(defs.items())),
+            defines_digest=_defines_digest(defs),
+            include_closure_digest=self._include_closure_digest(key),
+            source_digest=self._source_digest(key) or "",
         )
 
     def _ingest_tier0_result(self, result: _Tier0ScanResult) -> None:
@@ -1489,6 +1551,10 @@ class PathWalkModuleDb:
             key = str(Path(raw).resolve())
             if key in self._regex_scanned or key in self._tier0_inflight:
                 continue
+            try:
+                self._preprocessed_text_for_file(key)
+            except OSError:
+                pass
             job = self._tier0_make_job(key)
             self._tier0_inflight[key] = executor.submit(_tier0_worker_scan, job)
             submitted += 1
@@ -1958,16 +2024,7 @@ class PathWalkModuleDb:
                 self._trace(f"pw-db tier1 cache {Path(key).name} -> {summary or '(none)'}")
                 return disk
 
-            from hierwalk.preprocess import preprocess_file_for_index
-
-            text = preprocess_file_for_index(
-                Path(key),
-                self._include_dirs,
-                defs,
-                set(),
-                skip_path_patterns=self._skip,
-                apply_ifdef=True,
-            )
+            text = self._preprocessed_text_for_file(key)
             per_file = scan_preprocessed(text, key)
             out = {name: _record_lite(rec) for name, rec in per_file.items()}
             self._validated_memory[key] = out
@@ -2029,17 +2086,8 @@ class PathWalkModuleDb:
         ):
             return self._index.instances_for(mod_name, parent_ctx, {})
 
-        from hierwalk.preprocess import preprocess_file_for_index
-
         defs: Dict[str, str] = dict(self._tier1_defines())
-        text = preprocess_file_for_index(
-            Path(key),
-            self._include_dirs,
-            defs,
-            set(),
-            skip_path_patterns=self._skip,
-            apply_ifdef=True,
-        )
+        text = self._preprocessed_text_for_file(key)
         fold_ctx = dict(defs)
         fold_ctx.update(resolve_param_map(hit.raw_params, parent=parent_ctx))
         fold_cache_key = (mod_name, _ctx_key(fold_ctx), key)

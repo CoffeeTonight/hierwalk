@@ -102,10 +102,6 @@ def _parent_port_map_roots(
     """Resolve parent nets for a child port-bit via instance port map *expr*."""
     text = re.sub(r"\s+", "", expr.strip())
     suffix = _port_select_suffix(port_name, child_net)
-    if coarse_slices and suffix is not None:
-        roots = parent_idx.expr_roots.get(expr)
-        if roots:
-            return roots
     if suffix is not None and re.match(
         r"^(?:\\(?:[A-Za-z_]\w*|\S+)|[A-Za-z_]\w*)\s*$",
         text,

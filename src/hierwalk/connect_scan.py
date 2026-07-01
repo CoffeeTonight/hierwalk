@@ -99,6 +99,7 @@ class ModuleConnectIndex:
     ff_q_roots: FrozenSet[str] = field(default_factory=frozenset)
     vector_bases: FrozenSet[str] = field(default_factory=frozenset)
     vector_scalar_rep: Dict[str, str] = field(default_factory=dict)
+    bit_precise_bases: FrozenSet[str] = field(default_factory=frozenset)
     resolve_param_dims: bool = True
 
     def copy(self) -> ModuleConnectIndex:
@@ -120,6 +121,7 @@ class ModuleConnectIndex:
             ff_q_roots=self.ff_q_roots,
             vector_bases=self.vector_bases,
             vector_scalar_rep=dict(self.vector_scalar_rep),
+            bit_precise_bases=self.bit_precise_bases,
             resolve_param_dims=self.resolve_param_dims,
         )
 
@@ -2769,7 +2771,9 @@ def _link_braced_concat_assign(
     lhs_token = lhs_nodes[0]
     lhs_base, _ = _split_net_base_suffix(lhs_token)
     bits = decl_widths.get(lhs_base)
-    if not bits or len(bits) != len(parts):
+    if not bits:
+        bits = list(range(len(parts)))
+    elif len(bits) != len(parts):
         return False
     # Verilog concat is MSB-first; ``[N:0]`` bit lists are stored LSB-first.
     if bits[-1] >= bits[0]:
@@ -2892,6 +2896,8 @@ def _parse_assign_stmt(
         iface_insts=ifaces,
         braced_concat_bases=braced_concat_bases,
     ):
+        return
+    if _is_braced_concat_rhs(rhs):
         return
     rhs_roots = _effective_assign_rhs_roots(
         rhs,
@@ -3356,6 +3362,7 @@ def scan_assign_adjacency(
     edge_prov: Optional[Dict[Tuple[str, str], ConnectEdgeProv]] = None,
     iface_insts: Optional[Set[str]] = None,
     braced_concat_bases: Optional[Set[str]] = None,
+    skip_comb_always: bool = False,
 ) -> Dict[str, Set[str]]:
     consts, pmap = _collect_const_assigns_fixed(body, param_map=param_map)
     zero_nets = {
@@ -3392,17 +3399,18 @@ def scan_assign_adjacency(
         )
         _parse_decl_alias_stmt(stmt, adj, param_map=pmap, zero_nets=zero_nets)
         _parse_primitive_gate_stmt(stmt, adj)
-        _parse_comb_always_stmt(
-            stmt,
-            adj,
-            consts=consts,
-            param_map=pmap,
-            zero_nets=zero_nets,
-            module_body=body,
-            over_approximate_if=over_approximate_if,
-            edge_prov=edge_prov,
-            stmt_line=stmt_line,
-        )
+        if not skip_comb_always:
+            _parse_comb_always_stmt(
+                stmt,
+                adj,
+                consts=consts,
+                param_map=pmap,
+                zero_nets=zero_nets,
+                module_body=body,
+                over_approximate_if=over_approximate_if,
+                edge_prov=edge_prov,
+                stmt_line=stmt_line,
+            )
     const_driven = _collect_const_driven_lhs(body, param_map=pmap)
     if const_driven:
         _prune_const_driven_adjacency(adj, const_driven)
@@ -4178,11 +4186,36 @@ def clear_bind_records_memo() -> None:
         _design_bind_index.clear()
 
 
+_BIND_SOURCE_PROBE_RE = re.compile(r"^\s*bind\s+", re.IGNORECASE | re.MULTILINE)
+
+
+def _raw_source_might_contain_bind(raw: str) -> bool:
+    return bool(_BIND_SOURCE_PROBE_RE.search(raw))
+
+
+def _design_sources_might_contain_bind(paths: Sequence[str]) -> bool:
+    from pathlib import Path
+
+    for fpath in paths:
+        path = Path(fpath)
+        if not path.is_file():
+            continue
+        try:
+            raw = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        if _raw_source_might_contain_bind(raw):
+            return True
+    return False
+
+
 def _scan_design_bind_index(
     index: object,
     paths: Sequence[str],
 ) -> Dict[str, Tuple[BindRecord, ...]]:
     if not paths:
+        return {}
+    if not _design_sources_might_contain_bind(paths):
         return {}
     from pathlib import Path
 
@@ -4203,6 +4236,8 @@ def _scan_design_bind_index(
         try:
             raw = path.read_text(encoding="utf-8", errors="ignore")
         except OSError:
+            continue
+        if not _raw_source_might_contain_bind(raw):
             continue
         guards = include_guard_macro_names(raw)
         defs = dict(running)
@@ -4230,7 +4265,10 @@ def _design_bind_lookup(index: object) -> Dict[str, Tuple[BindRecord, ...]]:
         if entry is not None and entry[0] == files_digest:
             return entry[1]
     paths = _design_source_paths_fallback(index)
-    scanned = _scan_design_bind_index(index, paths)
+    if not _design_sources_might_contain_bind(paths):
+        scanned: Dict[str, Tuple[BindRecord, ...]] = {}
+    else:
+        scanned = _scan_design_bind_index(index, paths)
     with _bind_records_memo_guard:
         entry = _design_bind_index.get(index_id)
         if entry is not None and entry[0] == files_digest:
@@ -4433,6 +4471,27 @@ def module_connect_index_stats() -> Tuple[int, int]:
     return _build_index_uncached_calls, _build_index_mem_hits
 
 
+def _compute_bit_precise_bases(
+    assign_adj: Mapping[str, Set[str]],
+    *,
+    extra: Optional[Set[str]] = None,
+) -> FrozenSet[str]:
+    """Bases wired only via literal single-bit slices (skip bloom base promotion)."""
+    slice_bases: Set[str] = set()
+    scalar_bases: Set[str] = set()
+    for key in assign_adj:
+        if "[" not in key:
+            scalar_bases.add(key)
+            continue
+        base, suffix = _split_net_base_suffix(key)
+        if base and re.match(r"^\[\d+\]$", suffix):
+            slice_bases.add(base)
+    out = slice_bases - scalar_bases
+    if extra:
+        out |= extra
+    return frozenset(out)
+
+
 def _promote_slice_edges_to_bases(
     adj: Dict[str, Set[str]],
     *,
@@ -4510,7 +4569,7 @@ def build_module_connect_index(
         if hit is not None:
             global _build_index_mem_hits
             _build_index_mem_hits += 1
-            return hit.copy()
+            return hit
         built = _build_module_connect_index_uncached(
             body,
             param_map=param_map,
@@ -4592,6 +4651,7 @@ def _build_module_connect_index_uncached(
         param_map=full_pmap,
         cell_types=cell_types,
     )
+    text_conn_lite = not resolve_param_dims
     assign_adj = scan_assign_adjacency(
         text,
         hier_links=hier_links,
@@ -4603,11 +4663,17 @@ def _build_module_connect_index_uncached(
         edge_prov=raw_edge_prov,
         iface_insts=iface_insts,
         braced_concat_bases=braced_concat_bases,
+        skip_comb_always=text_conn_lite,
     )
+    bit_precise_bases: FrozenSet[str] = frozenset()
     if not resolve_param_dims:
+        bit_precise_bases = _compute_bit_precise_bases(
+            assign_adj,
+            extra=braced_concat_bases or None,
+        )
         _promote_slice_edges_to_bases(
             assign_adj,
-            skip_bases=braced_concat_bases or None,
+            skip_bases=set(bit_precise_bases) or None,
         )
     _expand_hier_bit_links(
         hier_links,
@@ -4673,10 +4739,10 @@ def _build_module_connect_index_uncached(
         text,
         ff_barrier=ff_barrier,
         param_map=full_pmap,
-        edge_prov=raw_edge_prov,
-        ff_net_lines=ff_net_lines,
-        ff_d_roots=ff_d_raw,
-        ff_q_roots=ff_q_raw,
+        edge_prov=raw_edge_prov if not text_conn_lite else None,
+        ff_net_lines=ff_net_lines if not text_conn_lite else None,
+        ff_d_roots=ff_d_raw if not text_conn_lite else None,
+        ff_q_roots=ff_q_raw if not text_conn_lite else None,
     )
 
     expr_cache_seed: Dict[str, FrozenSet[str]] = {}
@@ -4742,15 +4808,22 @@ def _build_module_connect_index_uncached(
         ff_q_roots=frozenset(ff_q_raw),
         vector_bases=vector_bases_set,
         vector_scalar_rep=vector_scalar_rep,
+        bit_precise_bases=bit_precise_bases,
         resolve_param_dims=resolve_param_dims,
     )
 
 
 def _coarse_net_representative(mod_idx: ModuleConnectIndex, net: str) -> str:
     """Text-conn bloom filter: collapse unknown slice selects to base bus rep."""
-    base, _suffix = _split_net_base_suffix(net)
+    base, suffix = _split_net_base_suffix(net)
     if not base or base == net:
         return net
+    if (
+        base in mod_idx.bit_precise_bases
+        and suffix
+        and re.match(r"^\[\d+\]$", suffix)
+    ):
+        return mod_idx.net_rep.get(net, net)
     base_hit = mod_idx.net_rep.get(base)
     if base_hit is not None:
         return base_hit

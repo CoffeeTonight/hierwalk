@@ -862,7 +862,7 @@ class ConnectivitySession:
         self.mod_cache.clear()
         self.param_ctx_cache.clear()
         self.endpoint_resolve_cache.clear()
-        self._effective_defines_stamp = ((), (), (), ())
+        self._effective_defines_stamp = ((), (), "")
         self._effective_defines_cache.clear()
 
     def check(

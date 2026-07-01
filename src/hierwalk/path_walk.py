@@ -2466,6 +2466,19 @@ def _extend_path_walk_for_specs(
     state.flush_pending_misses()
 
 
+def _hierarchy_tsv_incremental_ready(state: PathWalkState, phase: str) -> bool:
+    """True when incremental writer already materialized hierarchy rows on disk."""
+    from hierwalk.connect_artifacts import IncrementalHierarchyTsvWriter
+
+    if phase == "text":
+        writer = state._hierarchy_text_writer
+    elif phase == "logical":
+        writer = state._hierarchy_logical_writer
+    else:
+        return False
+    return isinstance(writer, IncrementalHierarchyTsvWriter) and bool(writer._rows)
+
+
 def _flush_hierarchy_tsv_for_check(state: PathWalkState, chk) -> None:
     """Write compact hierarchy evidence for one check (hits=deepest inst, misses=stop prefix)."""
     phase = str(state._hierarchy_flush_phase or "").strip().lower()
@@ -2598,7 +2611,7 @@ def _pipeline_path_walk_text_conn(
         on_emit=state._emit_walk,
     ):
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {}
+            inflight: Dict = {}
             for idx, chk in enumerate(request.checks):
                 t_walk = time.perf_counter()
                 _walk_hierarchy_for_check(
@@ -2648,10 +2661,17 @@ def _pipeline_path_walk_text_conn(
                     )
                     return _idx, result
 
-                futures[pool.submit(_run_check)] = idx
-            for fut in as_completed(futures):
-                idx, result = fut.result()
-                results[idx] = result
+                inflight[pool.submit(_run_check)] = idx
+                for fut in tuple(inflight):
+                    if not fut.done():
+                        continue
+                    done_idx, result = fut.result()
+                    results[done_idx] = result
+                    coi_done += 1
+                    del inflight[fut]
+            for fut in as_completed(inflight):
+                done_idx, result = fut.result()
+                results[done_idx] = result
                 coi_done += 1
 
     state.flush_pending_misses()
@@ -3489,17 +3509,18 @@ def run_path_walk_connect(
                         modules_cached=text_modules_cached,
                         rows_by_path=state.rows_by_path,
                     )
-                    out_paths.hierarchy_text_tsv.write_text(
-                        format_connect_hierarchy_tsv(
-                            text_results,
-                            state.rows_by_path,
-                            phase="text",
-                            signal_tails=state._signal_tail_records,
-                            index=index,
-                            top=top_name,
-                        ),
-                        encoding="utf-8",
-                    )
+                    if not _hierarchy_tsv_incremental_ready(state, "text"):
+                        out_paths.hierarchy_text_tsv.write_text(
+                            format_connect_hierarchy_tsv(
+                                text_results,
+                                state.rows_by_path,
+                                phase="text",
+                                signal_tails=state._signal_tail_records,
+                                index=index,
+                                top=top_name,
+                            ),
+                            encoding="utf-8",
+                        )
                     state._emit_walk(
                         f"connect-text-conn written {written.resolve()}"
                     )
@@ -3599,17 +3620,18 @@ def run_path_walk_connect(
                         modules_cached=logical_modules_cached,
                         rows_by_path=state.rows_by_path,
                     )
-                    out_paths.hierarchy_logical_tsv.write_text(
-                        format_connect_hierarchy_tsv(
-                            logical_results,
-                            state.rows_by_path,
-                            phase="logical",
-                            signal_tails=state._signal_tail_records,
-                            index=index,
-                            top=top_name,
-                        ),
-                        encoding="utf-8",
-                    )
+                    if not _hierarchy_tsv_incremental_ready(state, "logical"):
+                        out_paths.hierarchy_logical_tsv.write_text(
+                            format_connect_hierarchy_tsv(
+                                logical_results,
+                                state.rows_by_path,
+                                phase="logical",
+                                signal_tails=state._signal_tail_records,
+                                index=index,
+                                top=top_name,
+                            ),
+                            encoding="utf-8",
+                        )
                     state._emit_walk(
                         f"connect-logical-conn written {written.resolve()}"
                     )

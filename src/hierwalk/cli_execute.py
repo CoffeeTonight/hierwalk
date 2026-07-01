@@ -448,6 +448,26 @@ def execute_run(cfg: RunConfig, ap) -> int:
                     print("missing connectivity request", file=sys.stderr)
                     return 1
                 extra_defines.update(connect_request.defines)
+            use_trace = cfg.connect_trace or cfg.connect_log
+            if connect_request is not None:
+                trace_on = connect_request.trace or use_trace
+                log_on = connect_request.connect_log or cfg.connect_log
+                include_ff = connect_request.include_ff or cfg.include_ff
+                if (
+                    trace_on != connect_request.trace
+                    or log_on != connect_request.connect_log
+                    or include_ff != connect_request.include_ff
+                ):
+                    connect_request = ConnectivityRequest(
+                        checks=connect_request.checks,
+                        top=connect_request.top,
+                        defines=connect_request.defines,
+                        trace=trace_on,
+                        connect_log=log_on,
+                        include_ff=include_ff,
+                        strict_generate=connect_request.strict_generate,
+                        over_approximate_if=connect_request.over_approximate_if,
+                    )
             phase = _verification_phase(cfg)
             do_text = phase in ("text", "both")
             do_logical = phase in ("logical", "both")

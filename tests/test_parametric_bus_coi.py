@@ -46,6 +46,50 @@ def test_build_module_connect_index_parametric_port_width(tmp_path: Path):
     assert "w_e" in idx.net_rep or any("w_e" in k for k in idx.net_rep)
 
 
+def test_parametric_braced_concat_text_conn_bit_precise(tmp_path: Path):
+    """Parametric ``[W-1:0]`` bus + ``{wa,wb,wc}`` must not collapse bits in text-conn."""
+    v = """
+    module top #(
+      parameter int W = 3
+    )();
+      wire wa, wb, wc, wq;
+      wire [W-1:0] bus;
+      assign bus = {wa, wb, wc};
+      assign wq = wb;
+    endmodule
+    """
+    rtl = tmp_path / "top.v"
+    rtl.write_text(v, encoding="utf-8")
+    index = DesignIndex.build({str(rtl): v})
+    _, rows = elaborate(index, "top")
+    from hierwalk.connect_request import parse_connect_request_json
+    from hierwalk.connectivity import ConnectivitySession
+
+    req = parse_connect_request_json(
+        {
+            "checks": [
+                {
+                    "id": "fan",
+                    "a": ["top.wa", "top.wc", "top.wb"],
+                    "b": "top.wq",
+                }
+            ],
+            "top": "top",
+        }
+    )
+    session = ConnectivitySession(rows=rows, index=index, top="top")
+    session.resolve_param_dims = False
+    batch = session.run_text_request(req)
+    parent = batch.results[0]
+    by_pair = {
+        (sr.endpoint_a.spec, sr.endpoint_b.spec): sr.connected
+        for sr in parent.sub_results
+    }
+    assert by_pair[("top.wa", "top.wq")] is False
+    assert by_pair[("top.wc", "top.wq")] is False
+    assert by_pair[("top.wb", "top.wq")] is True
+
+
 def test_text_conn_skips_parametric_dim_resolution(tmp_path: Path):
     """Text-conn (structural) must not evaluate ``STRB_MAX`` — decl/assign only."""
     v = """

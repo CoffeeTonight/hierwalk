@@ -1092,13 +1092,14 @@ class IncrementalHierarchyTsvWriter:
         )
         if keys:
             self._rows = [row for row in self._rows if row.check_id not in keys]
-        self._rows.extend(evidence)
-        return write_hierarchy_evidence_tsv(
-            self.path,
-            self._rows,
-            phase=self.phase,
-            compact=False,
-        )
+            self._seen = {
+                key
+                for key in self._seen
+                if key[0] not in keys
+            }
+        for row in evidence:
+            self.append_row(row)
+        return self.path.expanduser().resolve()
 
     def flush_empty(self) -> Path:
         """Write header-only TSV so downstream tools can watch the file early."""

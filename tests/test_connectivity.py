@@ -37,6 +37,19 @@ from hierwalk.connectivity import (
 )
 from hierwalk.elab import elaborate
 from hierwalk.index import DesignIndex
+
+
+def _cli_connect_result_line(stdout: str) -> str:
+    """Last data row from hier-walk connect TSV stdout (skip ``#`` comments)."""
+    lines = [
+        ln
+        for ln in stdout.strip().splitlines()
+        if ln and not ln.startswith("#")
+    ]
+    assert lines, "expected connect TSV output"
+    return lines[-1]
+
+
 UNIFIED_VERIFY = Path(
     "/home/user/tools/CodeFromAI/hc_hierarchy/design/unified_verify"
 )
@@ -1114,7 +1127,7 @@ def test_unified_verify_idx_connect():
         text=True,
         check=True,
     )
-    line = proc.stdout.strip().splitlines()[-1]
+    line = _cli_connect_result_line(proc.stdout)
     assert "True" in line
     assert "port-port" in line
 
@@ -1630,7 +1643,7 @@ def test_unified_verify_clk_reaches_gen_soc():
         text=True,
         check=True,
     )
-    line = proc.stdout.strip().splitlines()[-1]
+    line = _cli_connect_result_line(proc.stdout)
     assert "True" in line
     assert "port-hierarchy" in line
 
@@ -1658,5 +1671,5 @@ def test_unified_verify_clk_not_idx():
         text=True,
         check=True,
     )
-    line = proc.stdout.strip().splitlines()[-1]
+    line = _cli_connect_result_line(proc.stdout)
     assert "False" in line
