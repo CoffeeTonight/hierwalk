@@ -37,6 +37,7 @@ from hierwalk.connect.shared.resolve_cache import (
     resolve_endpoint_cached as _resolve_endpoint_cached,
 )
 from hierwalk.connect.text.index import TextGrepCache
+from hierwalk.connect.text.walk import TextWalkSessionCaches
 from hierwalk.connect.text.pair import (
     connect_pair_text_deduped as _connect_pair_text_deduped,
 )
@@ -397,6 +398,10 @@ class ConnectivitySession:
         ModuleConnectIndex,
     ] = field(default_factory=dict)
     text_grep_cache: TextGrepCache = field(default_factory=dict)
+    text_walk_caches: TextWalkSessionCaches = field(
+        default_factory=TextWalkSessionCaches,
+        repr=False,
+    )
     param_ctx_cache: Dict[str, Mapping[str, str]] = field(default_factory=dict)
     endpoint_resolve_cache: EndpointResolveCache = field(
         default_factory=dict,
@@ -458,6 +463,7 @@ class ConnectivitySession:
     def clear_cache(self) -> None:
         self.mod_cache.clear()
         self.text_grep_cache.clear()
+        self.text_walk_caches = TextWalkSessionCaches()
         self.param_ctx_cache.clear()
         self.endpoint_resolve_cache.clear()
         self._effective_defines_stamp = ((), (), "")
@@ -793,6 +799,7 @@ class ConnectivitySession:
                 dedup_lock=dedup_lock,
                 endpoint_cache=self.endpoint_resolve_cache,
                 endpoint_cache_lock=self._endpoint_resolve_lock,
+                walk_caches=self.text_walk_caches,
             )
 
         fanout_mode = chk.expand.fanout_mode if chk.expand is not None else "all"
@@ -825,6 +832,7 @@ class ConnectivitySession:
                     dedup_lock=dedup_lock,
                     endpoint_cache=self.endpoint_resolve_cache,
                     endpoint_cache_lock=self._endpoint_resolve_lock,
+                    walk_caches=self.text_walk_caches,
                 )
             )
         return aggregate_connect_results(
@@ -911,10 +919,21 @@ class ConnectivitySession:
                 results = [r for r in ordered if r is not None]
 
         leaves, unique = dedup_stats[0], dedup_stats[1]
+        wc = self.text_walk_caches
         if on_progress is not None and leaves > unique:
             on_progress(
                 f"connect: text-coi dedup leaves={leaves} unique={unique} "
                 f"saved={leaves - unique}"
+            )
+        if on_progress is not None:
+            on_progress(
+                "connect: text-walk cache "
+                f"grep_mods={len(self.text_grep_cache)} "
+                f"scope_idx={len(wc.scope_mod_idx)} "
+                f"net_rep={len(wc.net_rep_cache)} "
+                f"equiv={len(wc.equiv_cache)} "
+                f"blackbox={len(wc.blackbox_link_cache)} "
+                f"parent_up={len(wc.parent_up_cache)}"
             )
         if on_progress is not None and workers > 1:
             on_progress(f"connect: text-coi parallel workers={workers}")

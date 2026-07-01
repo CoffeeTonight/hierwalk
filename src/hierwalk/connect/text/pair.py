@@ -17,6 +17,7 @@ from hierwalk.connect.text.dedup import (
 )
 from hierwalk.connect.text.index import TextGrepCache
 from hierwalk.connect.text.walk import (
+    TextWalkSessionCaches,
     bidirectional_text_grep,
     forward_text_grep_to_scope,
     text_connect_note,
@@ -45,6 +46,7 @@ def connect_pair_text(
     rows_by_path: Optional[Mapping[str, FlatRow]],
     endpoint_cache: Optional[EndpointResolveCache] = None,
     endpoint_cache_lock: Optional[threading.Lock] = None,
+    walk_caches: Optional[TextWalkSessionCaches] = None,
 ) -> ConnectResult:
     """
     Text-conn: name grep only — not whether a value actually propagates.
@@ -116,6 +118,7 @@ def connect_pair_text(
             grep_cache=text_grep_cache,
             param_ctx_cache=param_ctx_cache,
             elab_index=elab_index,
+            walk_caches=walk_caches,
         )
         walk_notes: List[str] = []
         if not ok and diag is not None:
@@ -155,6 +158,7 @@ def connect_pair_text(
             grep_cache=text_grep_cache,
             param_ctx_cache=param_ctx_cache,
             elab_index=elab_index,
+            walk_caches=walk_caches,
         )
         walk_notes: List[str] = []
         if not ok and diag is not None:
@@ -215,6 +219,7 @@ def connect_pair_text_deduped(
     dedup_lock: Optional[threading.Lock] = None,
     endpoint_cache: Optional[EndpointResolveCache] = None,
     endpoint_cache_lock: Optional[threading.Lock] = None,
+    walk_caches: Optional[TextWalkSessionCaches] = None,
 ) -> ConnectResult:
     lookup = rows_by_path
     ep_a, err_a = resolve_endpoint_cached(
@@ -272,6 +277,7 @@ def connect_pair_text_deduped(
         rows_by_path=rows_by_path,
         endpoint_cache=endpoint_cache,
         endpoint_cache_lock=endpoint_cache_lock,
+        walk_caches=walk_caches,
     )
 
     if dedup_lock is not None:

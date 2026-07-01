@@ -281,3 +281,34 @@ def test_text_conn_mixed_slice_blooms_to_base(tmp_path: Path):
     )
     assert session.check_text("top.bus", "top.out").connected is True
     assert session.check_text("top.bus[0]", "top.out").connected is True
+
+
+def test_text_walk_session_cache_survives_across_checks(tmp_path):
+    """Module/net rep memo from one check is reused on the next (same session)."""
+    v = """
+    module top;
+      wire [3:0] a, b;
+      assign b = a;
+    endmodule
+    """
+    rtl = tmp_path / "top.v"
+    rtl.write_text(v, encoding="utf-8")
+    index = DesignIndex.build({str(rtl): v})
+    _, rows = elaborate(index, "top")
+    session = ConnectivitySession(
+        rows=rows,
+        index=index,
+        top="top",
+        resolve_param_dims=False,
+    )
+    session.check_text("top.a[0]", "top.b[0]")
+    wc = session.text_walk_caches
+    assert len(wc.scope_mod_idx) >= 1
+    assert len(wc.net_rep_cache) >= 1
+    before_equiv = len(wc.equiv_cache)
+    before_parent = len(wc.parent_up_cache)
+    session.check_text("top.a[1]", "top.b[1]")
+    assert "top" in wc.scope_mod_idx
+    assert len(wc.net_rep_cache) >= 2
+    assert len(wc.equiv_cache) >= before_equiv
+    assert len(wc.parent_up_cache) >= before_parent

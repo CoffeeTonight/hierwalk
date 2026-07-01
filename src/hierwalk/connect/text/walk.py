@@ -214,6 +214,27 @@ class _ExpandEdge:
 
 
 @dataclass
+class TextWalkSessionCaches:
+    """Cross-check text-walk memo (reused across checks in one session)."""
+
+    port_rep_cache: Dict[Tuple[int, str], str] = field(default_factory=dict)
+    net_rep_cache: Dict[Tuple[int, str], str] = field(default_factory=dict)
+    child_text_idx_cache: Dict[
+        Tuple[str, Tuple[Tuple[str, str], ...], Tuple[Tuple[str, str], ...], bool],
+        TextGrepIndex,
+    ] = field(default_factory=dict)
+    equiv_cache: Dict[Tuple[NetState, NetState], bool] = field(default_factory=dict)
+    blackbox_link_cache: Dict[Tuple[str, Tuple[Tuple[str, str], ...], str, str], bool] = (
+        field(default_factory=dict)
+    )
+    parent_up_cache: Dict[
+        Tuple[str, str, str],
+        List[Tuple[str, str, str, bool, Optional[str]]],
+    ] = field(default_factory=dict)
+    scope_mod_idx: Dict[str, TextGrepIndex] = field(default_factory=dict)
+
+
+@dataclass
 class _SearchCtx:
     rows_by_path: Dict[str, FlatRow]
     child_by_parent_leaf: Dict[Tuple[str, str], str]
@@ -230,10 +251,22 @@ class _SearchCtx:
     over_approximate_if: bool = True
     port_rep_cache: Dict[Tuple[int, str], str] = field(default_factory=dict)
     net_rep_cache: Dict[Tuple[int, str], str] = field(default_factory=dict)
-    child_text_idx_cache: Dict[Tuple[str, Tuple[Tuple[str, str], ...]], TextGrepIndex] = (
+    child_text_idx_cache: Dict[
+        Tuple[str, Tuple[Tuple[str, str], ...], Tuple[Tuple[str, str], ...], bool],
+        TextGrepIndex,
+    ] = field(default_factory=dict)
+    equiv_cache: Dict[Tuple[NetState, NetState], bool] = field(default_factory=dict)
+    blackbox_link_cache: Dict[Tuple[str, Tuple[Tuple[str, str], ...], str, str], bool] = (
         field(default_factory=dict)
     )
-    equiv_cache: Dict[Tuple[NetState, NetState], bool] = field(default_factory=dict)
+    parent_up_cache: Dict[
+        Tuple[str, str, str],
+        List[Tuple[str, str, str, bool, Optional[str]]],
+    ] = field(default_factory=dict)
+    scope_mod_idx: Dict[str, TextGrepIndex] = field(default_factory=dict)
+
+
+_FRONTIER_SORT_THRESHOLD = 12
 
 
 def _heuristic_distance(ctx: _SearchCtx, scope: str) -> int:
@@ -338,6 +371,7 @@ def _build_search_ctx(
     param_ctx_cache: Optional[Dict[str, Mapping[str, str]]] = None,
     over_approximate_if: bool = True,
     elab_index: Optional[ElabIndex] = None,
+    walk_caches: Optional[TextWalkSessionCaches] = None,
 ) -> _SearchCtx:
     if elab_index is not None:
         rows_by_path = elab_index.rows_by_path
@@ -374,6 +408,7 @@ def _build_search_ctx(
             over_approximate_if=over_approximate_if,
         )
         goal_rep = text_net_representative(gidx, goal_net)
+    wc = walk_caches
     return _SearchCtx(
         rows_by_path=rows_by_path,
         child_by_parent_leaf=child_by_parent_leaf,
@@ -392,6 +427,13 @@ def _build_search_ctx(
             else {}
         ),
         over_approximate_if=over_approximate_if,
+        port_rep_cache=wc.port_rep_cache if wc is not None else {},
+        net_rep_cache=wc.net_rep_cache if wc is not None else {},
+        child_text_idx_cache=wc.child_text_idx_cache if wc is not None else {},
+        equiv_cache=wc.equiv_cache if wc is not None else {},
+        blackbox_link_cache=wc.blackbox_link_cache if wc is not None else {},
+        parent_up_cache=wc.parent_up_cache if wc is not None else {},
+        scope_mod_idx=wc.scope_mod_idx if wc is not None else {},
     )
 
 
@@ -448,18 +490,10 @@ def _text_states_equivalent(
         ctx.equiv_cache[cache_key] = ok
         return ok
     # One side sliced, one base: bloom via net_rep (text-conn semantics).
-    row = ctx.rows_by_path.get(l_scope)
-    if row is None:
+    mod_idx = _mod_idx_for_scope(ctx, l_scope)
+    if mod_idx is None:
         ctx.equiv_cache[cache_key] = False
         return False
-    mod_idx = text_grep_index(
-        ctx.grep_cache,
-        ctx.index,
-        row.module,
-        _cached_param_ctx(ctx, row),
-        defines=ctx.defines,
-        over_approximate_if=ctx.over_approximate_if,
-    )
     l_rep = _cached_net_rep(mod_idx, l_net, ctx.net_rep_cache)
     r_rep = _cached_net_rep(mod_idx, r_net, ctx.net_rep_cache)
     ok = l_rep == r_rep
@@ -516,6 +550,26 @@ def _cached_child_text_grep_index(
     return built
 
 
+def _mod_idx_for_scope(ctx: _SearchCtx, scope: str) -> Optional[TextGrepIndex]:
+    hit = ctx.scope_mod_idx.get(scope)
+    if hit is not None:
+        return hit
+    row = ctx.rows_by_path.get(scope)
+    if row is None:
+        return None
+    mod_ctx = _cached_param_ctx(ctx, row)
+    built = text_grep_index(
+        ctx.grep_cache,
+        ctx.index,
+        row.module,
+        mod_ctx,
+        defines=ctx.defines,
+        over_approximate_if=ctx.over_approximate_if,
+    )
+    ctx.scope_mod_idx[scope] = built
+    return built
+
+
 def _text_child_port_links_input_or_empty_passthrough(
     ctx: _SearchCtx,
     cell: str,
@@ -526,6 +580,10 @@ def _text_child_port_links_input_or_empty_passthrough(
 ) -> bool:
     """Child COI link, or scalar 1-in/1-out empty-module vendor passthrough."""
     out_base = out_port.split("[", 1)[0]
+    bb_key = (cell, tuple(sorted(param_map.items())), in_port, out_base)
+    cached = ctx.blackbox_link_cache.get(bb_key)
+    if cached is not None:
+        return cached
     if not child_body.strip():
         passthrough = _empty_module_passthrough_ports(
             ctx.index,
@@ -534,13 +592,19 @@ def _text_child_port_links_input_or_empty_passthrough(
             defines=ctx.defines,
         )
         if not passthrough:
+            ctx.blackbox_link_cache[bb_key] = False
             return False
         in_base = in_port.split("[", 1)[0]
-        return in_base == passthrough[0] and out_base == passthrough[1]
+        ok = in_base == passthrough[0] and out_base == passthrough[1]
+        ctx.blackbox_link_cache[bb_key] = ok
+        return ok
     child_idx = _cached_child_text_grep_index(ctx, cell, child_body, param_map)
     if child_idx is None:
+        ctx.blackbox_link_cache[bb_key] = False
         return False
-    return _text_child_port_links_input(child_idx, in_port, out_base)
+    ok = _text_child_port_links_input(child_idx, in_port, out_base)
+    ctx.blackbox_link_cache[bb_key] = ok
+    return ok
 
 
 def _text_child_port_links_input(
@@ -626,6 +690,74 @@ def _text_inst_blackbox_out_roots(
     return frozenset(out_roots)
 
 
+def _compute_parent_up_targets(
+    ctx: _SearchCtx,
+    scope: str,
+    net: str,
+    rep: str,
+    row: FlatRow,
+    mod_idx: TextGrepIndex,
+    mod_ctx: Mapping[str, str],
+) -> List[Tuple[str, str, bool, Optional[str]]]:
+    """Return cached parent-up rows: (target_net, detail, preserve_sel, granularity)."""
+    parent_path = row.parent_path
+    if not parent_path:
+        return []
+    parent_row = ctx.rows_by_path.get(parent_path)
+    if parent_row is None:
+        return []
+    parent_idx = _mod_idx_for_scope(ctx, parent_path)
+    if parent_idx is None:
+        return []
+    targets: List[Tuple[str, str, bool, Optional[str]]] = []
+    child_lbl = _net_label(scope, net)
+    for port_name, expr in parent_idx.inst_ports.get(row.inst_leaf, ()):
+        if not _child_port_rep_matches(
+            mod_idx,
+            port_name,
+            rep,
+            child_net=net,
+            rep_cache=ctx.port_rep_cache,
+        ):
+            continue
+        roots = _parent_port_map_roots(
+            port_name,
+            expr,
+            net,
+            parent_idx,
+            mod_ctx,
+            coarse_slices=True,
+        )
+        lbl = _net_label(scope, net if net != port_name else port_name)
+        if not roots and expr.strip():
+            targets.append(
+                (
+                    expr.strip(),
+                    (
+                        f"{lbl} -> {_net_label(parent_path, expr.strip())} "
+                        f"(port map {row.inst_leaf}.{port_name} = {expr} "
+                        f"in parent {parent_row.module})"
+                    ),
+                    False,
+                    "structural",
+                )
+            )
+        for root in roots:
+            targets.append(
+                (
+                    root,
+                    (
+                        f"{lbl} -> {_net_label(parent_path, root)} "
+                        f"(port map {row.inst_leaf}.{port_name} = {expr} "
+                        f"in parent {parent_row.module})"
+                    ),
+                    True,
+                    None,
+                )
+            )
+    return targets
+
+
 def _expand_state(
     state: NetState,
     ctx: _SearchCtx,
@@ -634,11 +766,10 @@ def _expand_state(
     row = ctx.rows_by_path.get(scope)
     if row is None:
         return []
+    mod_idx = _mod_idx_for_scope(ctx, scope)
+    if mod_idx is None:
+        return []
     mod_ctx = _cached_param_ctx(ctx, row)
-    mod_idx = text_grep_index(ctx.grep_cache,
-        ctx.index,
-        row.module,
-        mod_ctx, defines=ctx.defines, over_approximate_if=ctx.over_approximate_if)
     rep = _cached_net_rep(mod_idx, net, ctx.net_rep_cache)
 
     out: List[_ExpandEdge] = []
@@ -703,15 +834,9 @@ def _expand_state(
         if child_path:
             child_row = ctx.rows_by_path.get(child_path)
             if child_row is not None:
-                child_ctx = _cached_param_ctx(ctx, child_row)
-                child_idx = text_grep_index(
-                    ctx.grep_cache,
-                    ctx.index,
-                    child_row.module,
-                    child_ctx,
-                    defines=ctx.defines,
-                    over_approximate_if=ctx.over_approximate_if,
-                )
+                child_idx = _mod_idx_for_scope(ctx, child_path)
+                if child_idx is None:
+                    continue
                 push(
                     child_path,
                     port,
@@ -746,11 +871,9 @@ def _expand_state(
         child_rec = ctx.index.get_module(child_row.module)
         if child_rec is not None and child_rec.is_interface:
             continue
-        child_ctx = _cached_param_ctx(ctx, child_row)
-        child_idx = text_grep_index(ctx.grep_cache,
-            ctx.index,
-            child_row.module,
-            child_ctx, defines=ctx.defines, over_approximate_if=ctx.over_approximate_if)
+        child_idx = _mod_idx_for_scope(ctx, child_path)
+        if child_idx is None:
+            continue
         push(
             child_path,
             port,
@@ -763,59 +886,34 @@ def _expand_state(
             preserve_port_select=True,
         )
 
-    parent_path = row.parent_path
-    if parent_path:
+    pu_key = (scope, rep, net)
+    parent_targets = ctx.parent_up_cache.get(pu_key)
+    if parent_targets is None:
+        parent_targets = _compute_parent_up_targets(
+            ctx,
+            scope,
+            net,
+            rep,
+            row,
+            mod_idx,
+            mod_ctx,
+        )
+        ctx.parent_up_cache[pu_key] = parent_targets
+    parent_path = row.parent_path or ""
+    parent_idx = _mod_idx_for_scope(ctx, parent_path) if parent_path else None
+    for target_net, detail, preserve_sel, granularity in parent_targets:
+        push(
+            parent_path,
+            target_net,
+            kind="parent-up",
+            detail=detail,
+            target_mod_idx=parent_idx,
+            preserve_port_select=preserve_sel,
+            granularity=granularity,
+        )
+    if parent_path and parent_idx is not None:
         parent_row = ctx.rows_by_path.get(parent_path)
         if parent_row is not None:
-            parent_ctx = _cached_param_ctx(ctx, parent_row)
-            parent_idx = text_grep_index(ctx.grep_cache,
-                ctx.index,
-                parent_row.module,
-                parent_ctx, defines=ctx.defines, over_approximate_if=ctx.over_approximate_if)
-            for port_name, expr in parent_idx.inst_ports.get(row.inst_leaf, ()):
-                if not _child_port_rep_matches(
-                    mod_idx,
-                    port_name,
-                    rep,
-                    child_net=net,
-                    rep_cache=ctx.port_rep_cache,
-                ):
-                    continue
-                roots = _parent_port_map_roots(
-                    port_name,
-                    expr,
-                    net,
-                    parent_idx,
-                    mod_ctx,
-                    coarse_slices=True,
-                )
-                child_lbl = _net_label(scope, net if net != port_name else port_name)
-                if not roots and expr.strip():
-                    push(
-                        parent_path,
-                        expr.strip(),
-                        kind="parent-up",
-                        detail=(
-                            f"{child_lbl} -> {_net_label(parent_path, expr.strip())} "
-                            f"(port map {row.inst_leaf}.{port_name} = {expr} "
-                            f"in parent {parent_row.module})"
-                        ),
-                        target_mod_idx=parent_idx,
-                        granularity="structural",
-                    )
-                for root in roots:
-                    push(
-                        parent_path,
-                        root,
-                        kind="parent-up",
-                        detail=(
-                            f"{child_lbl} -> {_net_label(parent_path, root)} "
-                            f"(port map {row.inst_leaf}.{port_name} = {expr} "
-                            f"in parent {parent_row.module})"
-                        ),
-                        target_mod_idx=parent_idx,
-                        preserve_port_select=True,
-                    )
             cur_rec = ctx.index.get_module(row.module)
             skip_iface_hier = cur_rec is not None and cur_rec.is_interface
             for (inst_leaf, port), parent_reps in parent_idx.hier_ref_targets.items():
@@ -852,31 +950,35 @@ def _expand_state(
 def _equiv_rep_key(
     state: NetState,
     ctx: _SearchCtx,
+    *,
+    mod_idx: Optional[TextGrepIndex] = None,
 ) -> Optional[Tuple[str, str]]:
     scope, net = state
     if "[" in net:
         return None
-    row = ctx.rows_by_path.get(scope)
-    if row is None:
+    if mod_idx is None:
+        mod_idx = _mod_idx_for_scope(ctx, scope)
+    if mod_idx is None:
         return None
-    mod_idx = text_grep_index(
-        ctx.grep_cache,
-        ctx.index,
-        row.module,
-        _cached_param_ctx(ctx, row),
-        defines=ctx.defines,
-        over_approximate_if=ctx.over_approximate_if,
-    )
     rep = _cached_net_rep(mod_idx, net, ctx.net_rep_cache)
     return (scope, rep)
 
 
 @dataclass
 class _SeenRepIndex:
+    by_exact: Dict[Tuple[str, str], Set[NetState]] = field(default_factory=dict)
     by_rep: Dict[Tuple[str, str], Set[NetState]] = field(default_factory=dict)
 
-    def add(self, state: NetState, ctx: _SearchCtx) -> None:
-        key = _equiv_rep_key(state, ctx)
+    def add(
+        self,
+        state: NetState,
+        ctx: _SearchCtx,
+        *,
+        mod_idx: Optional[TextGrepIndex] = None,
+    ) -> None:
+        scope, net = state
+        self.by_exact.setdefault((scope, net), set()).add(state)
+        key = _equiv_rep_key(state, ctx, mod_idx=mod_idx)
         if key is not None:
             self.by_rep.setdefault(key, set()).add(state)
 
@@ -885,14 +987,19 @@ class _SeenRepIndex:
         state: NetState,
         candidates: Set[NetState],
         ctx: _SearchCtx,
+        *,
+        mod_idx: Optional[TextGrepIndex] = None,
     ) -> Optional[NetState]:
-        key = _equiv_rep_key(state, ctx)
-        if key is None:
-            return None
-        overlap = self.by_rep.get(key, set()) & candidates
-        if not overlap:
-            return None
-        return min(overlap, key=lambda s: (len(s[1]), s[1]))
+        scope, net = state
+        overlap = self.by_exact.get((scope, net), set()) & candidates
+        if overlap:
+            return min(overlap, key=lambda s: (len(s[1]), s[1]))
+        key = _equiv_rep_key(state, ctx, mod_idx=mod_idx)
+        if key is not None:
+            overlap = self.by_rep.get(key, set()) & candidates
+            if overlap:
+                return min(overlap, key=lambda s: (len(s[1]), s[1]))
+        return None
 
 
 def _find_equivalent_in(
@@ -1033,6 +1140,7 @@ def bidirectional_text_grep(
     grep_cache: Optional[TextGrepCache] = None,
     param_ctx_cache: Optional[Dict[str, Mapping[str, str]]] = None,
     elab_index: Optional[ElabIndex] = None,
+    walk_caches: Optional[TextWalkSessionCaches] = None,
 ) -> Tuple[bool, List[ConnectHop], int, Optional[CoiWalkDiagnostic]]:
     over_approx = _resolve_over_approximate_if(strict_generate, over_approximate_if)
     cache = grep_cache if grep_cache is not None else {}
@@ -1047,20 +1155,15 @@ def bidirectional_text_grep(
         param_ctx_cache=param_ctx_cache,
         over_approximate_if=over_approx,
         elab_index=elab_index,
+        walk_caches=walk_caches,
     )
 
     start_row = ctx.rows_by_path.get(start[0])
     if start_row is None:
         return False, [], 0, None
-    start_ctx = _cached_param_ctx(ctx, start_row)
-    start_idx = text_grep_index(
-        cache,
-        index,
-        start_row.module,
-        start_ctx,
-        defines=defines,
-        over_approximate_if=over_approx,
-    )
+    start_idx = _mod_idx_for_scope(ctx, start[0])
+    if start_idx is None:
+        return False, [], 0, None
     start_key: NetState = (start[0], start[1])
     if not start[1]:
         start_key = _state_key(
@@ -1086,15 +1189,9 @@ def bidirectional_text_grep(
             return False, [], len(cache), None
         goal_key = (goal[0], goal[1])
         if not goal[1]:
-            goal_ctx = _cached_param_ctx(ctx, goal_row)
-            goal_idx = text_grep_index(
-                cache,
-                index,
-                goal_row.module,
-                goal_ctx,
-                defines=defines,
-                over_approximate_if=over_approx,
-            )
+            goal_idx = _mod_idx_for_scope(ctx, goal[0])
+            if goal_idx is None:
+                return False, [], len(cache), None
             goal_key = _state_key(
                 goal[0],
                 goal[1],
@@ -1106,8 +1203,8 @@ def bidirectional_text_grep(
     seen_b: Set[NetState] = {goal_key}
     seen_f_rep = _SeenRepIndex()
     seen_b_rep = _SeenRepIndex()
-    seen_f_rep.add(start_key, ctx)
-    seen_b_rep.add(goal_key, ctx)
+    seen_f_rep.add(start_key, ctx, mod_idx=start_idx)
+    seen_b_rep.add(goal_key, ctx, mod_idx=_mod_idx_for_scope(ctx, goal_key[0]))
     front_f: Set[NetState] = {start_key}
     front_b: Set[NetState] = {goal_key}
     prev_f: Dict[NetState, PrevStep] = {}
@@ -1130,7 +1227,8 @@ def bidirectional_text_grep(
             depth = ctx.depth_by_path.get(scope, 10**9)
             h = abs(depth - toward_depth)
             ordered.append((h, len(scope), state))
-        ordered.sort()
+        if len(ordered) > _FRONTIER_SORT_THRESHOLD:
+            ordered.sort()
 
         next_front: Set[NetState] = set()
         for _, _, state in ordered:
@@ -1139,7 +1237,11 @@ def bidirectional_text_grep(
                 if nxt in seen:
                     continue
                 seen.add(nxt)
-                rep_index.add(nxt, ctx)
+                rep_index.add(
+                    nxt,
+                    ctx,
+                    mod_idx=_mod_idx_for_scope(ctx, nxt[0]),
+                )
                 prev[nxt] = (state, edge.kind, edge.detail)
                 if _find_equivalent_in(
                     nxt,
@@ -1309,6 +1411,7 @@ def forward_text_grep_to_scope(
     grep_cache: Optional[TextGrepCache] = None,
     param_ctx_cache: Optional[Dict[str, Mapping[str, str]]] = None,
     elab_index: Optional[ElabIndex] = None,
+    walk_caches: Optional[TextWalkSessionCaches] = None,
 ) -> Tuple[bool, List[ConnectHop], int, Optional[CoiWalkDiagnostic]]:
     over_approx = _resolve_over_approximate_if(strict_generate, over_approximate_if)
     cache = grep_cache if grep_cache is not None else {}
@@ -1323,15 +1426,14 @@ def forward_text_grep_to_scope(
         param_ctx_cache=param_ctx_cache,
         over_approximate_if=over_approx,
         elab_index=elab_index,
+        walk_caches=walk_caches,
     )
     start_row = ctx.rows_by_path.get(start[0])
     if start_row is None:
         return False, [], 0, None
-    start_ctx = _cached_param_ctx(ctx, start_row)
-    start_idx = text_grep_index(cache,
-        index,
-        start_row.module,
-        start_ctx, defines=defines, over_approximate_if=over_approx)
+    start_idx = _mod_idx_for_scope(ctx, start[0])
+    if start_idx is None:
+        return False, [], 0, None
     start_key = _state_key(
         start[0],
         start[1],
@@ -1346,10 +1448,13 @@ def forward_text_grep_to_scope(
     prev: Dict[NetState, PrevStep] = {}
 
     while front:
-        ordered = sorted(
-            front,
-            key=lambda s: (_heuristic_distance(ctx, s[0]), len(s[0])),
-        )
+        if len(front) > _FRONTIER_SORT_THRESHOLD:
+            ordered = sorted(
+                front,
+                key=lambda s: (_heuristic_distance(ctx, s[0]), len(s[0])),
+            )
+        else:
+            ordered = list(front)
         next_front: Set[NetState] = set()
         for state in ordered:
             for edge in _expand_state(state, ctx):
