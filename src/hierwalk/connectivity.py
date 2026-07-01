@@ -45,6 +45,16 @@ from hierwalk.models import ConnectEndpoint, ConnectHop, ConnectResult, ElabInde
 EndpointResolveCache = Dict[str, Tuple[ConnectEndpoint, Tuple[str, ...]]]
 
 
+def _copy_connect_endpoint(ep: ConnectEndpoint) -> ConnectEndpoint:
+    return ConnectEndpoint(
+        spec=ep.spec,
+        inst_path=ep.inst_path,
+        port_name=ep.port_name,
+        module=ep.module,
+        port_found=ep.port_found,
+    )
+
+
 def _resolve_endpoint_cached(
     spec: str,
     rows: Sequence[FlatRow],
@@ -53,14 +63,19 @@ def _resolve_endpoint_cached(
     top: str,
     rows_by_path: Optional[Mapping[str, FlatRow]] = None,
     cache: Optional[EndpointResolveCache] = None,
+    cache_lock: Optional[threading.Lock] = None,
 ) -> Tuple[ConnectEndpoint, List[str]]:
     """Resolve one endpoint spec; reuse prior result when *cache* is shared."""
     text = (spec or "").strip()
     if cache is not None and text:
-        hit = cache.get(text)
+        if cache_lock is not None:
+            with cache_lock:
+                hit = cache.get(text)
+        else:
+            hit = cache.get(text)
         if hit is not None:
             ep, errs = hit
-            return ep, list(errs)
+            return _copy_connect_endpoint(ep), list(errs)
     ep, errs = resolve_endpoint(
         spec,
         rows,
@@ -70,7 +85,12 @@ def _resolve_endpoint_cached(
         rows_by_path=rows_by_path,
     )
     if cache is not None and text:
-        cache[text] = (ep, tuple(errs))
+        stored = (ep, tuple(errs))
+        if cache_lock is not None:
+            with cache_lock:
+                cache.setdefault(text, stored)
+        else:
+            cache.setdefault(text, stored)
     return ep, errs
 
 
@@ -420,6 +440,7 @@ def _connect_pair(
     rows_by_path: Optional[Mapping[str, FlatRow]] = None,
     resolve_param_dims: bool = True,
     endpoint_cache: Optional[EndpointResolveCache] = None,
+    endpoint_cache_lock: Optional[threading.Lock] = None,
 ) -> ConnectResult:
     lookup = (
         rows_by_path
@@ -433,6 +454,7 @@ def _connect_pair(
         top=top,
         rows_by_path=lookup,
         cache=endpoint_cache,
+        cache_lock=endpoint_cache_lock,
     )
     ep_b, err_b = _resolve_endpoint_cached(
         endpoint_b,
@@ -441,6 +463,7 @@ def _connect_pair(
         top=top,
         rows_by_path=lookup,
         cache=endpoint_cache,
+        cache_lock=endpoint_cache_lock,
     )
     errors = list(err_a) + list(err_b)
 
@@ -674,6 +697,7 @@ def _connect_pair_text_deduped(
     dedup_stats: List[int],
     dedup_lock: Optional[threading.Lock] = None,
     endpoint_cache: Optional[EndpointResolveCache] = None,
+    endpoint_cache_lock: Optional[threading.Lock] = None,
 ) -> ConnectResult:
     lookup = rows_by_path
     ep_a, err_a = _resolve_endpoint_cached(
@@ -683,6 +707,7 @@ def _connect_pair_text_deduped(
         top=top,
         rows_by_path=lookup,
         cache=endpoint_cache,
+        cache_lock=endpoint_cache_lock,
     )
     ep_b, err_b = _resolve_endpoint_cached(
         endpoint_b,
@@ -691,6 +716,7 @@ def _connect_pair_text_deduped(
         top=top,
         rows_by_path=lookup,
         cache=endpoint_cache,
+        cache_lock=endpoint_cache_lock,
     )
     errors = list(err_a) + list(err_b)
     key = _text_coi_dedup_key(ep_a, ep_b, errors)
@@ -726,6 +752,7 @@ def _connect_pair_text_deduped(
             rows_by_path=rows_by_path,
             resolve_param_dims=False,
             endpoint_cache=endpoint_cache,
+            endpoint_cache_lock=endpoint_cache_lock,
         )
         dedup_cache[key] = result
         return result
@@ -761,6 +788,10 @@ class ConnectivitySession:
     param_ctx_cache: Dict[str, Mapping[str, str]] = field(default_factory=dict)
     endpoint_resolve_cache: EndpointResolveCache = field(
         default_factory=dict,
+        repr=False,
+    )
+    _endpoint_resolve_lock: threading.Lock = field(
+        default_factory=threading.Lock,
         repr=False,
     )
     elab_index: Optional[ElabIndex] = None
@@ -895,6 +926,7 @@ class ConnectivitySession:
                 rows_by_path=self.rows_by_path,
                 resolve_param_dims=self.resolve_param_dims,
                 endpoint_cache=self.endpoint_resolve_cache,
+                endpoint_cache_lock=self._endpoint_resolve_lock,
             )
         else:
             fanout_mode = expand.fanout_mode if expand is not None else "all"
@@ -920,6 +952,7 @@ class ConnectivitySession:
                         rows_by_path=self.rows_by_path,
                         resolve_param_dims=self.resolve_param_dims,
                         endpoint_cache=self.endpoint_resolve_cache,
+                        endpoint_cache_lock=self._endpoint_resolve_lock,
                     )
                 )
             result = aggregate_connect_results(
@@ -1100,6 +1133,7 @@ class ConnectivitySession:
                 dedup_stats=dedup_stats,
                 dedup_lock=dedup_lock,
                 endpoint_cache=self.endpoint_resolve_cache,
+                endpoint_cache_lock=self._endpoint_resolve_lock,
             )
 
         fanout_mode = chk.expand.fanout_mode if chk.expand is not None else "all"
@@ -1131,6 +1165,7 @@ class ConnectivitySession:
                     dedup_stats=dedup_stats,
                     dedup_lock=dedup_lock,
                     endpoint_cache=self.endpoint_resolve_cache,
+                    endpoint_cache_lock=self._endpoint_resolve_lock,
                 )
             )
         return aggregate_connect_results(

@@ -441,6 +441,8 @@ def _scan_sources_fused(
         include_dirs=include_dirs,
         base_defines=defines,
         skip_path_patterns=skip_tuple,
+        on_progress=on_progress,
+        file_via_filelist=file_via_filelist,
     )
     tasks: List[
         Tuple[str, Tuple[str, ...], Tuple[Tuple[str, str], ...], ScanMode, Tuple[str, ...]]

@@ -1393,7 +1393,8 @@ def test_connectivity_session_reuses_mod_cache(tmp_path: Path):
     assert uncached == 1
     assert hits == 0
     assert iso_uncached == 1
-    assert iso_hits == 1
+    # Second standalone call may load the disk sidecar written by the first.
+    assert iso_hits == 0
 
 
 def test_check_connectivity_batch_same_api_as_single(tmp_path: Path):

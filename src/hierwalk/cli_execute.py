@@ -50,6 +50,7 @@ from hierwalk.connect_artifacts import (
 from hierwalk.run_request import (
     normalize_run_mode,
     resolve_connectivity_request,
+    resolve_effective_index_strategy,
     resolve_effective_run_mode,
 )
 from hierwalk.cone import (
@@ -103,8 +104,8 @@ def execute_run(cfg: RunConfig, ap) -> int:
         connect_request = resolve_connectivity_request(cfg)
 
     effective_mode = resolve_effective_run_mode(cfg, connect_request)
-    index_strategy = normalize_run_mode(cfg.index_strategy or "full-index")
-    path_walk_mode = effective_mode == "path-walk" or index_strategy == "path-walk"
+    index_strategy = resolve_effective_index_strategy(cfg, effective_mode)
+    path_walk_mode = index_strategy == "path-walk"
     cone_mode = effective_mode == "cone"
     inst_trace_mode = effective_mode == "inst-trace"
     connect_run_mode = effective_mode in (
@@ -116,7 +117,12 @@ def execute_run(cfg: RunConfig, ap) -> int:
         ap.error("use either check_connect or check_connect_batch/connect, not both")
     if cfg.fanin_cone and cfg.fanout_cone:
         ap.error("use either fanin_cone or fanout_cone, not both")
-    if path_walk_mode and connect_run_mode and connect_request is None:
+    if (
+        path_walk_mode
+        and connect_run_mode
+        and connect_request is None
+        and not cfg.check_connect
+    ):
         ap.error("path-walk connect requires checks in batch JSON or --check-connect")
     if effective_mode == "check-connect-batch" and connect_request is None:
         ap.error(
@@ -230,27 +236,33 @@ def execute_run(cfg: RunConfig, ap) -> int:
 
     if not cfg.quiet:
         from hierwalk.config_env_audit import emit_verilog_defines_audit
-        from hierwalk.connect_scan import collect_design_defines
-        from hierwalk.index import DesignIndex
 
-        audit_sources = [str(p) for p in fl.source_files]
-        audit_index = DesignIndex._assemble(
-            {},
-            path_patterns=[],
-            module_patterns=[],
-            preprocess_include_dirs=[str(p) for p in fl.include_dirs],
-            preprocess_defines=dict(fl.defines),
-            parse_sources=audit_sources,
-        )
         audit_extra = dict(cfg.defines_map or {})
         if connect_request is not None:
             audit_extra.update(connect_request.defines)
-        emit_verilog_defines_audit(
-            effective_defines=collect_design_defines(
+        if path_walk_mode:
+            audit_defines = dict(fl.defines)
+            audit_defines.update(audit_extra)
+        else:
+            from hierwalk.connect_scan import collect_design_defines
+            from hierwalk.index import DesignIndex
+
+            audit_sources = [str(p) for p in fl.source_files]
+            audit_index = DesignIndex._assemble(
+                {},
+                path_patterns=[],
+                module_patterns=[],
+                preprocess_include_dirs=[str(p) for p in fl.include_dirs],
+                preprocess_defines=dict(fl.defines),
+                parse_sources=audit_sources,
+            )
+            audit_defines = collect_design_defines(
                 audit_index,
                 sources=audit_sources,
                 extra_defines=audit_extra,
-            ),
+            )
+        emit_verilog_defines_audit(
+            effective_defines=audit_defines,
             json_defines=cfg.defines_map,
             connect_defines=(
                 connect_request.defines if connect_request is not None else None

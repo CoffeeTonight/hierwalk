@@ -4037,7 +4037,7 @@ def collect_design_defines(
     if not paths:
         return dict(base)
 
-    from hierwalk.preprocess import include_guard_macro_names, preprocess_file_for_index
+    from hierwalk.preprocess import accumulate_defines_from_file, include_guard_macro_names
 
     inc = [Path(p) for p in getattr(index, "_preprocess_include_dirs", ()) or ()]
     skip = tuple(
@@ -4059,10 +4059,10 @@ def collect_design_defines(
         except OSError:
             raw = ""
         guards = include_guard_macro_names(raw)
-        preprocess_file_for_index(
+        accumulate_defines_from_file(
             path,
-            inc,
             out,
+            inc,
             set(),
             skip_path_patterns=skip,
             apply_ifdef=True,
@@ -4334,9 +4334,13 @@ def clear_module_connect_index_cache() -> None:
     global _build_index_uncached_calls, _build_index_mem_hits
     clear_module_connect_index_mem_cache()
     clear_bind_records_memo()
-    from hierwalk.connect_endpoints import _clear_module_index_key_memo
+    from hierwalk.connect_endpoints import (
+        _clear_module_index_key_memo,
+        clear_module_connect_sidecar_cache,
+    )
 
     _clear_module_index_key_memo()
+    clear_module_connect_sidecar_cache()
     _build_index_uncached_calls = 0
     _build_index_mem_hits = 0
 

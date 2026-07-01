@@ -7,8 +7,10 @@ from pathlib import Path
 from hierwalk.connect_scan import collect_design_defines, design_parse_sources, prepare_connect_body
 from hierwalk.index import DesignIndex, scan_preprocessed
 from hierwalk.preprocess import (
+    accumulate_defines_from_file,
     apply_ifdef_filter,
     clear_include_unit_cache,
+    define_snapshots_for_sources,
     preprocess_file,
     preprocess_file_for_index,
 )
@@ -513,3 +515,80 @@ def test_prepare_connect_body_param_after_ifdef():
     assert "parameter M = 9" in text_active
     text_inactive = prepare_connect_body(body, defines={})
     assert "parameter M" not in text_inactive
+
+
+def test_accumulate_defines_matches_light_preprocess(tmp_path: Path):
+    inc = tmp_path / "cfg.vh"
+    inc.write_text(
+        "`define USE_PCIE 1\n"
+        "`ifdef USE_PCIE\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "macros.v").write_text("`define FEATURE 1\n", encoding="utf-8")
+    rtl = tmp_path / "top.v"
+    rtl.write_text(
+        '`include "cfg.vh"\n'
+        "module top;\n"
+        "`ifdef FEATURE\n"
+        "`define TAG 1\n"
+        "`endif\n"
+        "`else\n"
+        "`define TAG 0\n"
+        "`endif\n"
+        "endmodule\n",
+        encoding="utf-8",
+    )
+    sources = [
+        str((tmp_path / "macros.v").resolve()),
+        str(rtl.resolve()),
+    ]
+    clear_include_unit_cache()
+
+    light: dict[str, str] = {}
+    heavy: dict[str, str] = {}
+    for src in sources:
+        path = Path(src)
+        guards = set()
+        try:
+            raw = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            raw = ""
+        if raw:
+            from hierwalk.preprocess import include_guard_macro_names
+
+            guards = include_guard_macro_names(raw)
+        light_run = dict(light)
+        accumulate_defines_from_file(
+            path,
+            light_run,
+            [tmp_path],
+            set(),
+            apply_ifdef=True,
+        )
+        for name in guards:
+            light_run.pop(name, None)
+        light = light_run
+
+        heavy_run = dict(heavy)
+        preprocess_file_for_index(
+            path,
+            [tmp_path],
+            heavy_run,
+            set(),
+            apply_ifdef=True,
+        )
+        for name in guards:
+            heavy_run.pop(name, None)
+        heavy = heavy_run
+
+    assert light == heavy
+    assert light.get("FEATURE") == "1"
+    assert light.get("TAG") == "1"
+
+    snaps = define_snapshots_for_sources(
+        sources,
+        include_dirs=[tmp_path],
+        base_defines={},
+    )
+    assert snaps[sources[0]] == ()
+    assert snaps[sources[1]] == (("FEATURE", "1"),)

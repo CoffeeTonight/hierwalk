@@ -985,6 +985,18 @@ def _load_module_connect_sidecar(
     return idx
 
 
+def clear_module_connect_sidecar_cache() -> None:
+    """Remove on-disk connect-index sidecars (test isolation)."""
+    root = _module_connect_sidecar_root()
+    if root is None or not root.is_dir():
+        return
+    for path in root.glob("*.mci.pkl"):
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
 def _save_module_connect_sidecar(
     cache_key: str,
     idx: ModuleConnectIndex,

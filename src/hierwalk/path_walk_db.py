@@ -1408,6 +1408,19 @@ class PathWalkModuleDb:
                 self._save_regex_sidecar(key, names)
         self.files_regex_scanned += 1
         self._snapshot_dirty = True
+        self._maybe_tier0_progress()
+
+    def _maybe_tier0_progress(self) -> None:
+        if self._on_progress is None:
+            return
+        total = len(self._sources)
+        if total <= 0:
+            return
+        n = self.files_regex_scanned
+        if n == 1 or n == total or n % 100 == 0:
+            self._on_progress(
+                f"path-walk: tier0 {n}/{total} files scanned"
+            )
 
     def _tier0_drain_completed(self, *, block: bool = False, timeout: float = 0.0) -> int:
         if not self._tier0_inflight:

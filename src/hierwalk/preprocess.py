@@ -543,6 +543,37 @@ def _line_has_inline_ifdef(line: str) -> bool:
     return bool(_IFDEF_RE.search(line))
 
 
+def _accumulate_defines_inline_ifdef_line(
+    line: str,
+    stack: List[Tuple[bool, bool, bool]],
+    defines: MutableMapping[str, str],
+) -> None:
+    """Update *stack* / *defines* for inline `` `ifdef `` lines (no macro expansion)."""
+    pos = 0
+    while True:
+        m = _IFDEF_RE.search(line, pos)
+        if not m:
+            rest = line[pos:]
+            if rest:
+                _apply_inline_define_undef_segment(rest, stack, defines)
+            break
+        before = line[pos : m.start()]
+        if before:
+            _apply_inline_define_undef_segment(before, stack, defines)
+        raw = m.group(0).lower()
+        if raw.startswith("`ifdef"):
+            _apply_ifdef_directive("ifdef", (m.group(1) or "").strip(), stack, defines)
+        elif raw.startswith("`ifndef"):
+            _apply_ifdef_directive("ifndef", (m.group(1) or "").strip(), stack, defines)
+        elif raw.startswith("`elsif"):
+            _apply_ifdef_directive("elsif", (m.group(2) or "").strip(), stack, defines)
+        elif raw.startswith("`else"):
+            _apply_ifdef_directive("else", "", stack, defines)
+        else:
+            _apply_ifdef_directive("endif", "", stack, defines)
+        pos = m.end()
+
+
 def _enqueue_include_lines(
     queue: deque[Tuple[str, Path]],
     *,
@@ -565,11 +596,13 @@ def _preprocess_conditional_pass(
     include_dirs: Sequence[Path] = (),
     visiting: Optional[Set[Path]] = None,
     skip_path_patterns: Sequence[str] = (),
+    defines_only: bool = False,
 ) -> str:
     """
     Single ordered pass: `` `ifdef `` → `` `define ``/`` `undef `` → `` `include `` → macros.
 
     ``include`` expands only in active conditional branches (when *source_file* is set).
+    When *defines_only* is true, only directive/include state is applied (no output text).
     """
     if not text:
         return text
@@ -591,6 +624,8 @@ def _preprocess_conditional_pass(
             pass
 
     def _write(segment: str) -> None:
+        if defines_only:
+            return
         nonlocal first
         if not segment:
             return
@@ -629,17 +664,20 @@ def _preprocess_conditional_pass(
             bracket, name = inc
             inc_path = _resolve_include(name, bracket, line_src, include_dirs)
             if inc_path is None:
-                _write(f"/* hierwalk: missing include {name} */")
+                if not defines_only:
+                    _write(f"/* hierwalk: missing include {name} */")
                 continue
             try:
                 inc_key = inc_path.resolve()
             except OSError:
                 inc_key = inc_path
             if inc_key in visiting_paths:
-                _write(f"/* hierwalk: include cycle {inc_path} */")
+                if not defines_only:
+                    _write(f"/* hierwalk: include cycle {inc_path} */")
                 continue
             if _should_skip_preprocess_path(inc_key, skip_path_patterns):
-                _write(_IGNORE_PATH_STUB)
+                if not defines_only:
+                    _write(_IGNORE_PATH_STUB)
                 continue
             visiting_paths.add(inc_key)
             _enqueue_include_lines(
@@ -653,6 +691,8 @@ def _preprocess_conditional_pass(
             segments = _emit_ifdef_line_segments(line, stack, defines, preprocessed=True)
             if not segments:
                 continue
+            if defines_only:
+                continue
             joined = " ".join(
                 _expand_macros_with_repass(seg, defines, apply_ifdef=True)
                 for seg in segments
@@ -661,11 +701,18 @@ def _preprocess_conditional_pass(
             continue
 
         if _apply_ifdef_control_line(line, stack, defines):
-            _write(line)
+            if not defines_only:
+                _write(line)
             continue
 
         if _line_has_inline_ifdef(line):
-            _write(_reconstruct_preserve_ifdef_line(line, stack, defines))
+            if defines_only:
+                _accumulate_defines_inline_ifdef_line(line, stack, defines)
+            else:
+                _write(_reconstruct_preserve_ifdef_line(line, stack, defines))
+            continue
+
+        if defines_only:
             continue
 
         if _stack_active(stack):
@@ -673,7 +720,41 @@ def _preprocess_conditional_pass(
         else:
             _write(line)
 
-    return out.getvalue()
+    return "" if defines_only else out.getvalue()
+
+
+def accumulate_defines_from_file(
+    path: Path,
+    defines: MutableMapping[str, str],
+    include_dirs: Sequence[Path],
+    visiting: Optional[Set[Path]] = None,
+    *,
+    skip_path_patterns: Sequence[str] = (),
+    apply_ifdef: bool = True,
+) -> None:
+    """
+    Apply per-file `` `define `` / `` `undef `` / include / ifdef to *defines* only.
+
+    Used for filelist-order define snapshots — avoids full macro expansion per file.
+    """
+    if _should_skip_preprocess_path(path, skip_path_patterns):
+        return
+    visiting_paths: Set[Path] = set(visiting or ())
+    try:
+        visiting_paths.add(path.resolve())
+    except OSError:
+        pass
+    raw = _read_raw_source_file(path, skip_path_patterns)
+    _preprocess_conditional_pass(
+        raw,
+        defines,
+        apply_ifdef=apply_ifdef,
+        source_file=path,
+        include_dirs=include_dirs,
+        visiting=visiting_paths,
+        skip_path_patterns=skip_path_patterns,
+        defines_only=True,
+    )
 
 
 def apply_ifdef_filter(text: str, defines: Mapping[str, str]) -> str:
@@ -1320,40 +1401,61 @@ def define_snapshots_for_sources(
     include_dirs: Sequence[str | Path],
     base_defines: Mapping[str, str],
     skip_path_patterns: Sequence[str] = (),
+    on_progress: Optional[Callable[[str], None]] = None,
+    progress_every: int = 100,
+    file_via_filelist: Optional[Mapping[str, str]] = None,
 ) -> Dict[str, Tuple[Tuple[str, str], ...]]:
     """Per-file starting defines keyed by resolved path (filelist order)."""
-    from hierwalk.lazy_scope import lazy_processing_enabled
+    from hierwalk.lazy_scope import lazy_index_ifdef
+    from hierwalk.progress import format_work_location, maybe_track_work
 
     inc = [Path(p) for p in include_dirs]
     skip = tuple(skip_path_patterns)
     accumulated: Dict[str, str] = dict(base_defines)
     snapshots: Dict[str, Tuple[Tuple[str, str], ...]] = {}
-    preprocess_fn = (
-        preprocess_file_for_index if lazy_processing_enabled() else preprocess_file
-    )
-    for fpath in sources:
+    use_ifdef = lazy_index_ifdef()
+    src_list = list(sources)
+    total = len(src_list)
+    if on_progress and total:
+        on_progress(f"preprocess: define-snapshots 0/{total} sources")
+    for i, fpath in enumerate(src_list, start=1):
         key = str(Path(fpath).resolve())
         snapshots[key] = tuple(sorted(accumulated.items()))
         path = Path(key)
-        if not path.is_file():
-            continue
-        try:
-            raw = path.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
-        guards = include_guard_macro_names(raw)
-        defs_copy = dict(accumulated)
-        preprocess_fn(
-            path,
-            inc,
-            defs_copy,
-            set(),
-            skip_path_patterns=skip,
-            apply_ifdef=True,
+        if path.is_file():
+            try:
+                raw = path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                raw = ""
+            if raw:
+                guards = include_guard_macro_names(raw)
+                defs_copy = dict(accumulated)
+                accumulate_defines_from_file(
+                    path,
+                    defs_copy,
+                    inc,
+                    set(),
+                    skip_path_patterns=skip,
+                    apply_ifdef=use_ifdef,
+                )
+                for name in guards:
+                    defs_copy.pop(name, None)
+                accumulated = defs_copy
+        maybe_track_work(
+            on_progress,
+            key,
+            index=i,
+            total=total,
+            via_map=file_via_filelist,
         )
-        for name in guards:
-            defs_copy.pop(name, None)
-        accumulated = defs_copy
+        if on_progress and total and (i == total or i % progress_every == 0):
+            loc = format_work_location(
+                key,
+                index=i,
+                total=total,
+                via_map=file_via_filelist,
+            )
+            on_progress(f"preprocess: define-snapshots {i}/{total} sources — {loc}")
     return snapshots
 
 
@@ -1429,6 +1531,9 @@ def preprocess_sources(
         include_dirs=inc,
         base_defines=base_defines,
         skip_path_patterns=skip_tuple,
+        on_progress=on_progress,
+        progress_every=progress_every,
+        file_via_filelist=file_via_filelist,
     )
     tasks = [
         (

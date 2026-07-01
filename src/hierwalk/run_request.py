@@ -233,7 +233,7 @@ class RunConfig:
     log_file: Optional[str] = None
     no_log_file: bool = False
     mode: Optional[str] = None
-    index_strategy: str = "full-index"
+    index_strategy: str = ""
     flat_suite_step: bool = False
     full_index_step: bool = False
     direct_filelist_cli: bool = False
@@ -450,6 +450,65 @@ def normalize_run_mode(mode: str) -> str:
     return str(mode or "").strip().replace("_", "-")
 
 
+_INDEX_STRATEGY_MODES = frozenset({"full-index", "path-walk"})
+_LEGACY_INDEX_STRATEGY = {
+    "check-connect": "full-index",
+    "check-connect-batch": "full-index",
+    "inst-trace": "full-index",
+    "inst_trace": "full-index",
+    "cone": "full-index",
+    "fanin-cone": "full-index",
+    "fanout-cone": "full-index",
+    "hierarchy": "full-index",
+    "full": "full-index",
+    "full-index": "full-index",
+    "path-walk": "path-walk",
+}
+_PATH_WALK_DEFAULT_MODES = frozenset(
+    {
+        "check-connect",
+        "check-connect-batch",
+        "path-walk",
+        "inst-trace",
+        "cone",
+    }
+)
+
+
+def normalize_index_strategy(value: str) -> str:
+    """Map explicit index strategy (or legacy alias) to ``full-index`` or ``path-walk``."""
+    key = normalize_run_mode(str(value or ""))
+    if not key:
+        return ""
+    mapped = _LEGACY_INDEX_STRATEGY.get(key, key)
+    if mapped in _INDEX_STRATEGY_MODES:
+        return mapped
+    raise ValueError(
+        f"unknown index_strategy {value!r}; expected full-index or path-walk "
+        f"(legacy aliases: check-connect-batch, inst-trace, fanout-cone, …)"
+    )
+
+
+def resolve_effective_index_strategy(
+    cfg: RunConfig,
+    effective_mode: str,
+) -> str:
+    """
+    Resolve index/elab strategy for one run.
+
+    Verification modes (connect, inst-trace, cone) default to path-walk so RTL is
+    preprocessed on-demand along endpoint hierarchy paths, not across the full filelist.
+    Set ``index_strategy: full-index`` to force the legacy whole-design index.
+    """
+    explicit = normalize_index_strategy(cfg.index_strategy)
+    if explicit:
+        return explicit
+    mode = normalize_run_mode(effective_mode or "")
+    if mode == "path-walk" or mode in _PATH_WALK_DEFAULT_MODES:
+        return "path-walk"
+    return "full-index"
+
+
 def _document_has_key(data: Mapping[str, Any], *keys: str) -> bool:
     for key in keys:
         if _mapping_get_ci(data, key) is not None:
@@ -652,6 +711,13 @@ def parse_run_request_json(
 
     trace_stop = parse_trace_stop_policy(data)
 
+    index_strategy = ""
+    index_raw = _mapping_get_ci(data, "index_strategy")
+    if index_raw is None:
+        index_raw = _mapping_get_ci(data, "index-strategy")
+    if index_raw is not None and str(index_raw).strip():
+        index_strategy = normalize_index_strategy(str(index_raw))
+
     raw_search = _mapping_get_ci(data, "search")
     search_spec = resolve_search_spec(data)
     search: Optional[str] = None
@@ -737,6 +803,7 @@ def parse_run_request_json(
         log_file=_resolve_path(base, data.get("log_file")),
         no_log_file=bool(data.get("no_log_file", False)),
         mode=mode,
+        index_strategy=index_strategy,
     )
 
 
@@ -819,6 +886,15 @@ def _apply_run_document_fields(
             out = replace(out, mode=batch_mode)
         elif bool(_mapping_get_ci(data, "find_top")):
             out = replace(out, mode="find-top", find_top=True)
+
+    index_raw = _mapping_get_ci(data, "index_strategy")
+    if index_raw is None:
+        index_raw = _mapping_get_ci(data, "index-strategy")
+    if index_raw is not None and str(index_raw).strip():
+        out = replace(
+            out,
+            index_strategy=normalize_index_strategy(str(index_raw)),
+        )
 
     if _document_has_key(data, "defines") and not args.define:
         batch_defines = _parse_defines(_mapping_get_ci(data, "defines"))

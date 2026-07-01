@@ -836,7 +836,9 @@ def main(argv=None) -> int:
         if not run_cfg.quiet:
             connect_req = resolve_connectivity_request(run_cfg)
             eff = resolve_effective_run_mode(run_cfg, connect_req)
-            index_note = normalize_run_mode(run_cfg.index_strategy or "full-index")
+            from hierwalk.run_request import resolve_effective_index_strategy
+
+            index_note = resolve_effective_index_strategy(run_cfg, eff)
             if eff == "hierarchy" and index_note == "full-index":
                 saw_hierarchy_execute = True
         if step_rc != 0:
