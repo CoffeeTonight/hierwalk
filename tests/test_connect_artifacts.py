@@ -9,8 +9,12 @@ from hierwalk.connect.pipeline.artifacts import (
     IncrementalHierarchyTsvWriter,
     any_text_conn_hit,
     apply_connect_logical_phase,
+    apply_logical_coi_failure_to_results,
+    apply_text_verdicts_to_results,
     archive_run_config_sources,
     build_hierarchy_row_context,
+    build_logical_connect_request,
+    load_text_connect_results_from_tsv,
     connect_output_paths,
     format_connect_hierarchy_tsv,
     merge_refined_connect_results,
@@ -23,6 +27,9 @@ from hierwalk.connect.pipeline.artifacts import (
     verification_output_path,
     write_connect_phase_tsv,
 )
+from hierwalk.connect.session import ConnectivitySession
+from hierwalk.elab import elaborate
+from hierwalk.index import DesignIndex
 from hierwalk.connect.session import format_connect_results_tsv
 from hierwalk.connect.shared.request import ConnectivityCheck, ConnectivityRequest
 from hierwalk.filelist import parse_filelist
@@ -169,6 +176,59 @@ def test_logical_phase_downgrades_inactive_ifdef():
     assert result.connected_logical is False
     assert result.connected is False
     assert any("inactive" in n for n in result.logical_notes)
+
+
+def test_logical_only_skips_text_miss_via_prior_tsv(tmp_path: Path, monkeypatch):
+    rtl = tmp_path / "top.v"
+    rtl.write_text(
+        """
+        module top;
+          wire hit_a, hit_b, miss_a, miss_b;
+          assign hit_b = hit_a;
+        endmodule
+        """,
+        encoding="utf-8",
+    )
+    fl = tmp_path / "design.f"
+    fl.write_text(f"{rtl.resolve()}\n", encoding="utf-8")
+    flr = parse_filelist(str(fl), index_cwd=str(tmp_path))
+    db = tmp_path / ".db_top"
+    req = ConnectivityRequest(
+        checks=(
+            ConnectivityCheck("top.hit_a", "top.hit_b", check_id="hit"),
+            ConnectivityCheck("top.miss_a", "top.miss_b", check_id="miss"),
+        ),
+        top="top",
+    )
+    run_path_walk_connect(
+        req,
+        flr,
+        top="top",
+        no_cache=True,
+        connect_output_dir=db,
+        connect_phase="text",
+    )
+    run_calls: list[int] = []
+    orig = ConnectivitySession.run_request
+
+    def spy_run(self, request, **kwargs):
+        run_calls.append(len(request.checks))
+        return orig(self, request, **kwargs)
+
+    monkeypatch.setattr(ConnectivitySession, "run_request", spy_run)
+    batch, _, _state = run_path_walk_connect(
+        req,
+        flr,
+        top="top",
+        no_cache=True,
+        connect_output_dir=db,
+        connect_phase="logical",
+    )
+    assert run_calls == [1]
+    by_id = {r.check_id: r for r in batch.results}
+    assert by_id["hit"].connected is True
+    assert by_id["miss"].connected is False
+    assert by_id["miss"].connected_text is False
 
 
 def test_path_walk_writes_text_and_logical_tsv(tmp_path: Path):
@@ -541,7 +601,7 @@ def test_path_walk_text_conn_zero_checks_writes_header_tsv(tmp_path: Path):
     text_path = db / "conn.text.tsv"
     assert text_path.is_file()
     lines = [ln for ln in text_path.read_text(encoding="utf-8").splitlines() if ln]
-    assert lines[0] == "# connect results"
+    assert lines[0].startswith("# connect results")
     assert any(ln.startswith("check_id\t") for ln in lines)
     data_rows = [
         ln
@@ -614,6 +674,31 @@ def test_write_connect_phase_tsv_roundtrip(tmp_path: Path):
     assert rows[0]["connected"] == "True"
 
 
+def test_format_connect_results_tsv_phase_column_hints():
+    result = ConnectResult(
+        endpoint_a=ConnectEndpoint("top.a", "top", "a", "top"),
+        endpoint_b=ConnectEndpoint("top.b", "top", "b", "top"),
+        connected=True,
+        mode="port-port",
+        connected_text=True,
+    )
+    text_tsv = format_connect_results_tsv([result], phase="text")
+    assert "connected_text=text bloom" in text_tsv
+    assert "hop tags:" in text_tsv
+    logical_tsv = format_connect_results_tsv(
+        [ConnectResult(
+            endpoint_a=ConnectEndpoint("top.a", "top", "a", "top"),
+            endpoint_b=ConnectEndpoint("top.b", "top", "b", "top"),
+            connected=True,
+            mode="port-port",
+            connected_text=True,
+            connected_logical=False,
+        )],
+        phase="logical",
+    )
+    assert "connected_text=prior text pass" in logical_tsv
+
+
 def test_reorder_connect_checks_by_b_endpoint():
     from hierwalk.connect.shared.request import ConnectivityCheck, ConnectivityRequest
 
@@ -681,6 +766,321 @@ def test_merge_refined_connect_results_matches_by_check_id_not_index():
     assert text_b.connected is False
     assert text_b.connected_text is True
     assert text_b.errors == ["refined miss"]
+
+
+def test_merge_refined_connect_results_endpoint_fallback():
+    orig = ConnectResult(
+        endpoint_a=ConnectEndpoint("top.a", "top", "a", "top"),
+        endpoint_b=ConnectEndpoint("top.b", "top", "b", "top"),
+        connected=True,
+        mode="port-port",
+        connected_text=True,
+        check_id="",
+    )
+    refined = ConnectResult(
+        endpoint_a=ConnectEndpoint("top.a", "top", "a", "top"),
+        endpoint_b=ConnectEndpoint("top.b", "top", "b", "top"),
+        connected=False,
+        mode="port-port",
+        errors=["logical miss"],
+        check_id="",
+    )
+    merge_refined_connect_results([orig], [refined])
+    assert orig.connected is False
+    assert orig.connected_text is True
+    assert orig.errors == ["logical miss"]
+
+
+def test_build_logical_connect_request_empty_list_no_gate():
+    req = ConnectivityRequest(
+        checks=(
+            ConnectivityCheck("top.a", "top.b", check_id="a"),
+            ConnectivityCheck("top.x", "top.y", check_id="x"),
+        ),
+        top="top",
+    )
+    logical_req, run_n, skip_n = build_logical_connect_request(req, [])
+    assert run_n == 2
+    assert skip_n == 0
+    assert [c.check_id for c in logical_req.checks] == ["a", "x"]
+
+
+def test_apply_text_verdicts_endpoint_fallback_without_check_id():
+    shell = [
+        ConnectResult(
+            endpoint_a=ConnectEndpoint("top.a", "top", "a", "top"),
+            endpoint_b=ConnectEndpoint("top.b", "top", "b", "top"),
+            connected=False,
+            mode="unknown",
+            check_id="req-id",
+        ),
+    ]
+    text_rows = (
+        ConnectResult(
+            endpoint_a=ConnectEndpoint("top.a", "top", "a", "top"),
+            endpoint_b=ConnectEndpoint("top.b", "top", "b", "top"),
+            connected=True,
+            mode="port-port",
+            connected_text=True,
+            check_id="",
+        ),
+    )
+    apply_text_verdicts_to_results(shell, text_rows)
+    assert shell[0].connected_text is True
+    assert shell[0].connected is True
+
+
+def test_apply_logical_coi_failure_preserves_connected_text():
+    leaf = ConnectResult(
+        endpoint_a=ConnectEndpoint("top.a", "top", "a", "top"),
+        endpoint_b=ConnectEndpoint("top.b", "top", "b", "top"),
+        connected=True,
+        mode="port-port",
+        connected_text=True,
+        check_id="hit",
+    )
+    apply_logical_coi_failure_to_results(
+        [leaf],
+        [ConnectivityCheck("top.a", "top.b", check_id="hit")],
+        "connect-coi failed: RuntimeError('boom')",
+    )
+    assert leaf.connected_text is True
+    assert leaf.connected is False
+    assert leaf.connected_logical is False
+    assert "connect-coi failed" in leaf.errors[0]
+
+
+def test_build_logical_connect_request_duplicate_endpoint_conservative():
+    req = ConnectivityRequest(
+        checks=(ConnectivityCheck("top.a", "top.b", check_id="x"),),
+        top="top",
+    )
+    text_results = (
+        ConnectResult(
+            endpoint_a=ConnectEndpoint("top.a", "top", "a", "top"),
+            endpoint_b=ConnectEndpoint("top.b", "top", "b", "top"),
+            connected=True,
+            mode="port-port",
+            connected_text=True,
+            check_id="",
+        ),
+        ConnectResult(
+            endpoint_a=ConnectEndpoint("top.a", "top", "a", "top"),
+            endpoint_b=ConnectEndpoint("top.b", "top", "b", "top"),
+            connected=False,
+            mode="port-port",
+            connected_text=False,
+            check_id="",
+        ),
+    )
+    logical_req, run_n, skip_n = build_logical_connect_request(req, text_results)
+    assert run_n == 0
+    assert skip_n == 1
+    assert logical_req.checks == ()
+
+
+def test_build_logical_connect_request_endpoint_fallback_without_check_id():
+    req = ConnectivityRequest(
+        checks=(ConnectivityCheck("top.a", "top.b", check_id="req-id"),),
+        top="top",
+    )
+    text_results = (
+        ConnectResult(
+            endpoint_a=ConnectEndpoint("top.a", "top", "a", "top"),
+            endpoint_b=ConnectEndpoint("top.b", "top", "b", "top"),
+            connected=True,
+            mode="port-port",
+            connected_text=True,
+            check_id="",
+        ),
+    )
+    logical_req, run_n, skip_n = build_logical_connect_request(req, text_results)
+    assert run_n == 1
+    assert skip_n == 0
+    assert logical_req.checks[0].endpoint_a == "top.a"
+    assert logical_req.checks[0].endpoint_b == "top.b"
+
+
+def test_build_logical_connect_request_skips_text_misses():
+    req = ConnectivityRequest(
+        checks=(
+            ConnectivityCheck("top.a", "top.b", check_id="hit"),
+            ConnectivityCheck("top.x", "top.y", check_id="miss"),
+        ),
+        top="top",
+    )
+    text_results = (
+        ConnectResult(
+            endpoint_a=ConnectEndpoint("top.a", "top", "a", "top"),
+            endpoint_b=ConnectEndpoint("top.b", "top", "b", "top"),
+            connected=True,
+            mode="port-port",
+            connected_text=True,
+            check_id="hit",
+        ),
+        ConnectResult(
+            endpoint_a=ConnectEndpoint("top.x", "top", "x", "top"),
+            endpoint_b=ConnectEndpoint("top.y", "top", "y", "top"),
+            connected=False,
+            mode="port-port",
+            connected_text=False,
+            check_id="miss",
+        ),
+    )
+    logical_req, run_n, skip_n = build_logical_connect_request(req, text_results)
+    assert run_n == 1
+    assert skip_n == 1
+    assert [c.check_id for c in logical_req.checks] == ["hit"]
+
+
+def test_load_text_connect_results_from_tsv(tmp_path: Path):
+    out = tmp_path / "conn.text.tsv"
+    write_connect_phase_tsv(
+        out,
+        [
+            ConnectResult(
+                endpoint_a=ConnectEndpoint("top.a", "top", "a", "top"),
+                endpoint_b=ConnectEndpoint("top.b", "top", "b", "top"),
+                connected=True,
+                mode="port-port",
+                connected_text=True,
+                check_id="hit",
+            ),
+            ConnectResult(
+                endpoint_a=ConnectEndpoint("top.x", "top", "x", "top"),
+                endpoint_b=ConnectEndpoint("top.y", "top", "y", "top"),
+                connected=False,
+                mode="port-port",
+                connected_text=False,
+                check_id="miss",
+            ),
+        ],
+        phase="text",
+    )
+    loaded = load_text_connect_results_from_tsv(out)
+    assert len(loaded) == 2
+    by_id = {r.check_id: r.connected_text for r in loaded}
+    assert by_id["hit"] is True
+    assert by_id["miss"] is False
+
+
+def test_build_logical_connect_request_from_tsv_expand_leaves():
+    req = ConnectivityRequest(
+        checks=(ConnectivityCheck("[top.a, top.x]", "top.b", check_id="fan"),),
+        top="top",
+    )
+    tsv_rows = (
+        ConnectResult(
+            endpoint_a=ConnectEndpoint("top.a", "top", "a", "top"),
+            endpoint_b=ConnectEndpoint("top.b", "top", "b", "top"),
+            connected=True,
+            mode="port-port",
+            connected_text=True,
+            check_id="fan->0",
+        ),
+        ConnectResult(
+            endpoint_a=ConnectEndpoint("top.x", "top", "x", "top"),
+            endpoint_b=ConnectEndpoint("top.b", "top", "b", "top"),
+            connected=False,
+            mode="port-port",
+            connected_text=False,
+            check_id="fan->1",
+        ),
+    )
+    logical_req, run_n, skip_n = build_logical_connect_request(req, tsv_rows)
+    assert run_n == 1
+    assert skip_n == 1
+    assert logical_req.checks[0].check_id == "fan->0"
+
+
+def test_build_logical_connect_request_expand_partial_hits():
+    req = ConnectivityRequest(
+        checks=(ConnectivityCheck("[top.a, top.x]", "top.b", check_id="fan"),),
+        top="top",
+    )
+    parent = ConnectResult(
+        endpoint_a=ConnectEndpoint("[top.a, top.x]", "top", "", "top"),
+        endpoint_b=ConnectEndpoint("top.b", "top", "b", "top"),
+        connected=False,
+        mode="expanded",
+        connected_text=False,
+        check_id="fan",
+        sub_results=(
+            ConnectResult(
+                endpoint_a=ConnectEndpoint("top.a", "top", "a", "top"),
+                endpoint_b=ConnectEndpoint("top.b", "top", "b", "top"),
+                connected=True,
+                mode="port-port",
+                connected_text=True,
+                check_id="fan->0",
+            ),
+            ConnectResult(
+                endpoint_a=ConnectEndpoint("top.x", "top", "x", "top"),
+                endpoint_b=ConnectEndpoint("top.b", "top", "b", "top"),
+                connected=False,
+                mode="port-port",
+                connected_text=False,
+                check_id="fan->1",
+            ),
+        ),
+    )
+    logical_req, run_n, skip_n = build_logical_connect_request(req, [parent])
+    assert run_n == 1
+    assert skip_n == 1
+    assert logical_req.checks[0].check_id == "fan->0"
+
+
+def test_clear_logical_cache_preserves_text_grep_cache(tmp_path: Path):
+    rtl = tmp_path / "top.v"
+    rtl.write_text("module top(); endmodule\n", encoding="utf-8")
+    index = DesignIndex.build({str(rtl): rtl.read_text(encoding="utf-8")})
+    _, rows = elaborate(index, "top")
+    session = ConnectivitySession(rows=rows, index=index, top="top")
+    session.text_grep_cache[("k",)] = object()  # type: ignore[index]
+    session.mod_cache[("m",)] = object()  # type: ignore[index]
+    session.clear_logical_cache()
+    assert session.text_grep_cache
+    assert not session.mod_cache
+
+
+def test_merge_refined_into_expand_sub_results():
+    parent = ConnectResult(
+        endpoint_a=ConnectEndpoint("[top.a, top.x]", "top", "", "top"),
+        endpoint_b=ConnectEndpoint("top.b", "top", "b", "top"),
+        connected=False,
+        mode="expanded",
+        connected_text=False,
+        check_id="fan",
+        sub_results=(
+            ConnectResult(
+                endpoint_a=ConnectEndpoint("top.a", "top", "a", "top"),
+                endpoint_b=ConnectEndpoint("top.b", "top", "b", "top"),
+                connected=True,
+                mode="port-port",
+                connected_text=True,
+                check_id="fan->0",
+            ),
+            ConnectResult(
+                endpoint_a=ConnectEndpoint("top.x", "top", "x", "top"),
+                endpoint_b=ConnectEndpoint("top.b", "top", "b", "top"),
+                connected=False,
+                mode="port-port",
+                connected_text=False,
+                check_id="fan->1",
+            ),
+        ),
+    )
+    refined = ConnectResult(
+        endpoint_a=ConnectEndpoint("top.a", "top", "a", "top"),
+        endpoint_b=ConnectEndpoint("top.b", "top", "b", "top"),
+        connected=True,
+        mode="port-port",
+        check_id="fan->0",
+    )
+    merge_refined_connect_results([parent], [refined])
+    assert parent.sub_results[0].connected is True
+    assert parent.sub_results[0].connected_text is True
+    assert parent.sub_results[1].connected is False
 
 
 def test_reorder_connect_results_to_checks_restores_request_order():

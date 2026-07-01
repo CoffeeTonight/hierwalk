@@ -118,8 +118,8 @@ def test_text_conn_port_or_expr_does_not_bridge_operands(tmp_path: Path):
         top="top",
         resolve_param_dims=False,
     )
-    assert session.check("top.a", "top.q").connected is False
-    assert session.check("top.b", "top.q").connected is True
+    assert session.check_text("top.a", "top.q").connected is False
+    assert session.check_text("top.b", "top.q").connected is True
 
 
 def test_text_conn_port_xor_expr_does_not_bridge_operands(tmp_path: Path):
@@ -145,9 +145,9 @@ def test_text_conn_port_xor_expr_does_not_bridge_operands(tmp_path: Path):
         top="top",
         resolve_param_dims=False,
     )
-    assert session.check("top.chain_in[1][2]", "top.q[1][2]").connected is False
-    assert session.check("top.chain_in[1][2]", "top.shallow_return[1][2]").connected is False
-    assert session.check("top.shallow_return[1][2]", "top.q[1][2]").connected is True
+    assert session.check_text("top.chain_in[1][2]", "top.q[1][2]").connected is False
+    assert session.check_text("top.chain_in[1][2]", "top.shallow_return[1][2]").connected is False
+    assert session.check_text("top.shallow_return[1][2]", "top.q[1][2]").connected is True
 
 
 def test_text_conn_port_xor_expr_keeps_operand_to_port(tmp_path: Path):
@@ -172,8 +172,8 @@ def test_text_conn_port_xor_expr_keeps_operand_to_port(tmp_path: Path):
         top="top",
         resolve_param_dims=False,
     )
-    assert session.check("top.chain_in[1][2]", "top.u.din[1][2]").connected is True
-    assert session.check("top.shallow_return[1][2]", "top.u.din[1][2]").connected is True
+    assert session.check_text("top.chain_in[1][2]", "top.u.din[1][2]").connected is True
+    assert session.check_text("top.shallow_return[1][2]", "top.u.din[1][2]").connected is True
 
 
 def test_text_conn_scalar_port_map_survives_slice_or_assign(tmp_path: Path):
@@ -210,10 +210,11 @@ def test_text_conn_scalar_port_map_survives_slice_or_assign(tmp_path: Path):
         top="top",
         resolve_param_dims=False,
     )
-    assert session.check("top.chain_in[1][2]", "top.fork_main[1][2]").connected is True
-    assert session.check("top.fork_main[1][2]", "top.merge_tap").connected is True
-    assert session.check("top.shallow_return[1][2]", "top.merge_tap").connected is True
-    assert session.check("top.chain_in[1][2]", "top.merge_tap").connected is True
+    assert session.check_text("top.chain_in[1][2]", "top.fork_main[1][2]").connected is True
+    assert session.check_text("top.fork_main[1][2]", "top.merge_tap").connected is True
+    assert session.check_text("top.shallow_return[1][2]", "top.merge_tap").connected is True
+    assert session.check_text("top.chain_in[1][2]", "top.merge_tap").connected is True
+    assert session.check_text("top.chain_in[1][2]", "top.fork_decoy[1][2]").connected is False
 
 
 def test_text_conn_fork_blackbox_without_child_inst_row(tmp_path: Path):
@@ -255,11 +256,10 @@ def test_text_conn_fork_blackbox_without_child_inst_row(tmp_path: Path):
             rows=[top_row],
         ),
     )
-    result = session.text_check_entry(
-        ConnectivityCheck("top.chain_in[1][2]", "top.merge_tap", "fork_bb"),
-        trace=False,
-        dedup_cache={},
-        dedup_stats=[0, 0],
+    result = session.check_text(
+        "top.chain_in[1][2]",
+        "top.merge_tap",
+        check_id="fork_bb",
     )
     assert result.connected is True
 
@@ -278,21 +278,26 @@ def test_text_conn_md_bus_slice_coarse_grep(tmp_path: Path):
     _, rows = elaborate(index, "top")
     from hierwalk.connect.session import ConnectivitySession
 
-    session = ConnectivitySession(
+    text_session = ConnectivitySession(
         rows=rows,
         index=index,
         top="top",
         resolve_param_dims=False,
     )
-    assert session.check("top.a[0][1]", "top.b[0][1]").connected is True
-    assert session.check("top.a[0][2]", "top.b[0][2]").connected is True
+    assert text_session.check_text("top.a[0][1]", "top.b[0][1]").connected is True
+    assert text_session.check_text("top.a[0][2]", "top.b[0][2]").connected is True
 
-    session.resolve_param_dims = True
-    assert session.check("top.a[0][2]", "top.b[0][2]").connected is False
+    logical_session = ConnectivitySession(
+        rows=rows,
+        index=index,
+        top="top",
+        resolve_param_dims=True,
+    )
+    assert logical_session.check("top.a[0][2]", "top.b[0][2]").connected is False
 
 
-def test_text_conn_indexed_concat_port_map_bit_precise(tmp_path: Path):
-    """``{sig[i][j] | ...}`` concat port maps must not be misclassified as compound."""
+def test_text_conn_indexed_concat_port_map_or_bloom(tmp_path: Path):
+    """OR-in-concat port maps bloom across operands in text-conn only."""
     v = """
     module child(input logic [1:0] din);
     endmodule
@@ -313,6 +318,37 @@ def test_text_conn_indexed_concat_port_map_bit_precise(tmp_path: Path):
         index=index,
         top="top",
         resolve_param_dims=False,
+    )
+    assert session.check_text("top.chain_in[1][2]", "top.u.din[0]").connected is True
+    assert session.check_text("top.shallow_return[1][2]", "top.u.din[0]").connected is True
+    assert session.check_text("top.chain_in[0][0]", "top.u.din[1]").connected is True
+    # OR operands share din[0]; text blooms chain_in to shallow_return/tap via inst map.
+    assert session.check_text("top.chain_in[1][2]", "top.tap[1][2]").connected is True
+    assert session.check_text("top.shallow_return[1][2]", "top.tap[1][2]").connected is True
+
+
+def test_logical_conn_indexed_concat_port_map_no_or_crosstalk(tmp_path: Path):
+    """Logical COI must not follow OR-in-concat operand bloom across signals."""
+    v = """
+    module child(input logic [1:0] din);
+    endmodule
+    module top;
+      wire [1:0][2:0] chain_in, shallow_return, tap;
+      child u (.din({chain_in[1][2] | shallow_return[1][2], chain_in[0][0]}));
+      assign tap[1][2] = shallow_return[1][2];
+    endmodule
+    """
+    rtl = tmp_path / "top.v"
+    rtl.write_text(v, encoding="utf-8")
+    index = DesignIndex.build({str(rtl): v})
+    _, rows = elaborate(index, "top")
+    from hierwalk.connect.session import ConnectivitySession
+
+    session = ConnectivitySession(
+        rows=rows,
+        index=index,
+        top="top",
+        resolve_param_dims=True,
     )
     assert session.check("top.chain_in[1][2]", "top.u.din[0]").connected is True
     assert session.check("top.shallow_return[1][2]", "top.u.din[0]").connected is True
@@ -344,9 +380,9 @@ def test_text_conn_hier_port_concat_bit_precise(tmp_path: Path):
         top="top",
         resolve_param_dims=False,
     )
-    assert session.check("top.wa", "top.wq").connected is False
-    assert session.check("top.wc", "top.wq").connected is False
-    assert session.check("top.wb", "top.wq").connected is True
+    assert session.check_text("top.wa", "top.wq").connected is False
+    assert session.check_text("top.wc", "top.wq").connected is False
+    assert session.check_text("top.wb", "top.wq").connected is True
 
 
 def test_text_conn_skips_parametric_dim_resolution(tmp_path: Path):
@@ -374,7 +410,7 @@ def test_text_conn_skips_parametric_dim_resolution(tmp_path: Path):
         top="top",
         resolve_param_dims=False,
     )
-    text_result = text_session.check("top.data", "top.w_e")
+    text_result = text_session.check_text("top.data", "top.w_e")
     assert not any("STRB_MAX" in err for err in text_result.errors)
     assert text_result.connected
 
@@ -413,9 +449,94 @@ def test_text_conn_bloom_filter_accepts_slice_when_bus_connected(tmp_path: Path)
         top="top",
         resolve_param_dims=False,
     )
-    text_result = text_session.check("top.data[3]", "top.w_e[3]")
+    text_result = text_session.check_text("top.data[3]", "top.w_e[3]")
     assert not any("STRB_MAX" in err for err in text_result.errors)
     assert text_result.connected
+
+
+def test_text_conn_empty_blackbox_scalar_passthrough(tmp_path: Path):
+    """Empty 1-in/1-out vendor stub passes text inst-blackbox when child is not walked."""
+    v = """
+    module vendor_bb (input din, output dout);
+    endmodule
+    module top;
+      wire chain_in, tap;
+      vendor_bb u_bb (.din(chain_in), .dout(tap));
+    endmodule
+    """
+    rtl = tmp_path / "top.v"
+    rtl.write_text(v, encoding="utf-8")
+    index = DesignIndex.build({str(rtl): v})
+    _, rows = elaborate(index, "top")
+    top_row = next(r for r in rows if r.full_path == "top")
+    from hierwalk.connect.session import ConnectivitySession
+    from hierwalk.models import ElabIndex
+
+    session = ConnectivitySession(
+        rows=[top_row],
+        index=index,
+        top="top",
+        resolve_param_dims=False,
+        elab_index=ElabIndex.from_rows_by_path(
+            {top_row.full_path: top_row},
+            rows=[top_row],
+        ),
+    )
+    assert session.check_text("top.chain_in", "top.tap").connected is True
+
+
+def test_text_conn_hop_trace_granularity_tags(tmp_path: Path):
+    """Text trace hops annotate bloom vs bit-precise expansion."""
+    v = """
+    module child(input logic [1:0] din);
+    endmodule
+    module top;
+      wire [1:0][2:0] chain_in, shallow_return;
+      child u (.din({chain_in[1][2] | shallow_return[1][2], chain_in[0][0]}));
+    endmodule
+    """
+    rtl = tmp_path / "top.v"
+    rtl.write_text(v, encoding="utf-8")
+    index = DesignIndex.build({str(rtl): v})
+    _, rows = elaborate(index, "top")
+    from hierwalk.connect.session import ConnectivitySession
+
+    session = ConnectivitySession(
+        rows=rows,
+        index=index,
+        top="top",
+        resolve_param_dims=False,
+    )
+    result = session.check_text("top.chain_in[1][2]", "top.u.din[0]", trace=True)
+    assert result.connected
+    hop_text = " ".join(h.detail for h in result.hops)
+    assert "[bit-precise]" in hop_text
+
+
+def test_text_conn_or_concat_operand_child_down_forward(tmp_path: Path):
+    """OR inside concat port map: each operand child-downs to the indexed child port."""
+    v = """
+    module child(input logic [1:0] din);
+    endmodule
+    module top;
+      wire [1:0][2:0] chain_in, shallow_return;
+      child u (.din({chain_in[1][2] | shallow_return[1][2], chain_in[0][0]}));
+    endmodule
+    """
+    rtl = tmp_path / "top.v"
+    rtl.write_text(v, encoding="utf-8")
+    index = DesignIndex.build({str(rtl): v})
+    _, rows = elaborate(index, "top")
+    from hierwalk.connect.session import ConnectivitySession
+
+    session = ConnectivitySession(
+        rows=rows,
+        index=index,
+        top="top",
+        resolve_param_dims=False,
+    )
+    assert session.check_text("top.chain_in[1][2]", "top.u.din[0]").connected is True
+    assert session.check_text("top.shallow_return[1][2]", "top.u.din[0]").connected is True
 
 
 def test_refine_param_ctx_for_top_only_path(tmp_path: Path):

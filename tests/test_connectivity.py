@@ -1594,7 +1594,7 @@ def test_cli_check_connect_batch(tmp_path: Path):
         check=True,
     )
     lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
-    assert lines[0] == "# connect results"
+    assert lines[0].startswith("# connect results")
     assert lines[1].startswith("check_id\tendpoint_a\t")
     assert len(lines) == 5  # marker + header + 2 rows + modules_cached comment
     assert all("True" in ln for ln in lines[2:4])

@@ -6,7 +6,7 @@ import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional, Sequence, Set, Union
+from typing import Dict, List, Mapping, Optional, Sequence, Set, Tuple, Union
 
 from hierwalk.connect.session import (
     ConnectivitySession,
@@ -609,6 +609,245 @@ def any_text_conn_hit(results: Sequence[ConnectResult]) -> bool:
     return any(r.connected_text for r in flatten_text_conn_results(results))
 
 
+def _leaf_passed_text_conn(leaf: ConnectResult) -> bool:
+    if leaf.connected_text is not None:
+        return bool(leaf.connected_text)
+    return bool(leaf.connected)
+
+
+def _build_text_connect_lookup(
+    text_results: Sequence[ConnectResult],
+) -> Tuple[Dict[str, ConnectResult], Dict[Tuple[str, str], List[ConnectResult]]]:
+    by_id: Dict[str, ConnectResult] = {}
+    by_endpoint: Dict[Tuple[str, str], List[ConnectResult]] = {}
+    for row in text_results:
+        if row.check_id:
+            by_id[row.check_id] = row
+        ep_a = row.endpoint_a.spec
+        ep_b = row.endpoint_b.spec
+        if ep_a and ep_b:
+            by_endpoint.setdefault((ep_a, ep_b), []).append(row)
+    return by_id, by_endpoint
+
+
+def _representative_text_row(
+    rows: Sequence[ConnectResult],
+) -> Optional[ConnectResult]:
+    if not rows:
+        return None
+    if len(rows) == 1:
+        return rows[0]
+    if any(not _leaf_passed_text_conn(r) for r in rows):
+        return next(r for r in rows if not _leaf_passed_text_conn(r))
+    return rows[0]
+
+
+def _lookup_text_row_for_leaf(
+    leaf: ConnectResult,
+    *,
+    by_id: Mapping[str, ConnectResult],
+    by_endpoint: Mapping[Tuple[str, str], Sequence[ConnectResult]],
+) -> Optional[ConnectResult]:
+    if leaf.check_id:
+        hit = by_id.get(leaf.check_id)
+        if hit is not None:
+            return hit
+    rows = list(by_endpoint.get(
+        (leaf.endpoint_a.spec, leaf.endpoint_b.spec),
+        (),
+    ))
+    return _representative_text_row(rows)
+
+
+def apply_text_verdicts_to_results(
+    results: Sequence[ConnectResult],
+    text_results: Sequence[ConnectResult],
+) -> None:
+    """Copy ``connected_text`` (and pre-logical ``connected``) from a prior text pass."""
+    by_id, by_endpoint = _build_text_connect_lookup(text_results)
+    if not by_id and not by_endpoint:
+        return
+    for result in flatten_connect_results(results):
+        hit = _lookup_text_row_for_leaf(
+            result,
+            by_id=by_id,
+            by_endpoint=by_endpoint,
+        )
+        if hit is None:
+            continue
+        text_ok = _leaf_passed_text_conn(hit)
+        result.connected_text = text_ok
+        result.connected = text_ok
+
+
+def apply_logical_coi_failure_to_results(
+    results: Sequence[ConnectResult],
+    logical_checks: Sequence[ConnectivityCheck],
+    coi_error: str,
+) -> None:
+    """Mark scheduled logical checks failed without altering ``connected_text``."""
+    if not coi_error or not logical_checks:
+        return
+    scheduled_ids = {c.check_id for c in logical_checks if c.check_id}
+    scheduled_endpoints = {
+        (c.endpoint_a, c.endpoint_b) for c in logical_checks
+    }
+    for leaf in flatten_text_conn_results(results):
+        matched = leaf.check_id in scheduled_ids or (
+            leaf.endpoint_a.spec,
+            leaf.endpoint_b.spec,
+        ) in scheduled_endpoints
+        if not matched:
+            continue
+        text_flag = leaf.connected_text
+        leaf.connected = False
+        leaf.connected_logical = False
+        if coi_error not in leaf.errors:
+            leaf.errors = [*leaf.errors, coi_error]
+        if text_flag is not None:
+            leaf.connected_text = text_flag
+
+
+def _parse_connect_tsv_bool(raw: str) -> bool:
+    return str(raw).strip().lower() in ("true", "1", "yes")
+
+
+def load_text_connect_results_from_tsv(path: Path) -> List[ConnectResult]:
+    """Load leaf text-phase rows from ``conn.text.tsv`` for logical gating."""
+    src = path.expanduser()
+    if not src.is_file():
+        return []
+    lines = [
+        ln
+        for ln in src.read_text(encoding="utf-8").splitlines()
+        if ln and not ln.startswith("#")
+    ]
+    if len(lines) < 2:
+        return []
+    headers = lines[0].split("\t")
+    out: List[ConnectResult] = []
+    for row_line in lines[1:]:
+        cols = row_line.split("\t")
+        if len(cols) < len(headers):
+            cols.extend([""] * (len(headers) - len(cols)))
+        row = dict(zip(headers, cols))
+        phase = row.get("phase", "").strip().lower()
+        if phase and phase != "text":
+            continue
+        check_id = row.get("check_id", "").strip()
+        ep_a = row.get("endpoint_a", "").strip()
+        ep_b = row.get("endpoint_b", "").strip()
+        if not ep_a or not ep_b:
+            continue
+        text_ok = _parse_connect_tsv_bool(
+            row.get("connected_text", row.get("connected", "False"))
+        )
+        out.append(
+            ConnectResult(
+                ConnectEndpoint(ep_a, "", "", "", port_found=True),
+                ConnectEndpoint(ep_b, "", "", "", port_found=True),
+                connected=text_ok,
+                mode=row.get("mode", "unknown") or "unknown",
+                note=row.get("note", ""),
+                errors=[
+                    e
+                    for e in row.get("errors", "").split(" | ")
+                    if e.strip()
+                ],
+                connected_text=text_ok,
+                check_id=check_id,
+            )
+        )
+    return out
+
+
+def build_logical_connect_request(
+    request: ConnectivityRequest,
+    text_results: Sequence[ConnectResult] | None,
+) -> Tuple[ConnectivityRequest, int, int]:
+    """
+    Build a logical-phase request containing only text-pass leaf checks.
+
+    Returns ``(logical_request, run_count, skipped_count)``.  When
+    *text_results* is empty or None (logical-only run), returns *request* unchanged.
+    """
+    if not text_results:
+        return request, len(request.checks), 0
+
+    from hierwalk.connect.shared.request import ConnectivityCheck, ConnectivityRequest
+
+    by_id, by_endpoint = _build_text_connect_lookup(text_results)
+    logical_checks: List[ConnectivityCheck] = []
+    run_count = 0
+    skipped_count = 0
+
+    for chk in request.checks:
+        hit = by_id.get(chk.check_id)
+        if hit is None:
+            hit = _representative_text_row(
+                by_endpoint.get((chk.endpoint_a, chk.endpoint_b), ())
+            )
+        if hit is None and chk.check_id:
+            prefix = f"{chk.check_id}->"
+            expand_leaves = [
+                r
+                for r in text_results
+                if r.check_id and r.check_id.startswith(prefix)
+            ]
+            if expand_leaves:
+                for leaf in expand_leaves:
+                    if not _leaf_passed_text_conn(leaf):
+                        skipped_count += 1
+                        continue
+                    logical_checks.append(
+                        ConnectivityCheck(
+                            leaf.endpoint_a.spec,
+                            leaf.endpoint_b.spec,
+                            check_id=leaf.check_id,
+                        )
+                    )
+                    run_count += 1
+                continue
+        if hit is None:
+            skipped_count += 1
+            continue
+        leaves = flatten_text_conn_results([hit])
+        if not leaves:
+            skipped_count += 1
+            continue
+        if len(leaves) == 1 and not hit.sub_results:
+            if _leaf_passed_text_conn(leaves[0]):
+                logical_checks.append(chk)
+                run_count += 1
+            else:
+                skipped_count += 1
+            continue
+        for leaf in leaves:
+            if not _leaf_passed_text_conn(leaf):
+                skipped_count += 1
+                continue
+            logical_checks.append(
+                ConnectivityCheck(
+                    leaf.endpoint_a.spec,
+                    leaf.endpoint_b.spec,
+                    check_id=leaf.check_id or chk.check_id,
+                )
+            )
+            run_count += 1
+
+    logical_request = ConnectivityRequest(
+        checks=tuple(logical_checks),
+        top=request.top,
+        defines=dict(request.defines),
+        trace=request.trace,
+        connect_log=request.connect_log,
+        include_ff=request.include_ff,
+        strict_generate=request.strict_generate,
+        over_approximate_if=request.over_approximate_if,
+    )
+    return logical_request, run_count, skipped_count
+
+
 def _merge_one_connect_result(orig: ConnectResult, ref: ConnectResult) -> None:
     """Copy refined structural COI into *orig*, preserving ``connected_text``."""
     text_flag = orig.connected_text
@@ -631,6 +870,16 @@ def _merge_one_connect_result(orig: ConnectResult, ref: ConnectResult) -> None:
             orig.sub_results = ref.sub_results
 
 
+def _merge_refined_into_result_tree(
+    orig: ConnectResult,
+    ref_by_id: Mapping[str, ConnectResult],
+) -> None:
+    if orig.check_id and orig.check_id in ref_by_id:
+        _merge_one_connect_result(orig, ref_by_id[orig.check_id])
+    for sub in orig.sub_results or ():
+        _merge_refined_into_result_tree(sub, ref_by_id)
+
+
 def merge_refined_connect_results(
     results: Sequence[ConnectResult],
     refined: Sequence[ConnectResult],
@@ -638,24 +887,32 @@ def merge_refined_connect_results(
     """Copy post-recovery structural COI into *results*, keeping ``connected_text``.
 
     Text-conn may reorder checks for cache reuse; merge by ``check_id``, not index.
+    Leaf logical results (e.g. expand sub-check ids) merge into parent sub_results.
     """
+    if not refined:
+        return
     ref_by_id = {r.check_id: r for r in refined if r.check_id}
     if ref_by_id:
         for orig in results:
-            if not orig.check_id:
-                continue
-            ref = ref_by_id.get(orig.check_id)
-            if ref is None:
-                continue
-            _merge_one_connect_result(orig, ref)
+            _merge_refined_into_result_tree(orig, ref_by_id)
         return
-
-    if len(results) != len(refined):
-        raise ValueError(
-            f"connect result length mismatch: {len(results)} vs {len(refined)}"
-        )
-    for orig, ref in zip(results, refined):
-        _merge_one_connect_result(orig, ref)
+    ref_by_endpoint: Dict[Tuple[str, str], ConnectResult] = {}
+    for row in refined:
+        ep_a = row.endpoint_a.spec
+        ep_b = row.endpoint_b.spec
+        if ep_a and ep_b:
+            ref_by_endpoint[(ep_a, ep_b)] = row
+    if ref_by_endpoint:
+        for leaf in flatten_connect_results(results):
+            ref = ref_by_endpoint.get(
+                (leaf.endpoint_a.spec, leaf.endpoint_b.spec)
+            )
+            if ref is not None:
+                _merge_one_connect_result(leaf, ref)
+        return
+    raise ValueError(
+        "connect refined results lack check_id and endpoint keys; cannot merge"
+    )
 
 
 def reorder_connect_results_to_checks(

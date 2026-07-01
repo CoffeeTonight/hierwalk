@@ -499,6 +499,21 @@ Options
   strict-generate     Strict generate-region folding
   over-approximate-if bool or null
 
+Text-conn vs logical-conn (path-walk / suite)
+--------------------------------------------
+  Text-conn asks whether signal *names* appear together in RTL connection
+  structure (assign RHS, port maps, hierarchy). It is a coarse bloom filter:
+  no constant-fold (``assign z = a * 0`` still links ``a``), no parametric
+  dim resolution, and flip-flops are *not* barriers (Q/D may be traversed).
+  Multi-dimensional buses may bloom at base/slice granularity.
+
+  Logical-conn asks whether a value can actually propagate: bit-precise COI,
+  constant/tie-off masks, and FF barriers (unless include-ff).
+
+  In ``connect_phase: both``, TSV columns ``connected_text`` and
+  ``connected`` (logical) are independent; logical runs only for text passes
+  when gating is enabled.
+
 Path evidence kinds (hops / connect-log)
 ----------------------------------------
   intra-module    assign/alias/ff within one module
@@ -506,6 +521,13 @@ Path evidence kinds (hops / connect-log)
   child-hier      hierarchical reference into child
   parent-up       child port -> parent via instance port map
   parent-hier-ref child port -> parent via hier ref in parent
+  inst-blackbox   parent net through instance when child is not hierarchy-walked
+                  (output ports must be structurally driven from the input port
+                  in the child module body; empty 1-in/1-out stubs passthrough)
+  net-alias       coarse net_rep bloom within one module [text-bloom]
+
+  Trace hop suffixes: [text-bloom], [bit-precise], [structural] — see connect TSV
+  header comments when using --connect-trace.
 
 Text pairs file (non-JSON)
 --------------------------

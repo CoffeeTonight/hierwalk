@@ -3840,6 +3840,7 @@ def _build_reverse_port_index(
     param_map: Mapping[str, str] | None = None,
     decl_widths: Optional[Mapping[str, List[int]]] = None,
     decl_md_suffixes: Optional[Mapping[str, List[str]]] = None,
+    or_concat_compound_operands: bool = False,
 ) -> Dict[str, List[Tuple[str, str]]]:
     pmap = dict(param_map or {})
     widths = dict(decl_widths or {})
@@ -3863,6 +3864,13 @@ def _build_reverse_port_index(
                     if not piece:
                         continue
                     if _is_compound_port_map_expr(piece):
+                        if or_concat_compound_operands:
+                            for root in extract_connect_nodes(piece, pmap):
+                                rep = net_rep.get(root, root)
+                                if "[" in port:
+                                    _add(rep, inst, port)
+                                else:
+                                    _add(rep, inst, f"{port_base}[{i}]")
                         continue
                     for root in extract_connect_nodes(piece, pmap):
                         rep = net_rep.get(root, root)
@@ -4783,6 +4791,7 @@ def _build_module_connect_index_uncached(
         param_map=full_pmap,
         decl_widths=decl_widths,
         decl_md_suffixes=decl_md_suffixes,
+        or_concat_compound_operands=text_conn_lite,
     )
     rep_hier_links: Dict[str, List[Tuple[str, str]]] = {}
     for net, pairs in hier_links.items():

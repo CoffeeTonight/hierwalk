@@ -10,16 +10,23 @@ from hierwalk.connect.logical.scan import (
     _expand_concat_elements,
     _is_braced_concat_rhs,
     _is_compound_port_map_expr,
+    _is_const_literal,
     _is_literal_slice_suffix,
     _port_select_suffix,
     _range_to_bit_indices,
     extract_connect_nodes,
+    instance_cell_types,
 )
 from hierwalk.connect.logical.walk_log import CoiWalkDiagnostic
-from hierwalk.connect.shared.endpoints import TextGrepIndexCacheKey, _port_param_ctx
+from hierwalk.connect.shared.endpoints import (
+    TextGrepIndexCacheKey,
+    _empty_module_passthrough_ports,
+    _port_param_ctx,
+)
 from hierwalk.connect.text.index import (
     TextGrepCache,
     TextGrepIndex,
+    build_text_grep_index,
     text_grep_index,
     text_net_representative,
 )
@@ -29,6 +36,28 @@ from hierwalk.params import resolve_param_expr
 
 NetState = Tuple[str, str]
 PrevStep = Tuple[NetState, str, str]
+
+_TEXT_HOP_GRANULARITY: Dict[str, str] = {
+    "net-alias": "text-bloom",
+    "inst-blackbox": "structural",
+    "child-down": "bit-precise",
+    "child-hier": "bit-precise",
+    "parent-up": "bit-precise",
+    "parent-hier-ref": "bit-precise",
+    "intra-module": "structural",
+}
+
+
+def _annotate_text_hop_detail(
+    kind: str,
+    detail: str,
+    *,
+    granularity: Optional[str] = None,
+) -> str:
+    tag = granularity or _TEXT_HOP_GRANULARITY.get(kind)
+    if tag:
+        return f"{detail} [{tag}]"
+    return detail
 
 
 def _net_label(scope: str, net: str) -> str:
@@ -201,6 +230,10 @@ class _SearchCtx:
     over_approximate_if: bool = True
     port_rep_cache: Dict[Tuple[int, str], str] = field(default_factory=dict)
     net_rep_cache: Dict[Tuple[int, str], str] = field(default_factory=dict)
+    child_text_idx_cache: Dict[Tuple[str, Tuple[Tuple[str, str], ...]], TextGrepIndex] = (
+        field(default_factory=dict)
+    )
+    equiv_cache: Dict[Tuple[NetState, NetState], bool] = field(default_factory=dict)
 
 
 def _heuristic_distance(ctx: _SearchCtx, scope: str) -> int:
@@ -385,10 +418,53 @@ def _state_key(
     mod_idx: TextGrepIndex,
     *,
     net_rep_cache: Optional[Dict[Tuple[int, str], str]] = None,
+    preserve_port_select: bool = False,
 ) -> NetState:
+    if preserve_port_select and "[" in net:
+        return scope, net
     if net_rep_cache is not None:
         return scope, _cached_net_rep(mod_idx, net, net_rep_cache)
     return scope, text_net_representative(mod_idx, net)
+
+
+def _text_states_equivalent(
+    left: NetState,
+    right: NetState,
+    ctx: _SearchCtx,
+) -> bool:
+    if left == right:
+        return True
+    cache_key = (left, right) if left <= right else (right, left)
+    cached = ctx.equiv_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    if left[0] != right[0]:
+        ctx.equiv_cache[cache_key] = False
+        return False
+    l_scope, l_net = left
+    r_net = right[1]
+    if "[" in l_net and "[" in r_net:
+        ok = l_net == r_net
+        ctx.equiv_cache[cache_key] = ok
+        return ok
+    # One side sliced, one base: bloom via net_rep (text-conn semantics).
+    row = ctx.rows_by_path.get(l_scope)
+    if row is None:
+        ctx.equiv_cache[cache_key] = False
+        return False
+    mod_idx = text_grep_index(
+        ctx.grep_cache,
+        ctx.index,
+        row.module,
+        _cached_param_ctx(ctx, row),
+        defines=ctx.defines,
+        over_approximate_if=ctx.over_approximate_if,
+    )
+    l_rep = _cached_net_rep(mod_idx, l_net, ctx.net_rep_cache)
+    r_rep = _cached_net_rep(mod_idx, r_net, ctx.net_rep_cache)
+    ok = l_rep == r_rep
+    ctx.equiv_cache[cache_key] = ok
+    return ok
 
 
 def _goal_match(ctx: _SearchCtx, state: NetState) -> bool:
@@ -398,7 +474,102 @@ def _goal_match(ctx: _SearchCtx, state: NetState) -> bool:
     return scope == ctx.goal_scope and rep == ctx.goal_rep
 
 
+def _child_text_idx_cache_key(
+    cell: str,
+    param_map: Mapping[str, str],
+    *,
+    defines: Mapping[str, str],
+    over_approximate_if: bool,
+) -> Tuple[str, Tuple[Tuple[str, str], ...], Tuple[Tuple[str, str], ...], bool]:
+    return (
+        cell,
+        tuple(sorted(param_map.items())),
+        tuple(sorted(defines.items())),
+        over_approximate_if,
+    )
+
+
+def _cached_child_text_grep_index(
+    ctx: _SearchCtx,
+    cell: str,
+    child_body: str,
+    param_map: Mapping[str, str],
+) -> Optional[TextGrepIndex]:
+    if not child_body.strip():
+        return None
+    key = _child_text_idx_cache_key(
+        cell,
+        param_map,
+        defines=ctx.defines,
+        over_approximate_if=ctx.over_approximate_if,
+    )
+    hit = ctx.child_text_idx_cache.get(key)
+    if hit is not None:
+        return hit
+    built = build_text_grep_index(
+        child_body,
+        param_map=param_map,
+        defines=ctx.defines,
+        over_approximate_if=ctx.over_approximate_if,
+    )
+    ctx.child_text_idx_cache[key] = built
+    return built
+
+
+def _text_child_port_links_input_or_empty_passthrough(
+    ctx: _SearchCtx,
+    cell: str,
+    child_body: str,
+    in_port: str,
+    out_port: str,
+    param_map: Mapping[str, str],
+) -> bool:
+    """Child COI link, or scalar 1-in/1-out empty-module vendor passthrough."""
+    out_base = out_port.split("[", 1)[0]
+    if not child_body.strip():
+        passthrough = _empty_module_passthrough_ports(
+            ctx.index,
+            cell,
+            param_map,
+            defines=ctx.defines,
+        )
+        if not passthrough:
+            return False
+        in_base = in_port.split("[", 1)[0]
+        return in_base == passthrough[0] and out_base == passthrough[1]
+    child_idx = _cached_child_text_grep_index(ctx, cell, child_body, param_map)
+    if child_idx is None:
+        return False
+    return _text_child_port_links_input(child_idx, in_port, out_base)
+
+
+def _text_child_port_links_input(
+    child_idx: TextGrepIndex,
+    in_port: str,
+    out_port: str,
+) -> bool:
+    """True when child text-grep COI links *out_port* back to *in_port*."""
+    in_rep = text_net_representative(child_idx, in_port)
+    out_rep = text_net_representative(child_idx, out_port)
+    if in_rep == out_rep:
+        return True
+    seen: Set[str] = {in_rep}
+    frontier: List[str] = [in_rep]
+    while frontier:
+        cur = frontier.pop()
+        for peer in child_idx.rep_adj.get(cur, ()):
+            if peer == out_rep:
+                return True
+            if peer in seen:
+                continue
+            seen.add(peer)
+            frontier.append(peer)
+    return False
+
+
 def _text_inst_blackbox_out_roots(
+    ctx: _SearchCtx,
+    row: FlatRow,
     mod_idx: TextGrepIndex,
     inst_leaf: str,
     in_port: str,
@@ -408,6 +579,8 @@ def _text_inst_blackbox_out_roots(
 
     Only simple (non-compound) port maps qualify — XOR/concat inst maps still
     require a child-down walk so unrelated operands are not coarse-linked.
+    Output ports must be driven from *in_port* in the child module body so
+    const-tied or unrelated outputs (e.g. ``decoy_out = 12'b0``) are excluded.
     """
     ports = mod_idx.inst_ports.get(inst_leaf)
     if not ports:
@@ -419,12 +592,31 @@ def _text_inst_blackbox_out_roots(
             break
     if not in_expr.strip() or _is_compound_port_map_expr(in_expr):
         return frozenset()
+
+    pmap = _cached_param_ctx(ctx, row)
+    parent_rec = ctx.index.get_module(row.module)
+    parent_body = ctx.index.module_body(row.module) if parent_rec else ""
+    cell = instance_cell_types(parent_body, param_map=pmap).get(inst_leaf, "")
+    child_body = ""
+    if cell:
+        child_rec = ctx.index.get_module(cell)
+        child_body = ctx.index.module_body(cell) if child_rec else ""
     out_roots: Set[str] = set()
     for port_name, expr in ports:
         if port_name == in_port:
             continue
+        port_base = port_name.split("[", 1)[0]
+        if not cell or not _text_child_port_links_input_or_empty_passthrough(
+            ctx,
+            cell,
+            child_body,
+            in_port,
+            port_base,
+            pmap,
+        ):
+            continue
         text = re.sub(r"\s+", "", expr.strip())
-        if not text or _is_compound_port_map_expr(expr):
+        if not text or _is_compound_port_map_expr(expr) or _is_const_literal(expr, pmap):
             continue
         roots = mod_idx.expr_roots.get(expr)
         if roots:
@@ -459,12 +651,26 @@ def _expand_state(
         kind: str,
         detail: str,
         target_mod_idx: Optional[TextGrepIndex] = None,
+        preserve_port_select: bool = False,
+        granularity: Optional[str] = None,
     ) -> None:
         idx = target_mod_idx or mod_idx
-        key = _state_key(nxt_scope, nxt_net, idx, net_rep_cache=ctx.net_rep_cache)
+        key = _state_key(
+            nxt_scope,
+            nxt_net,
+            idx,
+            net_rep_cache=ctx.net_rep_cache,
+            preserve_port_select=preserve_port_select,
+        )
         if key not in seen_local:
             seen_local.add(key)
-            out.append(_ExpandEdge(key, kind, detail))
+            out.append(
+                _ExpandEdge(
+                    key,
+                    kind,
+                    _annotate_text_hop_detail(kind, detail, granularity=granularity),
+                )
+            )
 
     here = _net_label(scope, net)
     mod_name = row.module
@@ -477,6 +683,18 @@ def _expand_state(
             detail=(
                 f"{here} ~ {_net_label(scope, peer_rep)} "
                 f"(assign/alias/ff in module {mod_name})"
+            ),
+        )
+
+    alias = mod_idx.net_rep.get(net) or mod_idx.net_rep.get(rep)
+    if alias and alias not in {net, rep}:
+        push(
+            scope,
+            alias,
+            kind="net-alias",
+            detail=(
+                f"{here} ~ {_net_label(scope, alias)} "
+                f"(net_rep alias in module {mod_name})"
             ),
         )
 
@@ -503,9 +721,10 @@ def _expand_state(
                         f"(instance {inst_leaf} port .{port} in {mod_name})"
                     ),
                     target_mod_idx=child_idx,
+                    preserve_port_select=True,
                 )
                 continue
-        for out_root in _text_inst_blackbox_out_roots(mod_idx, inst_leaf, port):
+        for out_root in _text_inst_blackbox_out_roots(ctx, row, mod_idx, inst_leaf, port):
             push(
                 scope,
                 out_root,
@@ -514,6 +733,7 @@ def _expand_state(
                     f"{here} ~ {_net_label(scope, out_root)} "
                     f"(text grep through {inst_leaf} port .{port} in {mod_name})"
                 ),
+                preserve_port_select=True,
             )
 
     for inst_leaf, port in mod_idx.hier_links.get(rep, ()):
@@ -540,6 +760,7 @@ def _expand_state(
                 f"(hier ref {inst_leaf}.{port} in {mod_name})"
             ),
             target_mod_idx=child_idx,
+            preserve_port_select=True,
         )
 
     parent_path = row.parent_path
@@ -580,6 +801,7 @@ def _expand_state(
                             f"in parent {parent_row.module})"
                         ),
                         target_mod_idx=parent_idx,
+                        granularity="structural",
                     )
                 for root in roots:
                     push(
@@ -592,6 +814,7 @@ def _expand_state(
                             f"in parent {parent_row.module})"
                         ),
                         target_mod_idx=parent_idx,
+                        preserve_port_select=True,
                     )
             cur_rec = ctx.index.get_module(row.module)
             skip_iface_hier = cur_rec is not None and cur_rec.is_interface
@@ -626,14 +849,132 @@ def _expand_state(
     return out
 
 
+def _equiv_rep_key(
+    state: NetState,
+    ctx: _SearchCtx,
+) -> Optional[Tuple[str, str]]:
+    scope, net = state
+    if "[" in net:
+        return None
+    row = ctx.rows_by_path.get(scope)
+    if row is None:
+        return None
+    mod_idx = text_grep_index(
+        ctx.grep_cache,
+        ctx.index,
+        row.module,
+        _cached_param_ctx(ctx, row),
+        defines=ctx.defines,
+        over_approximate_if=ctx.over_approximate_if,
+    )
+    rep = _cached_net_rep(mod_idx, net, ctx.net_rep_cache)
+    return (scope, rep)
+
+
+@dataclass
+class _SeenRepIndex:
+    by_rep: Dict[Tuple[str, str], Set[NetState]] = field(default_factory=dict)
+
+    def add(self, state: NetState, ctx: _SearchCtx) -> None:
+        key = _equiv_rep_key(state, ctx)
+        if key is not None:
+            self.by_rep.setdefault(key, set()).add(state)
+
+    def find_in(
+        self,
+        state: NetState,
+        candidates: Set[NetState],
+        ctx: _SearchCtx,
+    ) -> Optional[NetState]:
+        key = _equiv_rep_key(state, ctx)
+        if key is None:
+            return None
+        overlap = self.by_rep.get(key, set()) & candidates
+        if not overlap:
+            return None
+        return min(overlap, key=lambda s: (len(s[1]), s[1]))
+
+
+def _find_equivalent_in(
+    state: NetState,
+    candidates: Set[NetState],
+    ctx: _SearchCtx,
+    *,
+    rep_index: Optional[_SeenRepIndex] = None,
+) -> Optional[NetState]:
+    if state in candidates:
+        return state
+    if rep_index is not None:
+        hit = rep_index.find_in(state, candidates, ctx)
+        if hit is not None:
+            return hit
+    for other in candidates:
+        if _text_states_equivalent(state, other, ctx):
+            return other
+    return None
+
+
+def _find_equivalent_with_prev(
+    meet: NetState,
+    seen: Set[NetState],
+    prev: Mapping[NetState, PrevStep],
+    endpoint: NetState,
+    ctx: _SearchCtx,
+) -> Optional[NetState]:
+    if meet == endpoint or meet in prev:
+        return meet
+    for state in seen:
+        if state not in prev and state != endpoint:
+            continue
+        if state == meet or _text_states_equivalent(meet, state, ctx):
+            return state
+    return None
+
+
+def _resolve_trace_meets(
+    meet: NetState,
+    start: NetState,
+    goal: NetState,
+    prev_f: Mapping[NetState, PrevStep],
+    prev_b: Mapping[NetState, PrevStep],
+    seen_f: Set[NetState],
+    seen_b: Set[NetState],
+    ctx: _SearchCtx,
+) -> Tuple[NetState, NetState]:
+    meet_f = _find_equivalent_with_prev(meet, seen_f, prev_f, start, ctx) or meet
+    meet_b = _find_equivalent_with_prev(meet, seen_b, prev_b, goal, ctx) or meet
+    for state in seen_f & seen_b:
+        if not _text_states_equivalent(meet, state, ctx):
+            continue
+        if meet_f not in prev_f and meet_f != start and (
+            state in prev_f or state == start
+        ):
+            meet_f = state
+        if meet_b not in prev_b and meet_b != goal and (
+            state in prev_b or state == goal
+        ):
+            meet_b = state
+    return meet_f, meet_b
+
+
 def _meet(
     front_a: Set[NetState],
     seen_b: Set[NetState],
     ctx: _SearchCtx,
+    *,
+    seen_b_rep: Optional[_SeenRepIndex] = None,
 ) -> Optional[NetState]:
     for state in front_a:
         if state in seen_b:
             return state
+        witness = _find_equivalent_in(
+            state,
+            seen_b,
+            ctx,
+            rep_index=seen_b_rep,
+        )
+        if witness is not None:
+            return witness
         if ctx.goal_scope_only and state[0] == ctx.goal_scope:
             return state
     return None
@@ -642,11 +983,23 @@ def _meet(
 def _meet_seen(
     seen_a: Set[NetState],
     seen_b: Set[NetState],
+    ctx: _SearchCtx,
+    *,
+    seen_b_rep: Optional[_SeenRepIndex] = None,
 ) -> Optional[NetState]:
     both = seen_a & seen_b
-    if not both:
-        return None
-    return min(both, key=lambda s: (len(s[0]), s[0], s[1]))
+    if both:
+        return min(both, key=lambda s: (len(s[0]), s[0], s[1]))
+    for state in seen_a:
+        witness = _find_equivalent_in(
+            state,
+            seen_b,
+            ctx,
+            rep_index=seen_b_rep,
+        )
+        if witness is not None:
+            return witness
+    return None
 
 
 def text_connect_note(ok: bool, modules_parsed: int, *, hier: bool = False) -> str:
@@ -708,14 +1061,21 @@ def bidirectional_text_grep(
         defines=defines,
         over_approximate_if=over_approx,
     )
-    start_key = _state_key(
+    start_key: NetState = (start[0], start[1])
+    if not start[1]:
+        start_key = _state_key(
+            start[0],
+            start[1],
+            start_idx,
+            net_rep_cache=ctx.net_rep_cache,
+        )
+
+    if _goal_match(ctx, _state_key(
         start[0],
         start[1],
         start_idx,
         net_rep_cache=ctx.net_rep_cache,
-    )
-
-    if _goal_match(ctx, start_key):
+    )):
         return True, [], len(cache), None
 
     if goal_scope_only:
@@ -724,20 +1084,30 @@ def bidirectional_text_grep(
         goal_row = ctx.rows_by_path.get(goal[0])
         if goal_row is None:
             return False, [], len(cache), None
-        goal_ctx = _cached_param_ctx(ctx, goal_row)
-        goal_idx = text_grep_index(cache,
-            index,
-            goal_row.module,
-            goal_ctx, defines=defines, over_approximate_if=over_approx)
-        goal_key = _state_key(
-            goal[0],
-            goal[1],
-            goal_idx,
-            net_rep_cache=ctx.net_rep_cache,
-        )
+        goal_key = (goal[0], goal[1])
+        if not goal[1]:
+            goal_ctx = _cached_param_ctx(ctx, goal_row)
+            goal_idx = text_grep_index(
+                cache,
+                index,
+                goal_row.module,
+                goal_ctx,
+                defines=defines,
+                over_approximate_if=over_approx,
+            )
+            goal_key = _state_key(
+                goal[0],
+                goal[1],
+                goal_idx,
+                net_rep_cache=ctx.net_rep_cache,
+            )
 
     seen_f: Set[NetState] = {start_key}
     seen_b: Set[NetState] = {goal_key}
+    seen_f_rep = _SeenRepIndex()
+    seen_b_rep = _SeenRepIndex()
+    seen_f_rep.add(start_key, ctx)
+    seen_b_rep.add(goal_key, ctx)
     front_f: Set[NetState] = {start_key}
     front_b: Set[NetState] = {goal_key}
     prev_f: Dict[NetState, PrevStep] = {}
@@ -749,6 +1119,9 @@ def bidirectional_text_grep(
         prev: Dict[NetState, PrevStep],
         other_seen: Set[NetState],
         toward_scope: str,
+        *,
+        rep_index: _SeenRepIndex,
+        other_rep_index: _SeenRepIndex,
     ) -> Set[NetState]:
         toward_depth = ctx.depth_by_path.get(toward_scope, 0)
         ordered: List[Tuple[int, int, NetState]] = []
@@ -766,8 +1139,14 @@ def bidirectional_text_grep(
                 if nxt in seen:
                     continue
                 seen.add(nxt)
+                rep_index.add(nxt, ctx)
                 prev[nxt] = (state, edge.kind, edge.detail)
-                if nxt in other_seen:
+                if _find_equivalent_in(
+                    nxt,
+                    other_seen,
+                    ctx,
+                    rep_index=other_rep_index,
+                ) is not None:
                     return {nxt}
                 next_front.add(nxt)
         return next_front
@@ -783,49 +1162,123 @@ def bidirectional_text_grep(
         return ok, hops, len(cache), diag
 
     while front_f or front_b:
-        hit = _meet(front_f, seen_b, ctx)
+        hit = _meet(front_f, seen_b, ctx, seen_b_rep=seen_b_rep)
         if hit is not None:
             return _done(
                 True,
-                _reconstruct_bidirectional(hit, prev_f, prev_b, start_key, goal_key, trace),
+                _reconstruct_bidirectional(
+                    hit,
+                    prev_f,
+                    prev_b,
+                    start_key,
+                    goal_key,
+                    trace,
+                    seen_f=seen_f,
+                    seen_b=seen_b,
+                    ctx=ctx,
+                ),
             )
-        hit = _meet(front_b, seen_f, ctx)
+        hit = _meet(front_b, seen_f, ctx, seen_b_rep=seen_f_rep)
         if hit is not None:
             return _done(
                 True,
-                _reconstruct_bidirectional(hit, prev_f, prev_b, start_key, goal_key, trace),
+                _reconstruct_bidirectional(
+                    hit,
+                    prev_f,
+                    prev_b,
+                    start_key,
+                    goal_key,
+                    trace,
+                    seen_f=seen_f,
+                    seen_b=seen_b,
+                    ctx=ctx,
+                ),
             )
 
         if front_f and (not front_b or len(front_f) <= len(front_b)):
-            nxt = expand_frontier(front_f, seen_f, prev_f, seen_b, ctx.goal_scope)
-            if len(nxt) == 1 and next(iter(nxt)) in seen_b:
+            nxt = expand_frontier(
+                front_f,
+                seen_f,
+                prev_f,
+                seen_b,
+                ctx.goal_scope,
+                rep_index=seen_f_rep,
+                other_rep_index=seen_b_rep,
+            )
+            if len(nxt) == 1:
                 hit = next(iter(nxt))
-                return _done(
-                    True,
-                    _reconstruct_bidirectional(
-                        hit, prev_f, prev_b, start_key, goal_key, trace
-                    ),
-                )
+                if _find_equivalent_in(
+                    hit,
+                    seen_b,
+                    ctx,
+                    rep_index=seen_b_rep,
+                ) is not None:
+                    return _done(
+                        True,
+                        _reconstruct_bidirectional(
+                            hit,
+                            prev_f,
+                            prev_b,
+                            start_key,
+                            goal_key,
+                            trace,
+                            seen_f=seen_f,
+                            seen_b=seen_b,
+                            ctx=ctx,
+                        ),
+                    )
             front_f = nxt
         elif front_b:
-            nxt = expand_frontier(front_b, seen_b, prev_b, seen_f, start[0])
-            if len(nxt) == 1 and next(iter(nxt)) in seen_f:
+            nxt = expand_frontier(
+                front_b,
+                seen_b,
+                prev_b,
+                seen_f,
+                start[0],
+                rep_index=seen_b_rep,
+                other_rep_index=seen_f_rep,
+            )
+            if len(nxt) == 1:
                 hit = next(iter(nxt))
-                return _done(
-                    True,
-                    _reconstruct_bidirectional(
-                        hit, prev_f, prev_b, start_key, goal_key, trace
-                    ),
-                )
+                if _find_equivalent_in(
+                    hit,
+                    seen_f,
+                    ctx,
+                    rep_index=seen_f_rep,
+                ) is not None:
+                    return _done(
+                        True,
+                        _reconstruct_bidirectional(
+                            hit,
+                            prev_f,
+                            prev_b,
+                            start_key,
+                            goal_key,
+                            trace,
+                            seen_f=seen_f,
+                            seen_b=seen_b,
+                            ctx=ctx,
+                        ),
+                    )
             front_b = nxt
         else:
             break
 
-    hit = _meet_seen(seen_f, seen_b)
+    hit = _meet_seen(seen_f, seen_b, ctx, seen_b_rep=seen_b_rep)
     if hit is not None:
         return _done(
             True,
-            _reconstruct_bidirectional(hit, prev_f, prev_b, start_key, goal_key, trace),
+            _reconstruct_bidirectional(
+                hit,
+                prev_f,
+                prev_b,
+                start_key,
+                goal_key,
+                trace,
+                seen_f=seen_f,
+                seen_b=seen_b,
+                ctx=ctx,
+            ),
         )
 
     diag = _failure_walk_diagnostic(
@@ -958,17 +1411,34 @@ def _reconstruct_bidirectional(
     start: NetState,
     goal: NetState,
     trace: bool,
+    *,
+    seen_f: Optional[Set[NetState]] = None,
+    seen_b: Optional[Set[NetState]] = None,
+    ctx: Optional[_SearchCtx] = None,
 ) -> List[ConnectHop]:
     if not trace:
         return [ConnectHop(kind="coi", detail="structural COI path")]
+    meet_f = meet
+    meet_b = meet
+    if ctx is not None and seen_f is not None and seen_b is not None:
+        meet_f, meet_b = _resolve_trace_meets(
+            meet,
+            start,
+            goal,
+            prev_f,
+            prev_b,
+            seen_f,
+            seen_b,
+            ctx,
+        )
     hops: List[ConnectHop] = []
-    cur = meet
+    cur = meet_f
     while cur != start and cur in prev_f:
         _, kind, detail = prev_f[cur]
         hops.append(ConnectHop(kind=kind, detail=detail))
         cur = prev_f[cur][0]
     hops.reverse()
-    cur = meet
+    cur = meet_b
     tail: List[ConnectHop] = []
     while cur != goal and cur in prev_b:
         _, kind, detail = prev_b[cur]

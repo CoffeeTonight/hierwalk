@@ -65,6 +65,7 @@ __all__ = [
 ]
 
 def format_connect_hop(hop: ConnectHop) -> str:
+    """Format one hop; text-conn appends ``[text-bloom]`` / ``[bit-precise]`` tags."""
     return f"[{hop.kind}] {hop.detail}"
 
 
@@ -462,6 +463,16 @@ class ConnectivitySession:
         self._effective_defines_stamp = ((), (), "")
         self._effective_defines_cache.clear()
 
+    def clear_logical_cache(self) -> None:
+        """Drop logical COI caches; keep text-grep and endpoint-resolve warm.
+
+        ``param_ctx_cache`` is cleared so the next logical check rebuilds
+        param contexts under ``resolve_param_dims=True``; entries are
+        repopulated on demand via text-grep index access.
+        """
+        self.mod_cache.clear()
+        self.param_ctx_cache.clear()
+
     def check(
         self,
         endpoint_a: str,
@@ -568,6 +579,39 @@ class ConnectivitySession:
             )
         from hierwalk.verification_timing import record_connect_check
 
+        record_connect_check(
+            check_id=check_id,
+            endpoint_a=endpoint_a,
+            endpoint_b=endpoint_b,
+            elapsed_sec=time.perf_counter() - t0,
+        )
+        return result
+
+    def check_text(
+        self,
+        endpoint_a: str,
+        endpoint_b: str,
+        *,
+        trace: bool = False,
+        check_id: str = "",
+        expand: Optional[Any] = None,
+    ) -> ConnectResult:
+        """Text-conn only (coarse grep walk; no logical COI / FF barrier)."""
+        from hierwalk.connect.shared.request import ConnectivityCheck
+        from hierwalk.verification_timing import record_connect_check
+
+        t0 = time.perf_counter()
+        result = self.text_check_entry(
+            ConnectivityCheck(
+                endpoint_a,
+                endpoint_b,
+                check_id=check_id,
+                expand=expand,
+            ),
+            trace=trace,
+            dedup_cache={},
+            dedup_stats=[0, 0],
+        )
         record_connect_check(
             check_id=check_id,
             endpoint_a=endpoint_a,
@@ -1128,6 +1172,10 @@ def format_connect_results_tsv(
             "a_rtl\ta_via_filelist\ta_filelist_chain\t"
             "b_rtl\tb_via_filelist\tb_filelist_chain\tphase"
         )
+        marker = (
+            "# connect results — connected_text=text bloom (FF not a barrier); "
+            "hop tags: [text-bloom], [bit-precise], [structural]"
+        )
     else:
         header = (
             "check_id\tendpoint_a\tendpoint_b\tconnected_text\tconnected_logical\t"
@@ -1135,8 +1183,13 @@ def format_connect_results_tsv(
             "a_rtl\ta_via_filelist\ta_filelist_chain\t"
             "b_rtl\tb_via_filelist\tb_filelist_chain\tphase"
         )
+        marker = (
+            "# connect results — connected_text=prior text pass; "
+            "connected_logical/connected=value COI; hop tags: [text-bloom], "
+            "[bit-precise], [structural]"
+        )
     lines = [
-        "# connect results",
+        marker,
         header,
         *(
             format_connect_result_row(r, rows_by_path=rows_by_path, phase=phase_label)

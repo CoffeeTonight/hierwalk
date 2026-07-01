@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from hierwalk.connect.shared.request import ConnectivityCheck, ConnectivityRequest
 from hierwalk.connect.session import ConnectivitySession
 from hierwalk.elab import elaborate
@@ -149,9 +151,9 @@ def test_text_coi_dedup_bloom_coarse_passes_unwired_slice(tmp_path):
         top="top",
         resolve_param_dims=False,
     )
-    wired = session.check("top.data[0]", "top.out[0]")
+    wired = session.check_text("top.data[0]", "top.out[0]")
     assert wired.connected
-    unwired = session.check("top.data[3]", "top.out[3]")
+    unwired = session.check_text("top.data[3]", "top.out[3]")
     assert unwired.connected
 
     session.resolve_param_dims = True
@@ -176,7 +178,7 @@ def test_text_grep_passes_zero_mult_logical_disconnects(tmp_path):
     text = ConnectivitySession(
         rows=rows, index=index, top="top", resolve_param_dims=False
     )
-    assert text.check("top.b", "top.a").connected is True
+    assert text.check_text("top.b", "top.a").connected is True
 
     logical = ConnectivitySession(
         rows=rows, index=index, top="top", resolve_param_dims=True
@@ -200,7 +202,7 @@ def test_text_grep_passes_masked_and_logical_disconnects(tmp_path):
     text = ConnectivitySession(
         rows=rows, index=index, top="top", resolve_param_dims=False
     )
-    assert text.check("top.src", "top.dst").connected is True
+    assert text.check_text("top.src", "top.dst").connected is True
 
     logical = ConnectivitySession(
         rows=rows, index=index, top="top", resolve_param_dims=True
@@ -256,3 +258,26 @@ def test_fanout_resolves_shared_endpoint_once(tmp_path):
     assert specs.count("top.wa") == 1
     assert specs.count("top.wc") == 1
     assert specs.count("top.wb") == 1
+
+
+def test_text_conn_mixed_slice_blooms_to_base(tmp_path: Path):
+    """Base net and one slice share net_rep; text-conn treats them as equivalent."""
+    v = """
+    module top;
+      wire [1:0] bus;
+      wire out;
+      assign out = bus[0];
+    endmodule
+    """
+    rtl = tmp_path / "top.v"
+    rtl.write_text(v, encoding="utf-8")
+    index = DesignIndex.build({str(rtl): v})
+    _, rows = elaborate(index, "top")
+    session = ConnectivitySession(
+        rows=rows,
+        index=index,
+        top="top",
+        resolve_param_dims=False,
+    )
+    assert session.check_text("top.bus", "top.out").connected is True
+    assert session.check_text("top.bus[0]", "top.out").connected is True

@@ -3037,19 +3037,48 @@ def _drain_deferred_recovery_passes(state: PathWalkState) -> None:
         state.stats.recovery_stalled = True
 
 
+def _endpoint_walk_targets_complete(
+    state: PathWalkState,
+    specs: Sequence[str],
+) -> bool:
+    """True when every resolved endpoint inst path is already in the walk rows."""
+    targets: List[str] = []
+    seen: Set[str] = set()
+    for spec in specs:
+        text = str(spec).strip()
+        if not text:
+            continue
+        inst = _walk_target_from_spec(text, state)
+        if inst and inst not in seen:
+            seen.add(inst)
+            targets.append(inst)
+    if not targets:
+        return True
+    return all(t in state.rows_by_path for t in targets)
+
+
 def finalize_logical_walk_before_connect(
     state: PathWalkState,
     request: ConnectivityRequest,
+    *,
+    text_hierarchy_complete: bool = False,
 ) -> None:
     """Deferred walk refinement for logical-conn: recovery, drain, endpoint re-walk."""
     if state.mod_db.defer_count() and not state.stats.recovery_stalled:
         _drain_deferred_recovery_passes(state)
     _drain_path_walk_workers(state.mod_db)
-    _finalize_walk_endpoint_targets(
-        state,
-        endpoint_specs_from_request(request),
-        log_label="connect",
-    )
+    specs = endpoint_specs_from_request(request)
+    if (
+        text_hierarchy_complete
+        and not state.mod_db.defer_count()
+        and _endpoint_walk_targets_complete(state, specs)
+    ):
+        state._emit_walk(
+            "connect-logical-walk skip endpoint rewalk "
+            "(text hierarchy complete, no deferred recovery)"
+        )
+        return
+    _finalize_walk_endpoint_targets(state, specs, log_label="connect")
 
 
 def sync_activation_to_walk_rows(
@@ -3400,7 +3429,12 @@ def run_path_walk_connect(
         )
         from hierwalk.connect.pipeline.artifacts import (
             apply_connect_logical_phase,
+            apply_logical_coi_failure_to_results,
+            apply_text_verdicts_to_results,
+            build_connect_results_from_request,
+            build_logical_connect_request,
             connect_output_paths,
+            load_text_connect_results_from_tsv,
             format_connect_hierarchy_tsv,
             merge_refined_connect_results,
             normalize_connect_results,
@@ -3538,10 +3572,74 @@ def run_path_walk_connect(
                 logical_modules_cached: Optional[int] = None
                 logical_coi_error = ""
                 conn_session.resolve_param_dims = True
-                conn_session.clear_cache()
+                text_results_for_gate: Optional[List] = None
+                if do_text and batch is not None:
+                    text_results_for_gate = list(batch.results)
+                elif not do_text:
+                    tsv_path = out_paths.text_tsv
+                    if tsv_path.is_file():
+                        loaded_text = load_text_connect_results_from_tsv(tsv_path)
+                        if loaded_text:
+                            text_results_for_gate = loaded_text
+                            state._emit_walk(
+                                "connect-logical-coi text gate loaded from "
+                                f"{tsv_path.resolve()} "
+                                f"rows={len(loaded_text)}"
+                            )
+                            empty_ids = sum(
+                                1 for r in loaded_text if not r.check_id
+                            )
+                            if empty_ids:
+                                state._emit_walk(
+                                    "connect-logical-coi warning: "
+                                    f"{empty_ids} text TSV row(s) missing "
+                                    "check_id; gating falls back to endpoint "
+                                    "match"
+                                )
+                            from hierwalk.connect.pipeline.artifacts import (
+                                _build_text_connect_lookup,
+                            )
+
+                            _, ep_lookup = _build_text_connect_lookup(
+                                loaded_text
+                            )
+                            dup_eps = sum(
+                                1 for rows in ep_lookup.values() if len(rows) > 1
+                            )
+                            if dup_eps:
+                                state._emit_walk(
+                                    "connect-logical-coi warning: "
+                                    f"{dup_eps} duplicate endpoint key(s) in "
+                                    "text TSV; gating uses conservative "
+                                    "(any-fail) merge"
+                                )
+                        else:
+                            state._emit_walk(
+                                "connect-logical-coi warning: text gate TSV "
+                                "present but no usable text rows in "
+                                f"{tsv_path.resolve()}; all checks will run "
+                                "ungated"
+                            )
+                    else:
+                        state._emit_walk(
+                            "connect-logical-coi warning: logical-only run "
+                            "without text gate TSV at "
+                            f"{tsv_path.resolve()}; all checks will run "
+                            "ungated"
+                        )
+                logical_request, logical_run_n, logical_skip_n = (
+                    build_logical_connect_request(request, text_results_for_gate)
+                )
+                conn_session.clear_logical_cache()
                 try:
-                    finalize_logical_walk_before_connect(state, request)
-                    for chk in request.checks:
+                    finalize_logical_walk_before_connect(
+                        state,
+                        logical_request,
+                        text_hierarchy_complete=(
+                            do_text and bool(text_results_for_gate)
+                        ),
+                    )
+                    for chk in logical_request.checks:
                         _flush_hierarchy_tsv_for_check(state, chk)
                     walk_rows = state.rows()
                     conn_session.rows = walk_rows
@@ -3549,19 +3647,47 @@ def run_path_walk_connect(
                         state.rows_by_path,
                         rows=walk_rows,
                     )
-                    conn_session.clear_cache()
+                    if logical_run_n:
+                        state._emit_walk(
+                            f"connect-logical-coi begin checks={logical_run_n} "
+                            f"skipped_text_miss={logical_skip_n}"
+                        )
+                    else:
+                        state._emit_walk(
+                            f"connect-logical-coi skip all checks "
+                            f"(text_miss={logical_skip_n})"
+                        )
                     t_recoi = time.perf_counter()
                     try:
-                        refined_batch = conn_session.run_request(
-                            request,
-                            jobs=effective_connect_jobs,
-                            on_progress=on_progress,
-                        )
+                        if logical_request.checks:
+                            refined_batch = conn_session.run_request(
+                                logical_request,
+                                jobs=effective_connect_jobs,
+                                on_progress=on_progress,
+                            )
+                        else:
+                            refined_batch = ConnectivityBatchResult(
+                                results=(),
+                                modules_cached=conn_session.modules_cached,
+                            )
                     except Exception as exc:
                         logical_coi_error = f"connect-coi failed: {exc!r}"
                         state._emit_walk(logical_coi_error)
                         refined_batch = ConnectivityBatchResult(
                             results=(),
+                            modules_cached=conn_session.modules_cached,
+                        )
+                    if batch is None and text_results_for_gate:
+                        shell_results = build_connect_results_from_request(
+                            request,
+                            conn_session,
+                        )
+                        apply_text_verdicts_to_results(
+                            shell_results,
+                            text_results_for_gate,
+                        )
+                        batch = ConnectivityBatchResult(
+                            results=tuple(shell_results),
                             modules_cached=conn_session.modules_cached,
                         )
                     if batch is not None:
@@ -3571,6 +3697,12 @@ def run_path_walk_connect(
                         )
                     else:
                         batch = refined_batch
+                    if logical_coi_error and batch is not None:
+                        apply_logical_coi_failure_to_results(
+                            batch.results,
+                            logical_request.checks,
+                            logical_coi_error,
+                        )
                     state._emit_walk(
                         f"connect-logical-walk done rows={len(state.rows_by_path)} "
                         f"recoi_ms={(time.perf_counter() - t_recoi) * 1000.0:.1f} "
