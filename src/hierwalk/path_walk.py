@@ -2676,10 +2676,25 @@ def _pipeline_path_walk_text_conn(
 
     state.flush_pending_misses()
     leaves, unique = dedup_stats[0], dedup_stats[1]
+    wc = conn_session.text_walk_caches
     if on_progress is not None and leaves > unique:
         on_progress(
             f"connect: text-coi dedup leaves={leaves} unique={unique} "
             f"saved={leaves - unique}"
+        )
+    if on_progress is not None:
+        on_progress(
+            "connect: text-walk cache "
+            f"grep_mods={len(conn_session.text_grep_cache)} "
+            f"scope_idx={len(wc.scope_mod_idx)} "
+            f"decl_net={len(conn_session.decl_net_cache)}"
+        )
+        on_progress(
+            "connect: text-walk profile "
+            f"expand={wc.expand_calls} "
+            f"equiv_scans={wc.equiv_linear_scans} "
+            f"grep_miss={wc.grep_cache_miss} "
+            f"rep_adj_capped={wc.rep_adj_capped}"
         )
     state._emit_walk(
         f"connect-pipeline done checks={len(results)} workers={workers}"
@@ -3426,6 +3441,7 @@ def run_path_walk_connect(
                 state.rows_by_path,
                 rows=walk_rows,
             ),
+            decl_net_cache=state._decl_net_cache,
         )
         from hierwalk.connect.pipeline.artifacts import (
             apply_connect_logical_phase,

@@ -19,6 +19,7 @@ from hierwalk.connect.logical.scan import (
 )
 from hierwalk.connect.logical.search import _resolve_over_approximate_if
 from hierwalk.connect.shared.endpoints import (
+    DeclNetCache,
     parse_connect_endpoint,
     resolve_endpoint,
 )
@@ -407,6 +408,7 @@ class ConnectivitySession:
         default_factory=dict,
         repr=False,
     )
+    decl_net_cache: DeclNetCache = field(default_factory=dict, repr=False)
     _endpoint_resolve_lock: threading.Lock = field(
         default_factory=threading.Lock,
         repr=False,
@@ -466,6 +468,7 @@ class ConnectivitySession:
         self.text_walk_caches = TextWalkSessionCaches()
         self.param_ctx_cache.clear()
         self.endpoint_resolve_cache.clear()
+        self.decl_net_cache.clear()
         self._effective_defines_stamp = ((), (), "")
         self._effective_defines_cache.clear()
 
@@ -800,6 +803,7 @@ class ConnectivitySession:
                 endpoint_cache=self.endpoint_resolve_cache,
                 endpoint_cache_lock=self._endpoint_resolve_lock,
                 walk_caches=self.text_walk_caches,
+                decl_net_cache=self.decl_net_cache,
             )
 
         fanout_mode = chk.expand.fanout_mode if chk.expand is not None else "all"
@@ -833,6 +837,7 @@ class ConnectivitySession:
                     endpoint_cache=self.endpoint_resolve_cache,
                     endpoint_cache_lock=self._endpoint_resolve_lock,
                     walk_caches=self.text_walk_caches,
+                    decl_net_cache=self.decl_net_cache,
                 )
             )
         return aggregate_connect_results(
@@ -933,7 +938,15 @@ class ConnectivitySession:
                 f"net_rep={len(wc.net_rep_cache)} "
                 f"equiv={len(wc.equiv_cache)} "
                 f"blackbox={len(wc.blackbox_link_cache)} "
-                f"parent_up={len(wc.parent_up_cache)}"
+                f"parent_up={len(wc.parent_up_cache)} "
+                f"decl_net={len(self.decl_net_cache)}"
+            )
+            on_progress(
+                "connect: text-walk profile "
+                f"expand={wc.expand_calls} "
+                f"equiv_scans={wc.equiv_linear_scans} "
+                f"grep_miss={wc.grep_cache_miss} "
+                f"rep_adj_capped={wc.rep_adj_capped}"
             )
         if on_progress is not None and workers > 1:
             on_progress(f"connect: text-coi parallel workers={workers}")

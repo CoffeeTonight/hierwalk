@@ -312,3 +312,50 @@ def test_text_walk_session_cache_survives_across_checks(tmp_path):
     assert len(wc.net_rep_cache) >= 2
     assert len(wc.equiv_cache) >= before_equiv
     assert len(wc.parent_up_cache) >= before_parent
+
+
+def test_text_walk_profiling_counters_increment(tmp_path):
+    """Text-conn records grep-cache miss profile; expand counts when BFS expands."""
+    v = """
+    module top;
+      wire [1:0] a, b;
+      assign b = a;
+    endmodule
+    """
+    rtl = tmp_path / "top.v"
+    rtl.write_text(v, encoding="utf-8")
+    index = DesignIndex.build({str(rtl): v})
+    _, rows = elaborate(index, "top")
+    session = ConnectivitySession(
+        rows=rows,
+        index=index,
+        top="top",
+        resolve_param_dims=False,
+    )
+    assert session.check_text("top.a[0]", "top.b[1]").connected is True
+    wc = session.text_walk_caches
+    assert wc.grep_cache_miss >= 1
+    assert wc.rep_adj_capped >= 0
+
+
+def test_slice_meets_base_via_rep_index(tmp_path):
+    """Slice vs base endpoint still connects (rep-index meet, not slice-slice)."""
+    v = """
+    module top;
+      wire [3:0] bus;
+      wire out;
+      assign out = bus;
+    endmodule
+    """
+    rtl = tmp_path / "top.v"
+    rtl.write_text(v, encoding="utf-8")
+    index = DesignIndex.build({str(rtl): v})
+    _, rows = elaborate(index, "top")
+    session = ConnectivitySession(
+        rows=rows,
+        index=index,
+        top="top",
+        resolve_param_dims=False,
+    )
+    assert session.check_text("top.bus[2]", "top.out").connected is True
+    assert session.check_text("top.bus", "top.out").connected is True

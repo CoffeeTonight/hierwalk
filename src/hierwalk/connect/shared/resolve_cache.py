@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
-from hierwalk.connect.shared.endpoints import resolve_endpoint
+from hierwalk.connect.shared.endpoints import DeclNetCache, resolve_endpoint
 from hierwalk.index import DesignIndex
 from hierwalk.models import ConnectEndpoint, FlatRow
 
@@ -31,6 +31,7 @@ def resolve_endpoint_cached(
     rows_by_path: Optional[Mapping[str, FlatRow]] = None,
     cache: Optional[EndpointResolveCache] = None,
     cache_lock: Optional[threading.Lock] = None,
+    decl_net_cache: Optional[DeclNetCache] = None,
 ) -> Tuple[ConnectEndpoint, List[str]]:
     """Resolve one endpoint spec; reuse prior result when *cache* is shared."""
     text = (spec or "").strip()
@@ -50,6 +51,7 @@ def resolve_endpoint_cached(
         top=top,
         require_port=False,
         rows_by_path=rows_by_path,
+        decl_net_cache=decl_net_cache,
     )
     if cache is not None and text:
         stored = (ep, tuple(errs))

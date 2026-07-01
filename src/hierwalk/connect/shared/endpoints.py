@@ -725,6 +725,7 @@ def resolve_endpoint(
     top: str,
     require_port: bool = False,
     rows_by_path: Optional[Mapping[str, FlatRow]] = None,
+    decl_net_cache: Optional[DeclNetCache] = None,
 ) -> Tuple[ConnectEndpoint, List[str]]:
     if rows_by_path is not None:
         lookup = rows_by_path
@@ -775,6 +776,7 @@ def resolve_endpoint(
         row,
         port_name,
         top=top,
+        cache=decl_net_cache,
         param_ctx=_row_param_ctx_optional(row),
         body=_module_body_for_row(index, row),
     ):

@@ -232,6 +232,10 @@ class TextWalkSessionCaches:
         List[Tuple[str, str, str, bool, Optional[str]]],
     ] = field(default_factory=dict)
     scope_mod_idx: Dict[str, TextGrepIndex] = field(default_factory=dict)
+    expand_calls: int = 0
+    equiv_linear_scans: int = 0
+    grep_cache_miss: int = 0
+    rep_adj_capped: int = 0
 
 
 @dataclass
@@ -264,9 +268,11 @@ class _SearchCtx:
         List[Tuple[str, str, str, bool, Optional[str]]],
     ] = field(default_factory=dict)
     scope_mod_idx: Dict[str, TextGrepIndex] = field(default_factory=dict)
+    walk_caches: Optional[TextWalkSessionCaches] = None
 
 
 _FRONTIER_SORT_THRESHOLD = 12
+_TEXT_REP_ADJ_FANOUT_CAP = 64
 
 
 def _heuristic_distance(ctx: _SearchCtx, scope: str) -> int:
@@ -399,6 +405,12 @@ def _build_search_ctx(
             top,
             resolve_param_dims=False,
         )
+        wc_goal = walk_caches
+
+        def _on_goal_grep_miss() -> None:
+            if wc_goal is not None:
+                wc_goal.grep_cache_miss += 1
+
         gidx = text_grep_index(
             grep_cache,
             index,
@@ -406,6 +418,7 @@ def _build_search_ctx(
             gctx,
             defines=defines,
             over_approximate_if=over_approximate_if,
+            on_cache_miss=_on_goal_grep_miss if wc_goal is not None else None,
         )
         goal_rep = text_net_representative(gidx, goal_net)
     wc = walk_caches
@@ -434,6 +447,7 @@ def _build_search_ctx(
         blackbox_link_cache=wc.blackbox_link_cache if wc is not None else {},
         parent_up_cache=wc.parent_up_cache if wc is not None else {},
         scope_mod_idx=wc.scope_mod_idx if wc is not None else {},
+        walk_caches=wc,
     )
 
 
@@ -558,6 +572,12 @@ def _mod_idx_for_scope(ctx: _SearchCtx, scope: str) -> Optional[TextGrepIndex]:
     if row is None:
         return None
     mod_ctx = _cached_param_ctx(ctx, row)
+    wc = ctx.walk_caches
+
+    def _on_grep_miss() -> None:
+        if wc is not None:
+            wc.grep_cache_miss += 1
+
     built = text_grep_index(
         ctx.grep_cache,
         ctx.index,
@@ -565,6 +585,7 @@ def _mod_idx_for_scope(ctx: _SearchCtx, scope: str) -> Optional[TextGrepIndex]:
         mod_ctx,
         defines=ctx.defines,
         over_approximate_if=ctx.over_approximate_if,
+        on_cache_miss=_on_grep_miss if wc is not None else None,
     )
     ctx.scope_mod_idx[scope] = built
     return built
@@ -762,6 +783,8 @@ def _expand_state(
     state: NetState,
     ctx: _SearchCtx,
 ) -> List[_ExpandEdge]:
+    if ctx.walk_caches is not None:
+        ctx.walk_caches.expand_calls += 1
     scope, net = state
     row = ctx.rows_by_path.get(scope)
     if row is None:
@@ -806,7 +829,12 @@ def _expand_state(
     here = _net_label(scope, net)
     mod_name = row.module
 
-    for peer_rep in mod_idx.rep_adj.get(rep, ()):
+    peers = mod_idx.rep_adj.get(rep, ())
+    if len(peers) > _TEXT_REP_ADJ_FANOUT_CAP:
+        if ctx.walk_caches is not None:
+            ctx.walk_caches.rep_adj_capped += 1
+        peers = tuple(sorted(peers)[:_TEXT_REP_ADJ_FANOUT_CAP])
+    for peer_rep in peers:
         push(
             scope,
             peer_rep,
@@ -947,15 +975,13 @@ def _expand_state(
     return out
 
 
-def _equiv_rep_key(
-    state: NetState,
+def _scope_rep_key(
+    scope: str,
+    net: str,
     ctx: _SearchCtx,
     *,
     mod_idx: Optional[TextGrepIndex] = None,
 ) -> Optional[Tuple[str, str]]:
-    scope, net = state
-    if "[" in net:
-        return None
     if mod_idx is None:
         mod_idx = _mod_idx_for_scope(ctx, scope)
     if mod_idx is None:
@@ -964,10 +990,21 @@ def _equiv_rep_key(
     return (scope, rep)
 
 
+def _equiv_rep_key(
+    state: NetState,
+    ctx: _SearchCtx,
+    *,
+    mod_idx: Optional[TextGrepIndex] = None,
+) -> Optional[Tuple[str, str]]:
+    scope, net = state
+    return _scope_rep_key(scope, net, ctx, mod_idx=mod_idx)
+
+
 @dataclass
 class _SeenRepIndex:
     by_exact: Dict[Tuple[str, str], Set[NetState]] = field(default_factory=dict)
-    by_rep: Dict[Tuple[str, str], Set[NetState]] = field(default_factory=dict)
+    by_rep_all: Dict[Tuple[str, str], Set[NetState]] = field(default_factory=dict)
+    by_rep_base: Dict[Tuple[str, str], Set[NetState]] = field(default_factory=dict)
 
     def add(
         self,
@@ -978,9 +1015,12 @@ class _SeenRepIndex:
     ) -> None:
         scope, net = state
         self.by_exact.setdefault((scope, net), set()).add(state)
-        key = _equiv_rep_key(state, ctx, mod_idx=mod_idx)
-        if key is not None:
-            self.by_rep.setdefault(key, set()).add(state)
+        key = _scope_rep_key(scope, net, ctx, mod_idx=mod_idx)
+        if key is None:
+            return
+        self.by_rep_all.setdefault(key, set()).add(state)
+        if "[" not in net:
+            self.by_rep_base.setdefault(key, set()).add(state)
 
     def find_in(
         self,
@@ -994,11 +1034,15 @@ class _SeenRepIndex:
         overlap = self.by_exact.get((scope, net), set()) & candidates
         if overlap:
             return min(overlap, key=lambda s: (len(s[1]), s[1]))
-        key = _equiv_rep_key(state, ctx, mod_idx=mod_idx)
-        if key is not None:
-            overlap = self.by_rep.get(key, set()) & candidates
-            if overlap:
-                return min(overlap, key=lambda s: (len(s[1]), s[1]))
+        key = _scope_rep_key(scope, net, ctx, mod_idx=mod_idx)
+        if key is None:
+            return None
+        if "[" in net:
+            overlap = self.by_rep_base.get(key, set()) & candidates
+        else:
+            overlap = self.by_rep_all.get(key, set()) & candidates
+        if overlap:
+            return min(overlap, key=lambda s: (len(s[1]), s[1]))
         return None
 
 
@@ -1015,6 +1059,8 @@ def _find_equivalent_in(
         hit = rep_index.find_in(state, candidates, ctx)
         if hit is not None:
             return hit
+    if ctx.walk_caches is not None:
+        ctx.walk_caches.equiv_linear_scans += len(candidates)
     for other in candidates:
         if _text_states_equivalent(state, other, ctx):
             return other

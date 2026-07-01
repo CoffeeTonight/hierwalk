@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from hierwalk.connect.shared.endpoints import _prune_rows_lca
+from hierwalk.connect.shared.endpoints import DeclNetCache, _prune_rows_lca
 from hierwalk.connect.shared.modes import _has_port, _is_ancestor, _mode
 from hierwalk.connect.shared.resolve_cache import (
     EndpointResolveCache,
@@ -47,6 +47,7 @@ def connect_pair_text(
     endpoint_cache: Optional[EndpointResolveCache] = None,
     endpoint_cache_lock: Optional[threading.Lock] = None,
     walk_caches: Optional[TextWalkSessionCaches] = None,
+    decl_net_cache: Optional[DeclNetCache] = None,
 ) -> ConnectResult:
     """
     Text-conn: name grep only — not whether a value actually propagates.
@@ -67,6 +68,7 @@ def connect_pair_text(
         rows_by_path=lookup,
         cache=endpoint_cache,
         cache_lock=endpoint_cache_lock,
+        decl_net_cache=decl_net_cache,
     )
     ep_b, err_b = resolve_endpoint_cached(
         endpoint_b,
@@ -76,6 +78,7 @@ def connect_pair_text(
         rows_by_path=lookup,
         cache=endpoint_cache,
         cache_lock=endpoint_cache_lock,
+        decl_net_cache=decl_net_cache,
     )
     errors = list(err_a) + list(err_b)
 
@@ -220,6 +223,7 @@ def connect_pair_text_deduped(
     endpoint_cache: Optional[EndpointResolveCache] = None,
     endpoint_cache_lock: Optional[threading.Lock] = None,
     walk_caches: Optional[TextWalkSessionCaches] = None,
+    decl_net_cache: Optional[DeclNetCache] = None,
 ) -> ConnectResult:
     lookup = rows_by_path
     ep_a, err_a = resolve_endpoint_cached(
@@ -230,6 +234,7 @@ def connect_pair_text_deduped(
         rows_by_path=lookup,
         cache=endpoint_cache,
         cache_lock=endpoint_cache_lock,
+        decl_net_cache=decl_net_cache,
     )
     ep_b, err_b = resolve_endpoint_cached(
         endpoint_b,
@@ -239,6 +244,7 @@ def connect_pair_text_deduped(
         rows_by_path=lookup,
         cache=endpoint_cache,
         cache_lock=endpoint_cache_lock,
+        decl_net_cache=decl_net_cache,
     )
     errors = list(err_a) + list(err_b)
     key = text_dedup_key(ep_a, ep_b, errors)
@@ -278,6 +284,7 @@ def connect_pair_text_deduped(
         endpoint_cache=endpoint_cache,
         endpoint_cache_lock=endpoint_cache_lock,
         walk_caches=walk_caches,
+        decl_net_cache=decl_net_cache,
     )
 
     if dedup_lock is not None:

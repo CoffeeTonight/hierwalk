@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, field
-from typing import Dict, FrozenSet, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Callable, Dict, FrozenSet, List, Mapping, Optional, Sequence, Set, Tuple
 
 from hierwalk.connect.logical.scan import (
     ModuleConnectIndex,
@@ -86,6 +86,8 @@ def text_grep_index(
     param_ctx: Mapping[str, str],
     defines: Mapping[str, str] | None = None,
     over_approximate_if: bool = True,
+    *,
+    on_cache_miss: Optional[Callable[[], None]] = None,
 ) -> TextGrepIndex:
     """Cached text grep index (separate from logical ``mod_cache``)."""
     key, _binds = _resolve_module_index_key(
@@ -113,6 +115,8 @@ def text_grep_index(
             over_approximate_if=over_approximate_if,
         )
         cache[key] = built
+        if on_cache_miss is not None:
+            on_cache_miss()
         return built
 
 
