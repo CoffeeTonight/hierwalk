@@ -634,6 +634,11 @@ def _collect_decl_bit_indices(
     return out
 
 
+def _is_literal_slice_suffix(suffix: str) -> bool:
+    """True for literal slice tails like ``[0]`` or ``[0][1]`` (no parametric selects)."""
+    return bool(suffix and re.match(r"^(?:\[\d+\])+$", suffix))
+
+
 def _split_net_base_suffix(net: str) -> tuple[str, str]:
     """``bus[0][1]`` -> (``bus``, ``[0][1]``); ``clk`` -> (``clk``, ````)."""
     text = re.sub(r"\s+", "", net.strip())
@@ -4517,7 +4522,7 @@ def _compute_bit_precise_bases(
             scalar_bases.add(key)
             continue
         base, suffix = _split_net_base_suffix(key)
-        if base and re.match(r"^\[\d+\]$", suffix):
+        if base and _is_literal_slice_suffix(suffix):
             slice_bases.add(base)
     out = slice_bases - scalar_bases
     if extra:
@@ -4853,8 +4858,7 @@ def _coarse_net_representative(mod_idx: ModuleConnectIndex, net: str) -> str:
         return net
     if (
         base in mod_idx.bit_precise_bases
-        and suffix
-        and re.match(r"^\[\d+\]$", suffix)
+        and _is_literal_slice_suffix(suffix)
     ):
         return mod_idx.net_rep.get(net, net)
     base_hit = mod_idx.net_rep.get(base)

@@ -608,7 +608,7 @@ def _literal_port_slice_suffix(port_name: str) -> str:
         return ""
     rest = port_name[len(base) :]
     first = rest.split(".", 1)[0]
-    if re.match(r"^\[\d+\]$", first):
+    if re.match(r"^(?:\[\d+\])+$", first):
         return first
     return ""
 

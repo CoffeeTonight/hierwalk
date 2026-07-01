@@ -143,6 +143,30 @@ def test_text_conn_port_xor_expr_keeps_operand_to_port(tmp_path: Path):
     assert session.check("top.shallow_return[1][2]", "top.u.din[1][2]").connected is True
 
 
+def test_text_conn_md_bus_slice_bit_precise(tmp_path: Path):
+    """Literal ``[i][j]`` assigns must not bloom-unwire other MD elements in text-conn."""
+    v = """
+    module top;
+      logic [1:0][2:0] a, b;
+      assign b[0][1] = a[0][1];
+    endmodule
+    """
+    rtl = tmp_path / "top.v"
+    rtl.write_text(v, encoding="utf-8")
+    index = DesignIndex.build({str(rtl): v})
+    _, rows = elaborate(index, "top")
+    from hierwalk.connectivity import ConnectivitySession
+
+    session = ConnectivitySession(
+        rows=rows,
+        index=index,
+        top="top",
+        resolve_param_dims=False,
+    )
+    assert session.check("top.a[0][1]", "top.b[0][1]").connected is True
+    assert session.check("top.a[0][2]", "top.b[0][2]").connected is False
+
+
 def test_text_conn_indexed_concat_port_map_bit_precise(tmp_path: Path):
     """``{sig[i][j] | ...}`` concat port maps must not be misclassified as compound."""
     v = """
