@@ -11,8 +11,10 @@ from hierwalk.connect_scan import (
     ModuleConnectIndex,
     _expand_concat_elements,
     _is_braced_concat_rhs,
+    _is_compound_port_map_expr,
     _port_select_suffix,
     _range_to_bit_indices,
+    extract_connect_nodes,
     net_representative,
 )
 from hierwalk.index import DesignIndex
@@ -120,7 +122,10 @@ def _parent_port_map_roots(
     if bit_idx is not None and text.startswith("{") and text.endswith("}"):
         parts = _expand_concat_elements(text[1:-1])
         if 0 <= bit_idx < len(parts):
-            return frozenset({parts[bit_idx].strip()})
+            piece = parts[bit_idx].strip()
+            if _is_compound_port_map_expr(piece):
+                return frozenset(extract_connect_nodes(piece, dict(param_map)))
+            return frozenset({piece})
     if bit_idx is not None:
         m = re.match(
             r"^((?:\\(?:[A-Za-z_]\w*|\S+)|[A-Za-z_]\w*))\[([^\]]+)\]$",

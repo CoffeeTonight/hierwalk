@@ -343,7 +343,9 @@ def _is_braced_concat_rhs(expr: str) -> bool:
     """True for ``{a,b,c}`` replication/concat (not ``{a,b}[i]`` part-select)."""
     text = _strip_outer_parens(expr.strip().rstrip(";"))
     text = re.sub(r"\s+", "", text)
-    return len(text) >= 2 and text[0] == "{" and text[-1] == "}" and "[" not in text
+    if len(text) < 2 or text[0] != "{" or text[-1] != "}":
+        return False
+    return re.search(r"\}\[", text) is None
 
 
 def _is_compound_port_map_expr(expr: str) -> bool:
@@ -3886,6 +3888,8 @@ def _build_reverse_port_index(
                 for i, part in enumerate(parts):
                     piece = part.strip()
                     if not piece:
+                        continue
+                    if _is_compound_port_map_expr(piece):
                         continue
                     for root in extract_connect_nodes(piece, pmap):
                         rep = net_rep.get(root, root)

@@ -143,6 +143,36 @@ def test_text_conn_port_xor_expr_keeps_operand_to_port(tmp_path: Path):
     assert session.check("top.shallow_return[1][2]", "top.u.din[1][2]").connected is True
 
 
+def test_text_conn_indexed_concat_port_map_bit_precise(tmp_path: Path):
+    """``{sig[i][j] | ...}`` concat port maps must not be misclassified as compound."""
+    v = """
+    module child(input logic [1:0] din);
+    endmodule
+    module top;
+      wire [1:0][2:0] chain_in, shallow_return, tap;
+      child u (.din({chain_in[1][2] | shallow_return[1][2], chain_in[0][0]}));
+      assign tap[1][2] = shallow_return[1][2];
+    endmodule
+    """
+    rtl = tmp_path / "top.v"
+    rtl.write_text(v, encoding="utf-8")
+    index = DesignIndex.build({str(rtl): v})
+    _, rows = elaborate(index, "top")
+    from hierwalk.connectivity import ConnectivitySession
+
+    session = ConnectivitySession(
+        rows=rows,
+        index=index,
+        top="top",
+        resolve_param_dims=False,
+    )
+    assert session.check("top.chain_in[1][2]", "top.u.din[0]").connected is True
+    assert session.check("top.shallow_return[1][2]", "top.u.din[0]").connected is True
+    assert session.check("top.chain_in[0][0]", "top.u.din[1]").connected is True
+    assert session.check("top.chain_in[1][2]", "top.tap[1][2]").connected is False
+    assert session.check("top.shallow_return[1][2]", "top.tap[1][2]").connected is True
+
+
 def test_text_conn_hier_port_concat_bit_precise(tmp_path: Path):
     """Instance ``.bus({wa,wb,wc})`` must not parent-up all concat legs at once."""
     v = """
