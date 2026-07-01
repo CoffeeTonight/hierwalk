@@ -100,17 +100,28 @@ from hierwalk.port_scan import (
 )
 
 
+def _module_source_text(
+    index: DesignIndex,
+    mod_name: str,
+    *,
+    defines: Mapping[str, str] | None = None,
+) -> str:
+    rec = index.get_module(mod_name)
+    if not rec or not rec.file_path:
+        return ""
+    eff = defines if defines is not None else index.effective_defines()
+    return index._source_text(rec.file_path, defines=eff)
+
+
 def _port_decl_md_suffixes(
     index: DesignIndex,
     mod_name: str,
     param_ctx: Mapping[str, str],
+    *,
+    defines: Mapping[str, str] | None = None,
 ) -> Dict[str, List[str]]:
-    rec = index.get_module(mod_name)
-    if not rec or not rec.file_path:
-        return {}
-    try:
-        text = Path(rec.file_path).read_text(encoding="utf-8", errors="ignore")
-    except OSError:
+    text = _module_source_text(index, mod_name, defines=defines)
+    if not text:
         return {}
     out: Dict[str, List[str]] = {}
     for info in scan_ports_detail_from_module_text(
@@ -131,13 +142,11 @@ def _port_decl_bit_indices(
     index: DesignIndex,
     mod_name: str,
     param_ctx: Mapping[str, str],
+    *,
+    defines: Mapping[str, str] | None = None,
 ) -> Dict[str, List[int]]:
-    rec = index.get_module(mod_name)
-    if not rec or not rec.file_path:
-        return {}
-    try:
-        text = Path(rec.file_path).read_text(encoding="utf-8", errors="ignore")
-    except OSError:
+    text = _module_source_text(index, mod_name, defines=defines)
+    if not text:
         return {}
     out: Dict[str, List[int]] = {}
     for info in scan_ports_detail_from_module_text(
@@ -384,7 +393,7 @@ def _explain_hierarchy_miss(
 
     if remainder and "." not in remainder:
         ctx = _port_param_ctx(index, row, top)
-        ports = sorted(ports_for_module(row.file, row.module, ctx))
+        ports = sorted(ports_for_module(row.file, row.module, ctx, index=index))
         if ports:
             errors.append(
                 f"ports on '{nearest}' ({row.module}, {len(ports)}): "
@@ -626,15 +635,16 @@ def _net_exists_in_module(
     body = _module_body_for_row(index, row)
     if not body:
         return False
-    decl_widths = _port_decl_bit_indices(index, row.module, ctx)
     from hierwalk.connectivity import _effective_defines
 
+    eff = index.effective_defines()
+    decl_widths = _port_decl_bit_indices(index, row.module, ctx, defines=eff)
     mod_idx = build_module_connect_index(
         body,
         param_map=ctx,
-        defines=_effective_defines(index, getattr(index, "_preprocess_defines", {})),
+        defines=eff,
         port_decl_widths=decl_widths,
-        port_decl_md_suffixes=_port_decl_md_suffixes(index, row.module, ctx),
+        port_decl_md_suffixes=_port_decl_md_suffixes(index, row.module, ctx, defines=eff),
     )
     if net_name in mod_idx.net_rep:
         return True
@@ -653,7 +663,7 @@ def _explain_port_miss(
     top: str,
 ) -> List[str]:
     ctx = _port_param_ctx(index, row, top)
-    ports = sorted(ports_for_module(row.file, row.module, ctx))
+    ports = sorted(ports_for_module(row.file, row.module, ctx, index=index))
     if net_exists_in_module_fast(
         index,
         row,
@@ -678,15 +688,16 @@ def _explain_port_miss(
     ctx = _port_param_ctx(index, row, top)
     body = _module_body_for_row(index, row)
     if body:
-        decl_widths = _port_decl_bit_indices(index, row.module, ctx)
         from hierwalk.connectivity import _effective_defines
 
+        eff = index.effective_defines()
+        decl_widths = _port_decl_bit_indices(index, row.module, ctx, defines=eff)
         mod_idx = build_module_connect_index(
             body,
             param_map=ctx,
-            defines=_effective_defines(index, getattr(index, "_preprocess_defines", {})),
+            defines=eff,
             port_decl_widths=decl_widths,
-            port_decl_md_suffixes=_port_decl_md_suffixes(index, row.module, ctx),
+            port_decl_md_suffixes=_port_decl_md_suffixes(index, row.module, ctx, defines=eff),
         )
         internal = sorted(
             n
@@ -795,17 +806,13 @@ def _empty_module_passthrough_ports(
     index: DesignIndex,
     mod_name: str,
     param_ctx: Mapping[str, str],
+    *,
+    defines: Mapping[str, str] | None = None,
 ) -> Optional[Tuple[str, str]]:
-    rec = index.get_module(mod_name)
-    if not rec or not rec.file_path:
-        return None
-    from pathlib import Path
-
     from hierwalk.port_scan import scan_ports_detail_from_module_text
 
-    try:
-        text = Path(rec.file_path).read_text(encoding="utf-8", errors="ignore")
-    except OSError:
+    text = _module_source_text(index, mod_name, defines=defines)
+    if not text:
         return None
     inputs: List[str] = []
     outputs: List[str] = []
@@ -1091,10 +1098,14 @@ def _build_module_index_entry(
         return disk_hit.copy()
     if not body.strip():
         built = ModuleConnectIndex()
-        passthrough = _empty_module_passthrough_ports(index, mod_name, param_ctx)
+        passthrough = _empty_module_passthrough_ports(
+            index, mod_name, param_ctx, defines=defines
+        )
         if passthrough:
             apply_empty_module_passthrough(built, passthrough[0], passthrough[1])
     else:
+        source_file = rec.file_path if rec else None
+        include_dirs = list(getattr(index, "_preprocess_include_dirs", ()) or ())
         base = build_module_connect_index(
             body,
             param_map=param_ctx,
@@ -1104,15 +1115,17 @@ def _build_module_index_entry(
             ff_barrier=ff_barrier,
             resolve_param_dims=resolve_param_dims,
             port_decl_widths=(
-                _port_decl_bit_indices(index, mod_name, param_ctx)
+                _port_decl_bit_indices(index, mod_name, param_ctx, defines=defines)
                 if resolve_param_dims
                 else None
             ),
             port_decl_md_suffixes=(
-                _port_decl_md_suffixes(index, mod_name, param_ctx)
+                _port_decl_md_suffixes(index, mod_name, param_ctx, defines=defines)
                 if resolve_param_dims
                 else None
             ),
+            source_file=source_file,
+            include_dirs=include_dirs,
         )
         if bind_list:
             built = base.copy()

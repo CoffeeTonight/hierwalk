@@ -2,6 +2,20 @@
 
 from __future__ import annotations
 
+import importlib.util
+import sys
+from pathlib import Path
+
+_entry = Path(__file__).resolve()
+_spec = importlib.util.spec_from_file_location(
+    "_hierwalk_bootstrap_entry",
+    _entry.parent / "_bootstrap_entry.py",
+)
+if _spec is not None and _spec.loader is not None:
+    _boot_entry = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_boot_entry)
+    _boot_entry.bootstrap_from(_entry)
+
 import argparse
 import json
 import sys

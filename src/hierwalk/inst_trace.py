@@ -238,9 +238,8 @@ def _ports_for_instance(
     rec = index.get_module(row.module)
     if not rec or not rec.file_path:
         return []
-    try:
-        text = Path(rec.file_path).read_text(encoding="utf-8", errors="ignore")
-    except OSError:
+    text = index._source_text(rec.file_path)
+    if not text:
         return []
     out = []
     seen: Set[str] = set()
@@ -281,7 +280,9 @@ def run_inst_trace(
     defines: Optional[Mapping[str, str]] = None,
 ) -> InstTraceResult:
     top_name = (request.top or top or "").strip()
-    compile_defines = dict(defines or {})
+    compile_defines = dict(index.effective_defines())
+    if defines:
+        compile_defines.update(defines)
     compile_defines.update(request.defines)
     over_approx = (
         request.over_approximate_if

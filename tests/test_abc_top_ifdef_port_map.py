@@ -6,6 +6,8 @@ import json
 import subprocess
 from pathlib import Path
 
+from _env import subprocess_env as _subprocess_env
+
 from hierwalk.connect_scan import instance_port_maps, prepare_connect_body
 from hierwalk.index import scan_preprocessed
 from hierwalk.inst_scan import slim_body_for_instance_scan
@@ -197,10 +199,7 @@ def test_abc_top_cli_path_walk_nested_ifndef(tmp_path: Path):
         text=True,
         cwd=str(tmp_path),
         check=True,
-        env={
-            **__import__("os").environ,
-            "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
-        },
+        env=_subprocess_env(),
     )
     conn_rows = {}
     for ln in proc.stdout.splitlines():

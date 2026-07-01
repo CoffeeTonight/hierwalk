@@ -6,7 +6,7 @@ import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Mapping, Optional, Sequence, Union
+from typing import Dict, List, Mapping, Optional, Sequence, Set, Union
 
 from hierwalk.connect_expand import (
     aggregate_connect_results,
@@ -910,13 +910,35 @@ def collect_hierarchy_evidence_for_check(
     top: str = "",
 ) -> List[HierarchyEvidenceRow]:
     """Hierarchy hit/miss rows for one check right after path-walk (no COI yet)."""
+    from hierwalk.connect_expand import _placeholder_endpoint
+
     pairs = expand_check_to_pairs(
         chk.endpoint_a,
         chk.endpoint_b,
         check_id=chk.check_id,
         expand=chk.expand,
     )
+    empty_ep = _placeholder_endpoint("", "")
+    parent_id = chk.check_id or ""
     shells: List[ConnectResult] = []
+    seen_b_specs: Set[str] = set()
+    resolve_cache: Dict[str, ConnectEndpoint] = {}
+
+    def _cached_resolve(spec: str) -> ConnectEndpoint:
+        key = str(spec).strip()
+        hit = resolve_cache.get(key)
+        if hit is not None:
+            return hit
+        ep = _resolve_endpoint_for_spec(
+            key,
+            rows_by_path,
+            index=index,
+            top=top,
+            rows=rows,
+        )
+        resolve_cache[key] = ep
+        return ep
+
     for pair in pairs:
         sub_id = (
             f"{chk.check_id}{pair.sub_id}"
@@ -926,20 +948,23 @@ def collect_hierarchy_evidence_for_check(
         shells.append(
             ConnectResult(
                 check_id=sub_id,
-                endpoint_a=_resolve_endpoint_for_spec(
-                    pair.endpoint_a,
-                    rows_by_path,
-                    index=index,
-                    top=top,
-                    rows=rows,
-                ),
-                endpoint_b=_resolve_endpoint_for_spec(
-                    pair.endpoint_b,
-                    rows_by_path,
-                    index=index,
-                    top=top,
-                    rows=rows,
-                ),
+                endpoint_a=_cached_resolve(pair.endpoint_a),
+                endpoint_b=empty_ep,
+                connected=False,
+                mode="",
+                note="",
+            )
+        )
+        b_spec = str(pair.endpoint_b).strip()
+        if b_spec in seen_b_specs:
+            continue
+        seen_b_specs.add(b_spec)
+        b_check_id = parent_id if len(pairs) > 1 and parent_id else sub_id
+        shells.append(
+            ConnectResult(
+                check_id=b_check_id,
+                endpoint_a=empty_ep,
+                endpoint_b=_cached_resolve(b_spec),
                 connected=False,
                 mode="",
                 note="",

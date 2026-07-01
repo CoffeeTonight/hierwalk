@@ -73,3 +73,37 @@ def test_concat_correct_order_connectivity(tmp_path):
     tsv = format_connect_results_tsv(batch.results)
     assert "concat[0]\ttop.a\ttop.bus[1]\tTrue" in tsv
     assert "concat[1]\ttop.b\ttop.bus[0]\tTrue" in tsv
+
+
+def test_braced_concat_assign_bit_precise_connectivity(tmp_path):
+    """``assign bus = {a,b,c}`` must not collapse unrelated bits in text-conn."""
+    verilog = """
+    module top;
+      wire wa, wb, wc, wq;
+      wire [2:0] ASD;
+      assign ASD = {wa, wb, wc};
+      assign wq = wb;
+    endmodule
+    """
+    index, rows, top = _elab(verilog, tmp_path)
+    req = parse_connect_request_json(
+        {
+            "checks": [
+                {
+                    "id": "fan",
+                    "a": ["top.wa", "top.wc", "top.wb"],
+                    "b": "top.wq",
+                }
+            ]
+        }
+    )
+    batch = run_connectivity_request(req, rows=rows, index=index, top=top)
+    parent = batch.results[0]
+    assert len(parent.sub_results) == 3
+    by_pair = {
+        (sr.endpoint_a.spec, sr.endpoint_b.spec): sr.connected
+        for sr in parent.sub_results
+    }
+    assert by_pair[("top.wa", "top.wq")] is False
+    assert by_pair[("top.wc", "top.wq")] is False
+    assert by_pair[("top.wb", "top.wq")] is True

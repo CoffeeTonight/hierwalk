@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from hierwalk.connect_scan import collect_design_defines, prepare_connect_body
+from hierwalk.connect_scan import collect_design_defines, design_parse_sources, prepare_connect_body
 from hierwalk.index import DesignIndex, scan_preprocessed
 from hierwalk.preprocess import (
     apply_ifdef_filter,
@@ -277,6 +277,228 @@ def test_index_inline_ifdef_define_state(tmp_path: Path):
     assert "TAG" in defs
     out = apply_ifdef_filter(text, defs)
     assert "module top" in out
+
+
+def test_collect_design_defines_define_only_file(tmp_path: Path):
+    (tmp_path / "macros.v").write_text("`define FEATURE 1\n", encoding="utf-8")
+    (tmp_path / "top.v").write_text(
+        "module top;\n"
+        "`ifdef FEATURE\n"
+        "  leaf u_l ();\n"
+        "`endif\n"
+        "endmodule\n"
+        "module leaf; endmodule\n",
+        encoding="utf-8",
+    )
+    fl = tmp_path / "filelist.f"
+    fl.write_text(
+        "\n".join(
+            [
+                str((tmp_path / "macros.v").resolve()),
+                str((tmp_path / "top.v").resolve()),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    from hierwalk.filelist import parse_filelist
+
+    flr = parse_filelist(str(fl), index_cwd=str(tmp_path))
+    index = DesignIndex._assemble(
+        {},
+        path_patterns=[],
+        module_patterns=[],
+        preprocess_include_dirs=[str(tmp_path)],
+        preprocess_defines={},
+        parse_sources=[str(p) for p in flr.source_files],
+    )
+    defs = collect_design_defines(index, sources=[str(p) for p in flr.source_files])
+    assert defs.get("FEATURE") == "1"
+
+
+def test_collect_design_defines_preserves_filelist_order(tmp_path: Path):
+    (tmp_path / "first.v").write_text("`define FOO 1\n", encoding="utf-8")
+    (tmp_path / "second.v").write_text("`undef FOO\n", encoding="utf-8")
+    sources = [
+        str((tmp_path / "second.v").resolve()),
+        str((tmp_path / "first.v").resolve()),
+    ]
+    index = DesignIndex._assemble(
+        {},
+        path_patterns=[],
+        module_patterns=[],
+        preprocess_include_dirs=[str(tmp_path)],
+        preprocess_defines={},
+        parse_sources=sources,
+    )
+    defs = collect_design_defines(index, sources=sources)
+    assert "FOO" in defs
+
+
+def test_include_guard_with_blank_line_between(tmp_path: Path):
+    rtl = tmp_path / "guard.v"
+    rtl.write_text(
+        "`ifndef _GUARD_\n"
+        "\n"
+        "`define _GUARD_\n"
+        "module m; endmodule\n"
+        "`endif\n",
+        encoding="utf-8",
+    )
+    from hierwalk.preprocess import include_guard_macro_names
+
+    assert "_GUARD_" in include_guard_macro_names(rtl.read_text(encoding="utf-8"))
+
+
+def test_prepare_connect_body_expands_include_with_source_file(tmp_path: Path):
+    inc = tmp_path / "cfg.vh"
+    inc.write_text("`define ON 1\n", encoding="utf-8")
+    rtl = tmp_path / "top.v"
+    rtl.write_text(
+        '`include "cfg.vh"\n'
+        "module top;\n"
+        "`ifdef ON\n"
+        "  wire active;\n"
+        "`endif\n"
+        "endmodule\n",
+        encoding="utf-8",
+    )
+    body = "module top;\n`include \"cfg.vh\"\n`ifdef ON\n  wire active;\n`endif\nendmodule\n"
+    text = prepare_connect_body(
+        body,
+        defines={},
+        source_file=str(rtl),
+        include_dirs=[str(tmp_path)],
+    )
+    assert "wire active" in text
+
+
+def test_preprocess_sources_serial_honors_cross_file_undef(tmp_path: Path):
+    (tmp_path / "a.v").write_text("`define FOO 1\n", encoding="utf-8")
+    (tmp_path / "b.v").write_text(
+        "`undef FOO\n"
+        "module top;\n"
+        "`ifdef FOO\n"
+        "  ghost u_g ();\n"
+        "`endif\n"
+        "endmodule\n",
+        encoding="utf-8",
+    )
+    from hierwalk.preprocess import clear_include_unit_cache, preprocess_sources
+
+    clear_include_unit_cache()
+    sources = [
+        str((tmp_path / "a.v").resolve()),
+        str((tmp_path / "b.v").resolve()),
+    ]
+    out = preprocess_sources(sources, [tmp_path], {}, jobs=1)
+    text = out[str((tmp_path / "b.v").resolve())]
+    assert "u_g" not in text
+
+
+def test_include_guard_with_block_comment_between(tmp_path: Path):
+    rtl = tmp_path / "guard.v"
+    rtl.write_text(
+        "`ifndef _GUARD_\n"
+        "/* block */\n"
+        "`define _GUARD_\n"
+        "module m; endmodule\n"
+        "`endif\n",
+        encoding="utf-8",
+    )
+    from hierwalk.preprocess import include_guard_macro_names
+
+    assert "_GUARD_" in include_guard_macro_names(rtl.read_text(encoding="utf-8"))
+
+
+def test_ports_for_design_module_hides_ifdef_gated_port(tmp_path: Path):
+    rtl = tmp_path / "top.v"
+    rtl.write_text(
+        "module top;\n"
+        "`ifdef OFF\n"
+        "  input logic hidden_port;\n"
+        "`endif\n"
+        "  input logic visible_port;\n"
+        "endmodule\n",
+        encoding="utf-8",
+    )
+    from hierwalk.index import DesignIndex
+    from hierwalk.port_scan import ports_for_design_module
+
+    index = DesignIndex.build_from_sources(
+        [str(rtl.resolve())],
+        include_dirs=[str(tmp_path)],
+        defines={},
+        jobs=1,
+        low_memory=True,
+    )
+    ports = ports_for_design_module(index, "top", {})
+    assert "visible_port" in ports
+    assert "hidden_port" not in ports
+
+
+def test_design_parse_sources_infers_module_first_seen_order(tmp_path: Path):
+    from hierwalk.models import ModuleRecord
+
+    z_path = str((tmp_path / "z.v").resolve())
+    a_path = str((tmp_path / "a.v").resolve())
+    index = DesignIndex(
+        {
+            "z_mod": ModuleRecord(module_name="z_mod", file_path=z_path, body=""),
+            "a_mod": ModuleRecord(module_name="a_mod", file_path=a_path, body=""),
+        }
+    )
+    assert design_parse_sources(index) == [z_path, a_path]
+    assert index._parse_sources == [z_path, a_path]
+
+
+def test_patch_files_honors_cross_file_undef(tmp_path: Path):
+    a = tmp_path / "a.v"
+    b = tmp_path / "b.v"
+    a_path = str(a.resolve())
+    b_path = str(b.resolve())
+    b.write_text(
+        "module top;\n"
+        "`ifdef FOO\n"
+        "  ghost u_g ();\n"
+        "`endif\n"
+        "endmodule\n"
+        "module ghost; endmodule\n",
+        encoding="utf-8",
+    )
+    index = DesignIndex.build_from_sources(
+        [b_path],
+        include_dirs=[str(tmp_path)],
+        defines={"FOO": "1"},
+        jobs=1,
+        low_memory=True,
+    )
+    top = index.get_module("top")
+    assert top is not None
+    assert any(e.inst_name == "u_g" for e in top.instances)
+
+    a.write_text("`define FOO 1\n", encoding="utf-8")
+    b.write_text(
+        "`undef FOO\n"
+        "module top;\n"
+        "`ifdef FOO\n"
+        "  ghost u_g ();\n"
+        "`endif\n"
+        "endmodule\n"
+        "module ghost; endmodule\n",
+        encoding="utf-8",
+    )
+    index._parse_sources = [a_path, b_path]
+    index.patch_files(
+        [b_path],
+        [],
+        include_dirs=[str(tmp_path)],
+        defines={},
+        jobs=1,
+    )
+    top = index.get_module("top")
+    assert top is not None
+    assert not any(e.inst_name == "u_g" for e in top.instances)
 
 
 def test_prepare_connect_body_param_after_ifdef():

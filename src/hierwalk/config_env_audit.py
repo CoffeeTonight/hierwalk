@@ -162,12 +162,12 @@ def _index_ifdef_policy_line() -> str:
         )
     if lazy_index_ifdef():
         return (
-            "active-at-index (HIERWALK_LAZY_IFDEF=1; "
-            "inactive ifndef/ifdef branches removed at index)"
+            "active-at-index (inactive ifndef/ifdef branches removed at index; "
+            "HIERWALK_LAZY_IFDEF=0 to defer)"
         )
     return (
-        "deferred (ifdef not applied at index; all ifndef branches kept in index — "
-        "filelist +define+ and JSON defines do not strip ifndef here)"
+        "deferred (HIERWALK_LAZY_IFDEF=0; ifdef not applied at index — "
+        "inactive branches kept until connect/elab)"
     )
 
 

@@ -427,8 +427,10 @@ def port_index_for_design_module(
     index: object,
     module_name: str,
     param_ctx: Optional[Mapping[str, str]] = None,
+    *,
+    defines: Mapping[str, str] | None = None,
 ) -> Dict[str, PortInfo]:
-    """Port index resolved via :class:`DesignIndex` (one disk read per RTL file)."""
+    """Port index resolved via :class:`DesignIndex` (preprocessed RTL when available)."""
     get_module = getattr(index, "get_module", None)
     if not callable(get_module):
         return {}
@@ -438,7 +440,16 @@ def port_index_for_design_module(
     module_text = None
     source_text = getattr(index, "_source_text", None)
     if callable(source_text) and rec.file_path:
-        module_text = source_text(rec.file_path, full=True)
+        if defines is not None:
+            module_text = source_text(rec.file_path, full=True, defines=defines)
+        else:
+            effective = getattr(index, "effective_defines", None)
+            if callable(effective):
+                module_text = source_text(
+                    rec.file_path, full=True, defines=effective()
+                )
+            else:
+                module_text = source_text(rec.file_path, full=True)
     return port_index_for_module(
         rec.file_path,
         module_name,
@@ -447,11 +458,38 @@ def port_index_for_design_module(
     )
 
 
+def ports_for_design_module(
+    index: object,
+    module_name: str,
+    param_ctx: Optional[Mapping[str, str]] = None,
+    *,
+    defines: Mapping[str, str] | None = None,
+) -> Set[str]:
+    return set(
+        port_index_for_design_module(
+            index,
+            module_name,
+            param_ctx,
+            defines=defines,
+        )
+    )
+
+
 def ports_for_module(
     file_path: str,
     module_name: str,
     param_ctx: Optional[Mapping[str, str]] = None,
+    *,
+    index: object | None = None,
+    defines: Mapping[str, str] | None = None,
 ) -> Set[str]:
+    if index is not None:
+        return ports_for_design_module(
+            index,
+            module_name,
+            param_ctx,
+            defines=defines,
+        )
     return set(port_index_for_module(file_path, module_name, param_ctx))
 
 

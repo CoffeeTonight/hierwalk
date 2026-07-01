@@ -9,7 +9,7 @@ from hierwalk.models import FlatRow, PortInfo, SearchHit
 from hierwalk.params import resolve_param_map
 from hierwalk.path_chain import attach_path_chains
 from hierwalk.path_refine import refine_param_ctx_for_path
-from hierwalk.port_scan import matching_ports, port_index_for_module
+from hierwalk.port_scan import matching_ports, port_index_for_design_module
 from hierwalk.search import _segment_match, hit_from_row
 
 
@@ -160,7 +160,7 @@ def search_hierarchy_path(
             if refined.ok:
                 ctx = refined.param_ctx
                 refine_note = refined.note
-        port_index = port_index_for_module(row.file, row.module, ctx)
+        port_index = port_index_for_design_module(index, row.module, ctx)
         matched = matching_ports(port_index, port_pat, param_ctx=ctx)
         if not matched:
             if "*" in inst_pat or "?" in inst_pat or "[" in inst_pat:

@@ -320,7 +320,7 @@ def _apply_ifdef_directive(
 def _emit_ifdef_line_segments(
     line: str,
     stack: List[Tuple[bool, bool, bool]],
-    defs: Mapping[str, str],
+    defs: MutableMapping[str, str],
     *,
     preprocessed: bool = False,
 ) -> List[str]:
@@ -333,11 +333,13 @@ def _emit_ifdef_line_segments(
         m = _IFDEF_RE.search(line, pos)
         if not m:
             rest = line[pos:].strip()
-            if rest and all(frame[1] for frame in stack):
+            if rest and _stack_active(stack):
+                _apply_inline_define_undef_segment(rest, stack, defs)
                 segments.append(rest)
             break
         before = line[pos : m.start()].strip()
-        if before and all(frame[1] for frame in stack):
+        if before and _stack_active(stack):
+            _apply_inline_define_undef_segment(before, stack, defs)
             segments.append(before)
         raw = m.group(0).lower()
         if raw.startswith("`ifdef"):
@@ -713,8 +715,10 @@ def _apply_define_ops(
 
 
 _INCLUDE_GUARD_RE = re.compile(
-    r"`ifndef\s+([A-Za-z_]\w*)\s*(?://[^\n]*)?\n\s*`define\s+\1\b",
-    re.IGNORECASE | re.MULTILINE,
+    r"`ifndef\s+([A-Za-z_]\w*)\s*(?://[^\n]*)?\n"
+    r"(?:\s*(?://[^\n]*)?\n|\s*/\*.*?\*/\s*)*"
+    r"\s*`define\s+\1\b",
+    re.IGNORECASE | re.MULTILINE | re.DOTALL,
 )
 
 
@@ -907,8 +911,8 @@ def preprocess_file_for_index(
 
     In-file / filelist `` `define `` names are expanded so instance scan can see
     `` `CELL u`` pairs under `` `ifndef ``. Bind stripping stays deferred to
-    connect/elab. With lazy on, ``ifdef`` is also deferred unless
-    ``HIERWALK_LAZY_IFDEF=1``.
+    connect/elab. ``ifdef`` is applied by default; ``HIERWALK_LAZY_IFDEF=0``
+    defers it until connect/elab.
     """
     if _should_skip_preprocess_path(path, skip_path_patterns):
         return _IGNORE_PATH_STUB
@@ -1004,12 +1008,15 @@ def _preprocess_file_task(
     preprocess_fn = (
         preprocess_file_for_index if lazy_processing_enabled() else preprocess_file
     )
+    kwargs: Dict[str, object] = {"skip_path_patterns": skip_patterns}
+    if preprocess_fn is preprocess_file_for_index:
+        kwargs["apply_ifdef"] = True
     return str(sp.resolve()), preprocess_fn(
         sp,
         inc,
         defs,
         set(),
-        skip_path_patterns=skip_patterns,
+        **kwargs,
     )
 
 
@@ -1307,8 +1314,51 @@ def _warm_include_cache_for_sources(
     return len(closure)
 
 
+def define_snapshots_for_sources(
+    sources: Sequence[str],
+    *,
+    include_dirs: Sequence[str | Path],
+    base_defines: Mapping[str, str],
+    skip_path_patterns: Sequence[str] = (),
+) -> Dict[str, Tuple[Tuple[str, str], ...]]:
+    """Per-file starting defines keyed by resolved path (filelist order)."""
+    from hierwalk.lazy_scope import lazy_processing_enabled
+
+    inc = [Path(p) for p in include_dirs]
+    skip = tuple(skip_path_patterns)
+    accumulated: Dict[str, str] = dict(base_defines)
+    snapshots: Dict[str, Tuple[Tuple[str, str], ...]] = {}
+    preprocess_fn = (
+        preprocess_file_for_index if lazy_processing_enabled() else preprocess_file
+    )
+    for fpath in sources:
+        key = str(Path(fpath).resolve())
+        snapshots[key] = tuple(sorted(accumulated.items()))
+        path = Path(key)
+        if not path.is_file():
+            continue
+        try:
+            raw = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        guards = include_guard_macro_names(raw)
+        defs_copy = dict(accumulated)
+        preprocess_fn(
+            path,
+            inc,
+            defs_copy,
+            set(),
+            skip_path_patterns=skip,
+            apply_ifdef=True,
+        )
+        for name in guards:
+            defs_copy.pop(name, None)
+        accumulated = defs_copy
+    return snapshots
+
+
 def _run_preprocess_tasks_serial(
-    tasks: List[Tuple[str, Tuple[str, ...], Tuple[Tuple[str, str], ...]]],
+    tasks: List[Tuple[str, Tuple[str, ...], Tuple[Tuple[str, str], ...], Tuple[str, ...]]],
     *,
     on_progress: Optional[Callable[[str], None]] = None,
     progress_every: int = 500,
@@ -1374,7 +1424,21 @@ def preprocess_sources(
         file_via_filelist=file_via_filelist,
     )
 
-    tasks = [(src, inc_dirs, define_items, skip_tuple) for src in src_list]
+    snapshots = define_snapshots_for_sources(
+        src_list,
+        include_dirs=inc,
+        base_defines=base_defines,
+        skip_path_patterns=skip_tuple,
+    )
+    tasks = [
+        (
+            src,
+            inc_dirs,
+            snapshots.get(str(Path(src).resolve()), define_items),
+            skip_tuple,
+        )
+        for src in src_list
+    ]
     if workers == 1 or total <= 1:
         out = _run_preprocess_tasks_serial(
             tasks,

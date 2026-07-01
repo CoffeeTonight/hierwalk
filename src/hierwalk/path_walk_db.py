@@ -47,7 +47,7 @@ from hierwalk.manifest import LazyPathDigests, PathDigests, path_content_digest
 from hierwalk.models import InstanceEdge, ModuleRecord
 from hierwalk.params import resolve_param_map
 
-PATH_WALK_DB_VERSION = 12
+PATH_WALK_DB_VERSION = 13
 
 _PARALLEL_MIN_TIER0 = 4
 
@@ -133,6 +133,8 @@ class _Tier0ScanJob:
     cache_root: str
     content_digest: str
     skip_patterns: Tuple[str, ...]
+    include_dirs: Tuple[str, ...]
+    defines: Tuple[Tuple[str, str], ...]
 
 
 @dataclass(frozen=True)
@@ -187,8 +189,26 @@ def _tier0_save_sidecar_worker(
     tmp.replace(sidecar)
 
 
+def _tier0_preprocessed_text_worker(
+    path: str,
+    include_dirs: Sequence[str],
+    defines: Mapping[str, str],
+    skip_patterns: Sequence[str],
+) -> str:
+    from hierwalk.preprocess import preprocess_file_for_index
+
+    return preprocess_file_for_index(
+        Path(path),
+        [Path(p) for p in include_dirs],
+        dict(defines),
+        set(),
+        skip_path_patterns=skip_patterns,
+        apply_ifdef=True,
+    )
+
+
 def _tier0_worker_scan(job: _Tier0ScanJob) -> _Tier0ScanResult:
-    """Process-pool worker: read one RTL file, harvest decl names, persist regex sidecar."""
+    """Process-pool worker: light-preprocess one RTL file, harvest decl names."""
     key = str(Path(job.path).resolve())
     if job.skip_patterns and source_path_matches(key, job.skip_patterns):
         return _Tier0ScanResult(key, (), False, True, False)
@@ -198,7 +218,12 @@ def _tier0_worker_scan(job: _Tier0ScanJob) -> _Tier0ScanResult:
         return _Tier0ScanResult(key, cached, True, False, False)
 
     try:
-        text = Path(key).read_text(encoding="utf-8", errors="ignore")
+        text = _tier0_preprocessed_text_worker(
+            key,
+            job.include_dirs,
+            dict(job.defines),
+            job.skip_patterns,
+        )
     except OSError:
         return _Tier0ScanResult(key, (), False, False, True)
 
@@ -217,7 +242,7 @@ def _resolve_pw_db_jobs(jobs: int, num_tasks: int) -> int:
 
 
 def tier0_regex_module_names(text: str) -> List[str]:
-    """Fast declaration harvest (no preprocess). May include ifdef-gated names."""
+    """Fast declaration harvest on preprocessed text (ifdef-gated names excluded)."""
     names: List[str] = []
     seen: Set[str] = set()
     for m in _MODULE_DECL_RE.finditer(text):
@@ -534,6 +559,36 @@ class PathWalkModuleDb:
     def _source_digest(self, path: str) -> Optional[str]:
         return path_content_digest(Path(path), path_digests=self._path_digests)
 
+    def _tier0_scan_digest(self, path: str) -> Optional[str]:
+        """Tier-0 sidecar key: raw content + defines + include closure."""
+        content = self._source_digest(path)
+        if content is None:
+            return None
+        defines_digest = _defines_digest(self._tier1_defines())
+        include_digest = self._include_closure_digest(path)
+        hasher = hashlib.sha256()
+        hasher.update(b"tier0-preprocessed\0")
+        hasher.update(content.encode())
+        hasher.update(b"\0")
+        hasher.update(defines_digest.encode())
+        hasher.update(b"\0")
+        hasher.update(include_digest.encode())
+        return hasher.hexdigest()[:32]
+
+    def _tier0_preprocessed_text(self, path: str) -> str:
+        from hierwalk.preprocess import preprocess_file_for_index
+
+        key = str(Path(path).resolve())
+        defs = dict(self._tier1_defines())
+        return preprocess_file_for_index(
+            Path(key),
+            self._include_dirs,
+            defs,
+            set(),
+            skip_path_patterns=self._skip,
+            apply_ifdef=True,
+        )
+
     def _regex_sidecar(self, path: str) -> Optional[Path]:
         if self._cache_root is None:
             return None
@@ -597,7 +652,7 @@ class PathWalkModuleDb:
             return None
         if not isinstance(obj, _FileRegexCacheEntry):
             return None
-        live = self._source_digest(path)
+        live = self._tier0_scan_digest(path)
         if live is None or live != obj.content_digest:
             return None
         return obj
@@ -606,7 +661,7 @@ class PathWalkModuleDb:
         sidecar = self._regex_sidecar(path)
         if sidecar is None:
             return
-        digest = self._source_digest(path)
+        digest = self._tier0_scan_digest(path)
         if digest is None:
             return
         entry = _FileRegexCacheEntry(digest, tuple(names))
@@ -1200,8 +1255,11 @@ class PathWalkModuleDb:
         module_name: str,
         *,
         policy: ResolvePolicy,
+        inst_leaf: str = "",
     ) -> str:
-        """Recovery keeps scanning after the first decl hit (dup modules)."""
+        """Recovery and instance disambiguation scan past the first decl hit."""
+        if inst_leaf:
+            return ""
         if (
             policy == RESOLVE_RECOVERY
             and module_name
@@ -1308,13 +1366,16 @@ class PathWalkModuleDb:
         return self._tier0_executor
 
     def _tier0_make_job(self, path: str) -> _Tier0ScanJob:
-        digest = self._source_digest(path) or ""
+        digest = self._tier0_scan_digest(path) or ""
         cache_root = str(self._cache_root) if self._cache_root is not None else ""
+        defs = self._tier1_defines()
         return _Tier0ScanJob(
             path=path,
             cache_root=cache_root,
             content_digest=digest,
             skip_patterns=tuple(self._skip),
+            include_dirs=tuple(str(p) for p in self._include_dirs),
+            defines=tuple(sorted(defs.items())),
         )
 
     def _ingest_tier0_result(self, result: _Tier0ScanResult) -> None:
@@ -1342,7 +1403,7 @@ class PathWalkModuleDb:
             )
         self._note_regex_modules(key, names)
         if not result.from_cache and self._cache_root is not None:
-            digest = self._source_digest(key)
+            digest = self._tier0_scan_digest(key)
             if digest is not None:
                 self._save_regex_sidecar(key, names)
         self.files_regex_scanned += 1
@@ -1539,7 +1600,7 @@ class PathWalkModuleDb:
             return names
 
         try:
-            text = Path(key).read_text(encoding="utf-8", errors="ignore")
+            text = self._tier0_preprocessed_text(key)
         except OSError:
             self.files_regex_scanned += 1
             self._trace(f"pw-db tier0 read-fail {Path(key).name}")
@@ -1560,6 +1621,7 @@ class PathWalkModuleDb:
         target_module: str = "",
         scope_anchor: str = "",
         policy: ResolvePolicy = RESOLVE_RECOVERY,
+        inst_leaf: str = "",
     ) -> int:
         """Tier-0 scan sources not yet regex-indexed (scoped pool or full design)."""
         pool = (
@@ -1580,7 +1642,11 @@ class PathWalkModuleDb:
             )
         return self._tier0_scan_sources(
             pending,
-            target_module=self._tier0_target_module(target_module, policy=policy),
+            target_module=self._tier0_target_module(
+                target_module,
+                policy=policy,
+                inst_leaf=inst_leaf,
+            ),
         )
 
     def _sort_module_files(
@@ -1645,9 +1711,10 @@ class PathWalkModuleDb:
                     target_module=self._tier0_target_module(
                         module_name,
                         policy=policy,
+                        inst_leaf=inst_leaf,
                     ),
                 )
-                if module_name in self._module_to_files and policy == RESOLVE_CONFIDENT:
+                if module_name in self._module_to_files:
                     files = list(self._module_to_files.get(module_name, []))
                     return self._sort_module_files(
                         module_name,
@@ -1683,7 +1750,11 @@ class PathWalkModuleDb:
         )
         files_scanned = 0
         while self._regex_queue and files_scanned < scan_cap:
-            if policy == RESOLVE_CONFIDENT and module_name in self._module_to_files:
+            if (
+                policy == RESOLVE_CONFIDENT
+                and module_name in self._module_to_files
+                and not inst_leaf
+            ):
                 break
             batch: List[str] = []
             while self._regex_queue and len(batch) < batch_size:
@@ -1699,10 +1770,18 @@ class PathWalkModuleDb:
                 continue
             self._tier0_scan_sources(
                 batch,
-                target_module=self._tier0_target_module(module_name, policy=policy),
+                target_module=self._tier0_target_module(
+                    module_name,
+                    policy=policy,
+                    inst_leaf=inst_leaf,
+                ),
             )
             files_scanned += len(batch)
-            if module_name in self._module_to_files and policy == RESOLVE_CONFIDENT:
+            if (
+                module_name in self._module_to_files
+                and policy == RESOLVE_CONFIDENT
+                and not inst_leaf
+            ):
                 break
 
         if (
@@ -1723,7 +1802,11 @@ class PathWalkModuleDb:
                 )
                 self._tier0_scan_sources(
                     remaining[: pw_tier0_global_scan_max()],
-                    target_module=self._tier0_target_module(module_name, policy=policy),
+                    target_module=self._tier0_target_module(
+                        module_name,
+                        policy=policy,
+                        inst_leaf=inst_leaf,
+                    ),
                 )
 
         files = list(self._module_to_files.get(module_name, []))
@@ -2369,10 +2452,12 @@ class PathWalkModuleDb:
                     self.write_module_index_snapshot()
                     return True
             if pass_idx == 0:
+                inst_leaf = expect_inst[1] if expect_inst is not None else ""
                 if scoped_pool:
                     pending = self._scan_remaining_sources_tier0(
                         scoped_pool,
                         target_module=module_name,
+                        inst_leaf=inst_leaf,
                     )
                     if pending > 0:
                         expand_label = (
@@ -2388,7 +2473,28 @@ class PathWalkModuleDb:
                             avoid_file=avoid,
                             scope_anchor=scope_anchor,
                             policy=policy,
-                            inst_leaf=expect_inst[1] if expect_inst is not None else "",
+                            inst_leaf=inst_leaf,
+                        )
+                        continue
+                elif expect_inst is not None:
+                    pending = self._scan_remaining_sources_tier0(
+                        None,
+                        target_module=module_name,
+                        policy=policy,
+                        inst_leaf=inst_leaf,
+                    )
+                    if pending > 0:
+                        self._trace(
+                            f"pw-db tier0 expand policy={policy} module={module_name} "
+                            f"global +{pending} file(s) -> "
+                            f"{len(self._module_to_files.get(module_name, []))} candidate(s)"
+                        )
+                        candidates = self._order_candidate_files(
+                            module_name,
+                            avoid_file=avoid,
+                            scope_anchor=scope_anchor,
+                            policy=policy,
+                            inst_leaf=inst_leaf,
                         )
                         continue
                 continue
@@ -2608,6 +2714,7 @@ class PathWalkModuleDb:
                     pending = self._scan_remaining_sources_tier0(
                         scoped_pool,
                         target_module=parent_module,
+                        inst_leaf=inst_leaf,
                     )
                     if pending > 0:
                         expand_label = (
@@ -2626,12 +2733,34 @@ class PathWalkModuleDb:
                             inst_leaf=inst_leaf,
                         )
                         continue
+                elif inst_leaf:
+                    pending = self._scan_remaining_sources_tier0(
+                        None,
+                        target_module=parent_module,
+                        policy=policy,
+                        inst_leaf=inst_leaf,
+                    )
+                    if pending > 0:
+                        self._trace(
+                            f"pw-db tier0 expand policy={policy} edge "
+                            f"{parent_module}.{inst_leaf} global +{pending} file(s) -> "
+                            f"{len(self._module_to_files.get(parent_module, []))} candidate(s)"
+                        )
+                        candidates = self._order_candidate_files(
+                            parent_module,
+                            avoid_file=avoid,
+                            scope_anchor=scope_anchor,
+                            policy=policy,
+                            inst_leaf=inst_leaf,
+                        )
+                        continue
                 continue
             if pass_idx == 1 and policy == RESOLVE_RECOVERY:
                 pending = self._scan_remaining_sources_tier0(
                     None,
                     target_module=parent_module,
                     scope_anchor=scope_anchor,
+                    inst_leaf=inst_leaf,
                 )
                 refreshed = self._recovery_pass1_candidates(
                     parent_module,

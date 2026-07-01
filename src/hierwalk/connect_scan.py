@@ -8,6 +8,7 @@ import re
 import threading
 from functools import lru_cache
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, FrozenSet, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 from hierwalk.generate_fold import fold_generate_regions, prepare_body_for_instance_scan
@@ -334,6 +335,13 @@ def _canonicalize_connect_node(
 def _is_concat_part_select_expr(expr: str) -> bool:
     text = re.sub(r"\s+", "", expr.strip())
     return bool(re.match(r"^\{.+}\[[^\]]+\]$", text))
+
+
+def _is_braced_concat_rhs(expr: str) -> bool:
+    """True for ``{a,b,c}`` replication/concat (not ``{a,b}[i]`` part-select)."""
+    text = _strip_outer_parens(expr.strip().rstrip(";"))
+    text = re.sub(r"\s+", "", text)
+    return len(text) >= 2 and text[0] == "{" and text[-1] == "}" and "[" not in text
 
 
 def _expand_concat_elements(inner: str) -> List[str]:
@@ -2577,12 +2585,25 @@ def prepare_connect_body(
     defines: Mapping[str, str] | None = None,
     *,
     over_approximate_if: bool = True,
+    source_file: str | None = None,
+    include_dirs: Sequence[str] | None = None,
 ) -> str:
     """Apply in-body ``define``, macro expand, ``ifdef``, and generate fold."""
+    from pathlib import Path
+
     from hierwalk.preprocess import _preprocess_conditional_pass
 
     pmap = dict(defines or {})
-    filtered = _preprocess_conditional_pass(body, pmap, apply_ifdef=True)
+    inc = [Path(p) for p in include_dirs] if include_dirs else ()
+    src_path = Path(source_file) if source_file else None
+    filtered = _preprocess_conditional_pass(
+        body,
+        pmap,
+        apply_ifdef=True,
+        source_file=src_path,
+        include_dirs=inc,
+        visiting=set(),
+    )
     body_params = collect_connect_module_params("", filtered)
     full_pmap = resolve_param_map(
         body_params,
@@ -2687,6 +2708,72 @@ def _bridge_hier_pair_to_adj(
         )
 
 
+def _link_braced_concat_assign(
+    lhs: str,
+    rhs: str,
+    adj: Dict[str, Set[str]],
+    *,
+    param_map: Mapping[str, str],
+    decl_widths: Mapping[str, List[int]],
+    decl_md_suffixes: Mapping[str, List[str]],
+    edge_prov: Optional[Dict[Tuple[str, str], ConnectEdgeProv]] = None,
+    stmt_line: int = 0,
+    zero_nets: Optional[Mapping[str, int]] = None,
+    over_approximate_if: bool = True,
+    iface_insts: Optional[Set[str]] = None,
+) -> bool:
+    """
+    ``lhs = {a,b,…}`` MSB-first: leftmost element maps to the MSB of *lhs* bus.
+    """
+    if not _is_braced_concat_rhs(rhs):
+        return False
+    pmap = dict(param_map)
+    inner = _strip_outer_parens(rhs.strip().rstrip(";")).strip()[1:-1]
+    parts = _expand_concat_elements(inner)
+    if not parts:
+        return False
+    lhs_nodes = list(_local_connect_nodes(lhs, pmap))
+    if len(lhs_nodes) != 1:
+        return False
+    lhs_token = lhs_nodes[0]
+    lhs_base, _ = _split_net_base_suffix(lhs_token)
+    bits = decl_widths.get(lhs_base)
+    if not bits or len(bits) != len(parts):
+        return False
+    # Verilog concat is MSB-first; ``[N:0]`` bit lists are stored LSB-first.
+    if bits[-1] >= bits[0]:
+        concat_bits = list(reversed(bits))
+    else:
+        concat_bits = list(bits)
+    lhs_sfx = [f"[{i}]" for i in concat_bits]
+    znets = dict(zero_nets or {})
+    ifaces = iface_insts or set()
+    for sfx, part in zip(lhs_sfx, parts):
+        if _is_const_literal(part, pmap):
+            continue
+        part_roots = _effective_assign_rhs_roots(
+            part,
+            pmap,
+            zero_nets=znets,
+            over_approximate_if=over_approximate_if,
+        )
+        if not part_roots:
+            part_roots = set(extract_connect_nodes(part, pmap))
+        if not part_roots:
+            continue
+        lhs_bit = lhs_base + sfx
+        for root in part_roots:
+            _add_undirected(
+                adj,
+                lhs_bit,
+                root,
+                edge_prov=edge_prov,
+                line=stmt_line,
+                kind="assign",
+            )
+    return True
+
+
 def _register_hier_assign(
     lhs: str,
     rhs: str,
@@ -2757,6 +2844,20 @@ def _parse_assign_stmt(
                 decl_md_suffixes=md_suffixes,
                 edge_prov=edge_prov,
             )
+    if _link_braced_concat_assign(
+        lhs,
+        rhs,
+        adj,
+        param_map=pmap,
+        decl_widths=widths,
+        decl_md_suffixes=md_suffixes,
+        edge_prov=edge_prov,
+        stmt_line=stmt_line,
+        zero_nets=zero_nets,
+        over_approximate_if=over_approximate_if,
+        iface_insts=ifaces,
+    ):
+        return
     rhs_roots = _effective_assign_rhs_roots(
         rhs,
         pmap,
@@ -3843,6 +3944,10 @@ def apply_bind_connectivity(
             defines=defines,
             fold_generate=True,
             over_approximate_if=over_approximate_if,
+            source_file=rec.file_path or None,
+            include_dirs=list(
+                getattr(index, "_preprocess_include_dirs", ()) or ()
+            ),
         )
         port_to_expr = {p: e for p, e in bind.ports}
         groups: Dict[str, Set[str]] = {}
@@ -3868,6 +3973,46 @@ def apply_bind_connectivity(
                     mod_idx.hier_ref_targets.setdefault((inst, port), set()).add(rep)
 
 
+def _dedupe_paths_preserve_order(paths: Sequence[str]) -> List[str]:
+    from pathlib import Path
+
+    seen: Set[str] = set()
+    out: List[str] = []
+    for raw in paths:
+        key = str(Path(raw).resolve())
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+    return out
+
+
+def design_parse_sources(index: object) -> List[str]:
+    """RTL source paths for cross-file define collection (filelist order when known)."""
+    stored = getattr(index, "_parse_sources", None)
+    if stored:
+        return list(stored)
+    modules = getattr(index, "modules", None)
+    if isinstance(modules, Mapping):
+        seen: Set[str] = set()
+        out: List[str] = []
+        for rec in modules.values():
+            fp = (getattr(rec, "file_path", "") or "").strip()
+            if not fp:
+                continue
+            key = str(Path(fp).resolve())
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(key)
+        if out:
+            return out
+    file_modules = getattr(index, "file_modules", None)
+    if isinstance(file_modules, Mapping):
+        return list(file_modules)
+    return []
+
+
 def collect_design_defines(
     index: object,
     *,
@@ -3885,18 +4030,21 @@ def collect_design_defines(
     base = dict(getattr(index, "_preprocess_defines", {}) or {})
     if extra_defines:
         base.update(extra_defines)
-    file_modules = getattr(index, "file_modules", None)
     if sources is not None:
-        paths = sorted({str(Path(s).resolve()) for s in sources})
-    elif isinstance(file_modules, Mapping):
-        paths = sorted(file_modules)
+        paths = _dedupe_paths_preserve_order(sources)
     else:
+        paths = design_parse_sources(index)
+    if not paths:
         return dict(base)
 
     from hierwalk.preprocess import include_guard_macro_names, preprocess_file_for_index
 
     inc = [Path(p) for p in getattr(index, "_preprocess_include_dirs", ()) or ()]
-    skip = tuple(getattr(index, "_skip_path_patterns", ()) or ())
+    skip = tuple(
+        getattr(index, "ignore_path_patterns", None)
+        or getattr(index, "_skip_path_patterns", ())
+        or ()
+    )
     out: Dict[str, str] = dict(base)
     seen: Set[str] = set()
     for fpath in paths:
@@ -3928,17 +4076,28 @@ _bind_records_memo: Dict[Tuple[int, str, str], Tuple[BindRecord, ...]] = {}
 _bind_records_memo_guard = threading.Lock()
 
 
+def _design_source_paths_fallback(index: object) -> List[str]:
+    """File paths when ``_parse_sources`` is empty (module first-seen order)."""
+    paths = design_parse_sources(index)
+    if paths:
+        return paths
+    file_modules = getattr(index, "file_modules", None)
+    if isinstance(file_modules, Mapping):
+        return list(file_modules)
+    return []
+
+
 def file_modules_bind_digest(index: object) -> str:
     """Digest of RTL files in *index* for bind-memo invalidation."""
-    file_modules = getattr(index, "file_modules", None)
-    if not isinstance(file_modules, Mapping):
+    paths = _design_source_paths_fallback(index)
+    if not paths:
         return "0" * 16
     from pathlib import Path
 
     from hierwalk.manifest import path_content_digest
 
     hasher = hashlib.sha256()
-    for fpath in sorted(file_modules):
+    for fpath in paths:
         digest = path_content_digest(Path(fpath)) or ""
         if not digest:
             try:
@@ -3967,21 +4126,42 @@ def collect_bind_records_for_module(index: object, mod_name: str) -> List[BindRe
         hit = _bind_records_memo.get(memo_key)
         if hit is not None:
             return list(hit)
-    file_modules = getattr(index, "file_modules", None)
-    if not isinstance(file_modules, Mapping):
+    paths = _design_source_paths_fallback(index)
+    if not paths:
         return []
     from pathlib import Path
 
+    from hierwalk.preprocess import include_guard_macro_names, preprocess_file_for_index
+
+    inc = [Path(p) for p in getattr(index, "_preprocess_include_dirs", ()) or ()]
+    skip = tuple(
+        getattr(index, "ignore_path_patterns", None)
+        or getattr(index, "_skip_path_patterns", ())
+        or ()
+    )
+    running: Dict[str, str] = dict(getattr(index, "_preprocess_defines", {}) or {})
     out: List[BindRecord] = []
-    seen_files: Set[str] = set()
-    for fpath in file_modules:
-        if fpath in seen_files:
+    for fpath in paths:
+        path = Path(fpath)
+        if not path.is_file():
             continue
-        seen_files.add(fpath)
         try:
-            text = Path(fpath).read_text(encoding="utf-8", errors="ignore")
+            raw = path.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
+        guards = include_guard_macro_names(raw)
+        defs = dict(running)
+        text = preprocess_file_for_index(
+            path,
+            inc,
+            defs,
+            set(),
+            skip_path_patterns=skip,
+            apply_ifdef=True,
+        )
+        for name in guards:
+            defs.pop(name, None)
+        running = defs
         for target, records in scan_bind_records(text).items():
             if target == mod_name:
                 out.extend(records)
@@ -4109,6 +4289,7 @@ def _build_index_cache_key(
     port_decl_widths: Optional[Mapping[str, List[int]]],
     port_decl_md_suffixes: Optional[Mapping[str, List[str]]],
     prepared_body: Optional[str],
+    source_file: str | None = None,
 ) -> Tuple[object, ...]:
     body_digest = hashlib.sha256(
         body.encode("utf-8", errors="surrogateescape")
@@ -4118,10 +4299,16 @@ def _build_index_cache_key(
         prepared_digest = hashlib.sha256(
             prepared_body.encode("utf-8", errors="surrogateescape")
         ).hexdigest()[:16]
+    source_digest = ""
+    if source_file:
+        source_digest = hashlib.sha256(
+            str(Path(source_file).resolve()).encode("utf-8")
+        ).hexdigest()[:16]
     return (
         _BUILD_INDEX_MEMO_VERSION,
         body_digest,
         prepared_digest,
+        source_digest,
         _param_map_digest(param_map),
         _defines_digest(defines),
         fold_generate,
@@ -4187,6 +4374,8 @@ def build_module_connect_index(
     port_decl_widths: Optional[Mapping[str, List[int]]] = None,
     port_decl_md_suffixes: Optional[Mapping[str, List[str]]] = None,
     prepared_body: Optional[str] = None,
+    source_file: str | None = None,
+    include_dirs: Sequence[str] | None = None,
 ) -> ModuleConnectIndex:
     if os.environ.get("HIERWALK_CONNECT_INDEX_MEMO", "").lower() in (
         "0",
@@ -4204,6 +4393,8 @@ def build_module_connect_index(
             port_decl_widths=port_decl_widths,
             port_decl_md_suffixes=port_decl_md_suffixes,
             prepared_body=prepared_body,
+            source_file=source_file,
+            include_dirs=include_dirs,
         )
     key = _build_index_cache_key(
         body,
@@ -4216,6 +4407,7 @@ def build_module_connect_index(
         port_decl_widths=port_decl_widths,
         port_decl_md_suffixes=port_decl_md_suffixes,
         prepared_body=prepared_body,
+        source_file=source_file,
     )
     with _build_index_mem_cache_lock(key):
         hit = _build_index_mem_cache.get(key)
@@ -4234,6 +4426,8 @@ def build_module_connect_index(
             port_decl_widths=port_decl_widths,
             port_decl_md_suffixes=port_decl_md_suffixes,
             prepared_body=prepared_body,
+            source_file=source_file,
+            include_dirs=include_dirs,
         )
         _build_index_mem_cache[key] = built
         return built
@@ -4251,6 +4445,8 @@ def _build_module_connect_index_uncached(
     port_decl_widths: Optional[Mapping[str, List[int]]] = None,
     port_decl_md_suffixes: Optional[Mapping[str, List[str]]] = None,
     prepared_body: Optional[str] = None,
+    source_file: str | None = None,
+    include_dirs: Sequence[str] | None = None,
 ) -> ModuleConnectIndex:
     global _build_index_uncached_calls
     _build_index_uncached_calls += 1
@@ -4263,6 +4459,8 @@ def _build_module_connect_index_uncached(
             param_map=pmap,
             defines=defines,
             over_approximate_if=over_approximate_if,
+            source_file=source_file,
+            include_dirs=include_dirs,
         )
     else:
         text = _apply_ifdef_only(body, defines)
@@ -4348,8 +4546,10 @@ def _build_module_connect_index_uncached(
             continue
         if base not in assign_adj_bases:
             continue
-        if len(suffixes) <= 2 and base not in assign_adj_scalar:
-            if base in port_bases:
+        if base not in assign_adj_scalar:
+            # Bit-sliced assigns only (e.g. ``{a,b,c}`` concat): never clique the
+            # undeclared scalar base onto every slice — that collapses unrelated bits.
+            if len(suffixes) <= 2 and base in port_bases:
                 for sfx in suffixes:
                     _add_undirected(
                         assign_adj,

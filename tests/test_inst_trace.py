@@ -167,3 +167,52 @@ def test_cli_inst_trace_smoke(tmp_path: Path):
     )
     assert "origin_port\ttrace_direction" in proc.stdout
     assert "port-in" in proc.stdout
+
+
+def test_run_inst_trace_uses_effective_defines_not_filelist_seed(tmp_path: Path):
+    """Cone must not re-merge filelist defines on top of RTL `` `undef ``."""
+    from unittest.mock import patch
+
+    a = tmp_path / "a.v"
+    b = tmp_path / "b.v"
+    a.write_text("`define FOO 1\n", encoding="utf-8")
+    b.write_text(
+        "`undef FOO\n"
+        "module top(input logic a, output logic z);\n"
+        "`ifdef FOO\n"
+        "  assign z = a;\n"
+        "`else\n"
+        "  assign z = 1'b0;\n"
+        "`endif\n"
+        "endmodule\n",
+        encoding="utf-8",
+    )
+    a_path = str(a.resolve())
+    b_path = str(b.resolve())
+    index = DesignIndex.build_from_sources(
+        [a_path, b_path],
+        include_dirs=[str(tmp_path)],
+        defines={"FOO": "1"},
+        jobs=1,
+        low_memory=True,
+    )
+    _, rows = elaborate(index, "top")
+    captured: list[object] = []
+
+    def _capture_fanin(*_args, **kwargs):
+        captured.append(kwargs.get("defines"))
+        return fanin_cone(*_args, **kwargs)
+
+    with patch("hierwalk.inst_trace.fanin_cone", side_effect=_capture_fanin):
+        run_inst_trace(
+            InstTraceRequest(
+                instance="top.z",
+                direction="driver",
+                path_kind="comb",
+            ),
+            rows=rows,
+            index=index,
+            top="top",
+        )
+    assert captured
+    assert "FOO" not in (captured[0] or {})

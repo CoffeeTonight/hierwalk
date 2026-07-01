@@ -274,6 +274,59 @@ def test_hierarchy_port_rtl_uses_longest_walked_inst_prefix(tmp_path: Path):
         assert row["module"] == "mid"
 
 
+def test_hierarchy_evidence_for_check_dedup_shared_b_endpoint(tmp_path: Path):
+    from hierwalk.connect_artifacts import collect_hierarchy_evidence_for_check
+    from hierwalk.connect_request import ConnectivityCheck
+    from hierwalk.elab import elaborate
+    from hierwalk.index import DesignIndex
+
+    rtl = tmp_path / "top.v"
+    rtl.write_text(
+        "module top;\n"
+        "  wire wa, wb, wc, wq;\n"
+        "endmodule\n",
+        encoding="utf-8",
+    )
+    text = rtl.read_text(encoding="utf-8")
+    index = DesignIndex.build({str(rtl): text})
+    _, rows = elaborate(index, "top")
+    rows_by_path = {row.full_path: row for row in rows}
+    from hierwalk.connect_request import parse_connect_request_json
+
+    chk = parse_connect_request_json(
+        {
+            "checks": [
+                {
+                    "id": "fan",
+                    "a": ["top.wa", "top.wc", "top.wb"],
+                    "b": "top.wq",
+                }
+            ]
+        }
+    ).checks[0]
+    evidence = collect_hierarchy_evidence_for_check(
+        chk,
+        rows_by_path,
+        rows=rows,
+        index=index,
+        top="top",
+    )
+    b_wq_ids = {
+        row.check_id
+        for row in evidence
+        if row.side == "b" and row.path.endswith(".wq")
+    }
+    assert b_wq_ids == {"fan"}
+    b_wire_wq = [
+        row
+        for row in evidence
+        if row.side == "b"
+        and row.kind == "wire"
+        and row.path.endswith(".wq")
+    ]
+    assert len(b_wire_wq) == 1
+
+
 def test_compact_hierarchy_final_tsv_keeps_deepest_hit_only(tmp_path: Path):
     from hierwalk.connect_artifacts import (
         collect_hierarchy_evidence,

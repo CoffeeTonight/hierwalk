@@ -108,9 +108,21 @@ def _port_reps_from_source(
     out_reps: Set[str] = set()
     if not rec or not rec.file_path:
         return in_reps, out_reps
-    try:
-        src = Path(rec.file_path).read_text(encoding="utf-8", errors="ignore")
-    except OSError:
+    from hierwalk.port_scan import port_index_for_design_module
+
+    port_index = port_index_for_design_module(index, mod_name, param_ctx)
+    if port_index:
+        for info in port_index.values():
+            decl = info.decl.lower()
+            for name in info.names:
+                rep = comb.net_rep.get(name, name)
+                if decl.startswith("input"):
+                    in_reps.add(rep)
+                elif decl.startswith("output"):
+                    out_reps.add(rep)
+        return in_reps, out_reps
+    src = index._source_text(rec.file_path)
+    if not src:
         return in_reps, out_reps
     for info in scan_ports_detail_from_module_text(src, mod_name, param_ctx=param_ctx):
         decl = info.decl.lower()

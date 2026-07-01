@@ -27,12 +27,12 @@ def lazy_index_ifdef() -> bool:
     """
     Apply ``ifdef`` during index preprocess.
 
-    Lazy default is **off** — ifdef runs when a module body is needed (connect/elab)
-    or when ``HIERWALK_LAZY_IFDEF=1``.
+    Default is **on** (inactive branches stripped at index). Set
+    ``HIERWALK_LAZY_IFDEF=0`` to defer ifdef until connect/elab.
     """
     if not lazy_processing_enabled():
         return True
-    return _env_bool("HIERWALK_LAZY_IFDEF", default=False)
+    return _env_bool("HIERWALK_LAZY_IFDEF", default=True)
 
 
 def lazy_filelist_defer_exists() -> bool:

@@ -287,9 +287,13 @@ def _effective_defines(
     *,
     sources: Optional[Sequence[str]] = None,
 ) -> Dict[str, str]:
+    from hierwalk.connect_scan import design_parse_sources
+
+    if sources is None:
+        sources = design_parse_sources(index)
     return collect_design_defines(
         index,
-        sources=sources,
+        sources=sources if sources else None,
         extra_defines=dict(defines or {}),
     )
 
@@ -711,6 +715,7 @@ class ConnectivitySession:
     index: DesignIndex
     top: str = ""
     defines: Mapping[str, str] = field(default_factory=dict)
+    sources: Optional[Sequence[str]] = None
     strict_generate: bool = False
     ff_barrier: bool = True
     over_approximate_if: Optional[bool] = None
@@ -721,13 +726,50 @@ class ConnectivitySession:
     param_ctx_cache: Dict[str, Mapping[str, str]] = field(default_factory=dict)
     elab_index: Optional[ElabIndex] = None
     resolve_param_dims: bool = True
+    _effective_defines_cache: Dict[str, str] = field(default_factory=dict, repr=False)
+    _effective_defines_stamp: Tuple[
+        Tuple[str, ...],
+        Tuple[Tuple[str, str], ...],
+        Tuple[str, ...],
+        Tuple[Tuple[str, str], ...],
+    ] = field(default=((), (), (), ()), repr=False)
 
     def __post_init__(self) -> None:
         if self.elab_index is None and self.rows:
             self.elab_index = ElabIndex.from_rows(self.rows)
         if not self.top and self.rows:
             self.top = self.rows[0].full_path.split(".", 1)[0]
-        self._effective_defines = _effective_defines(self.index, self.defines)
+        self._refresh_effective_defines()
+
+    def _refresh_effective_defines(self) -> Dict[str, str]:
+        from hierwalk.connect_scan import design_parse_sources
+
+        srcs = (
+            list(self.sources)
+            if self.sources is not None
+            else design_parse_sources(self.index)
+        )
+        defines_stamp = tuple(sorted(self.defines.items()))
+        parse_stamp = tuple(getattr(self.index, "_parse_sources", ()) or ())
+        modules_stamp = tuple(
+            sorted(
+                (name, rec.file_path)
+                for name, rec in self.index.modules.items()
+            )
+        )
+        stamp = (parse_stamp, modules_stamp, tuple(srcs), defines_stamp)
+        if stamp != self._effective_defines_stamp or not self._effective_defines_cache:
+            self._effective_defines_cache = _effective_defines(
+                self.index,
+                self.defines,
+                sources=srcs or None,
+            )
+            self._effective_defines_stamp = stamp
+        return dict(self._effective_defines_cache)
+
+    def effective_defines(self) -> Dict[str, str]:
+        """Filelist + RTL defines; recomputed when the index or source list changes."""
+        return self._refresh_effective_defines()
 
     @property
     def rows_by_path(self) -> Dict[str, FlatRow]:
@@ -742,6 +784,8 @@ class ConnectivitySession:
     def clear_cache(self) -> None:
         self.mod_cache.clear()
         self.param_ctx_cache.clear()
+        self._effective_defines_stamp = ((), (), (), ())
+        self._effective_defines_cache.clear()
 
     def check(
         self,
@@ -764,7 +808,7 @@ class ConnectivitySession:
                 top=self.top,
                 path_kind=expand.path_kinds,
                 direction=getattr(expand, "direction", "fanout"),
-                defines=self._effective_defines,
+                defines=self.effective_defines(),
                 over_approximate_if=self.over_approximate_if
                 if self.over_approximate_if is not None
                 else True,
@@ -799,7 +843,7 @@ class ConnectivitySession:
                 rows=self.rows,
                 index=self.index,
                 top=self.top,
-                effective_defines=self._effective_defines,
+                effective_defines=self.effective_defines(),
                 trace=trace,
                 strict_generate=self.strict_generate,
                 ff_barrier=self.ff_barrier,
@@ -823,7 +867,7 @@ class ConnectivitySession:
                         rows=self.rows,
                         index=self.index,
                         top=self.top,
-                        effective_defines=self._effective_defines,
+                        effective_defines=self.effective_defines(),
                         trace=trace,
                         strict_generate=self.strict_generate,
                         ff_barrier=self.ff_barrier,
@@ -893,7 +937,8 @@ class ConnectivitySession:
                 rows=self.rows,
                 index=self.index,
                 top=self.top,
-                defines=dict(self._effective_defines),
+                defines=dict(self.effective_defines()),
+                sources=self.sources,
                 strict_generate=self.strict_generate,
                 ff_barrier=self.ff_barrier,
                 over_approximate_if=self.over_approximate_if,
@@ -948,7 +993,8 @@ class ConnectivitySession:
                 rows=self.rows,
                 index=self.index,
                 top=self.top,
-                defines=dict(self._effective_defines),
+                defines=dict(self.effective_defines()),
+                sources=self.sources,
                 strict_generate=self.strict_generate,
                 ff_barrier=self.ff_barrier,
                 over_approximate_if=self.over_approximate_if,
@@ -998,7 +1044,7 @@ class ConnectivitySession:
                 rows=self.rows,
                 index=self.index,
                 top=self.top,
-                effective_defines=self._effective_defines,
+                effective_defines=self.effective_defines(),
                 trace=trace,
                 strict_generate=self.strict_generate,
                 ff_barrier=self.ff_barrier,
@@ -1028,7 +1074,7 @@ class ConnectivitySession:
                     rows=self.rows,
                     index=self.index,
                     top=self.top,
-                    effective_defines=self._effective_defines,
+                    effective_defines=self.effective_defines(),
                     trace=trace,
                     strict_generate=self.strict_generate,
                     ff_barrier=self.ff_barrier,
@@ -1172,7 +1218,7 @@ class ConnectivitySession:
             self.index,
             row.module,
             pmap,
-            defines=self._effective_defines,
+            defines=self.effective_defines(),
             over_approximate_if=over_approx,
             ff_barrier=self.ff_barrier,
         )
@@ -1293,13 +1339,16 @@ def run_connectivity_request(
     top_name = request.top or top
     if not top_name and rows:
         top_name = rows[0].full_path.split(".", 1)[0]
-    merged_defines = _effective_defines(index, extra_defines)
-    merged_defines.update(request.defines)
+    from hierwalk.connect_scan import design_parse_sources
+
+    session_defines = dict(extra_defines or {})
+    session_defines.update(request.defines)
     session = ConnectivitySession(
         rows=rows,
         index=index,
         top=top_name,
-        defines=merged_defines,
+        defines=session_defines,
+        sources=design_parse_sources(index),
         strict_generate=request.strict_generate,
         ff_barrier=not request.include_ff,
         over_approximate_if=request.over_approximate_if,

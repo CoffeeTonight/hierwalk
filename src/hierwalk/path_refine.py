@@ -40,14 +40,26 @@ class PathRefineResult:
     note: str = ""
 
 
-_ModuleChunkCacheKey = Tuple[int, str, str]
+_ModuleChunkCacheKey = Tuple[int, str, str, str]
 _module_chunk_cache: Dict[_ModuleChunkCacheKey, Tuple[str, str, str]] = {}
 
 
-def _module_chunk_cache_key(index: DesignIndex, mod_name: str, path: str) -> _ModuleChunkCacheKey:
+def _effective_defines_digest(index: DesignIndex) -> str:
+    from hierwalk.connect_scan import _defines_digest
+
+    return _defines_digest(index.effective_defines())
+
+
+def _module_chunk_cache_key(
+    index: DesignIndex,
+    mod_name: str,
+    path: str,
+    *,
+    defines_digest: str,
+) -> _ModuleChunkCacheKey:
     digest = path_content_digest(Path(path)) if path else None
     token = digest if digest is not None else path
-    return (id(index), mod_name, token)
+    return (id(index), mod_name, token, defines_digest)
 
 
 def clear_module_chunk_cache() -> None:
@@ -59,7 +71,10 @@ def _module_chunk(index: DesignIndex, mod_name: str) -> tuple[str, str, str]:
     if not rec:
         return "", "", ""
     path = rec.file_path or ""
-    cache_key = _module_chunk_cache_key(index, mod_name, path)
+    defines_digest = _effective_defines_digest(index)
+    cache_key = _module_chunk_cache_key(
+        index, mod_name, path, defines_digest=defines_digest
+    )
     cached = _module_chunk_cache.get(cache_key)
     if cached is not None:
         return cached
@@ -69,9 +84,8 @@ def _module_chunk(index: DesignIndex, mod_name: str) -> tuple[str, str, str]:
         out = ("", "", body)
         _module_chunk_cache[cache_key] = out
         return out
-    try:
-        text = Path(path).read_text(encoding="utf-8", errors="ignore")
-    except OSError:
+    text = index._source_text(path)
+    if not text:
         out = (path, "", body)
         _module_chunk_cache[cache_key] = out
         return out

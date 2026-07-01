@@ -546,6 +546,36 @@ def test_ignore_module_skips_pw_db_tier0_resolve(tmp_path: Path, monkeypatch):
     assert "top.v" in tier0_scans
 
 
+def test_tier0_hides_ifdef_gated_module(tmp_path: Path):
+    rtl = tmp_path / "gated.v"
+    rtl.write_text(
+        "`define USE_A\n"
+        "`ifdef USE_A\n"
+        "module active_mod; endmodule\n"
+        "`else\n"
+        "module inactive_mod; endmodule\n"
+        "`endif\n",
+        encoding="utf-8",
+    )
+    index = DesignIndex._assemble(
+        {},
+        path_patterns=[],
+        module_patterns=[],
+        preprocess_include_dirs=[str(tmp_path)],
+        preprocess_defines={},
+    )
+    db = PathWalkModuleDb(
+        [str(rtl.resolve())],
+        index,
+        include_dirs=[str(tmp_path)],
+        defines={},
+        no_cache=True,
+    )
+    names = db._tier0_scan_file(str(rtl.resolve()))
+    assert "active_mod" in names
+    assert "inactive_mod" not in names
+
+
 def test_path_walk_walks_through_dup_module_files(tmp_path: Path):
     fl_path, _right = _write_dup_module_design(tmp_path)
     fl = parse_filelist(str(fl_path), index_cwd=str(tmp_path))

@@ -10,7 +10,7 @@ import time
 from collections import defaultdict
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-from typing import Callable, Dict, List, Literal, Mapping, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Literal, Mapping, Optional, Sequence, Set, Tuple
 
 from hierwalk.generate_fold import (
     body_without_generate_regions,
@@ -136,6 +136,18 @@ def _log_slow_index_file(
     )
 
 
+def _dedupe_paths_preserve_order(paths: Sequence[str]) -> List[str]:
+    seen: set[str] = set()
+    out: List[str] = []
+    for raw in paths:
+        key = str(Path(raw).resolve())
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+    return out
+
+
 def _preprocess_scan_file_task(
     item: Tuple[str, Tuple[str, ...], Tuple[Tuple[str, str], ...], ScanMode, Tuple[str, ...]],
 ) -> Dict[str, ModuleRecord]:
@@ -151,13 +163,10 @@ def _preprocess_scan_file_task(
         preprocess_file_for_index if lazy_processing_enabled() else preprocess_file
     )
     t0 = time.perf_counter()
-    text = preprocess_fn(
-        path,
-        inc,
-        defs,
-        set(),
-        skip_path_patterns=skip_patterns,
-    )
+    prep_kwargs: Dict[str, object] = {"skip_path_patterns": skip_patterns}
+    if preprocess_fn is preprocess_file_for_index:
+        prep_kwargs["apply_ifdef"] = True
+    text = preprocess_fn(path, inc, defs, set(), **prep_kwargs)
     t_prep = time.perf_counter() - t0
     mods = scan_preprocessed(text, fpath)
     t_scan = time.perf_counter() - t0 - t_prep
@@ -240,10 +249,19 @@ def _build_merged_from_sources(
     skip_path_patterns: Sequence[str] = (),
     on_progress: Optional[Callable[[str], None]] = None,
     file_via_filelist: Optional[Mapping[str, str]] = None,
+    define_snapshot_sources: Optional[Sequence[str]] = None,
 ) -> Dict[str, ModuleRecord]:
     """Default: parallel preprocess then in-memory scan (preprocessed map discarded)."""
     merged: Dict[str, ModuleRecord] = {}
-    if low_memory:
+    snapshot_sources = (
+        list(define_snapshot_sources)
+        if define_snapshot_sources is not None
+        else parse_sources
+    )
+    fused_only = define_snapshot_sources is not None and set(parse_sources) != set(
+        snapshot_sources
+    )
+    if low_memory or fused_only:
         if parse_sources:
             _merge_file_scans(
                 merged,
@@ -256,6 +274,7 @@ def _build_merged_from_sources(
                     skip_path_patterns=skip_path_patterns,
                     on_progress=on_progress,
                     file_via_filelist=file_via_filelist,
+                    define_snapshot_sources=snapshot_sources,
                 ),
             )
         return merged
@@ -405,14 +424,35 @@ def _scan_sources_fused(
     skip_path_patterns: Sequence[str] = (),
     on_progress: Optional[Callable[[str], None]] = None,
     file_via_filelist: Optional[Mapping[str, str]] = None,
+    define_snapshot_sources: Optional[Sequence[str]] = None,
 ) -> Dict[str, ModuleRecord]:
     define_items = tuple(sorted(defines.items()))
     inc_dirs = tuple(str(Path(p)) for p in include_dirs)
     skip_tuple = tuple(skip_path_patterns)
+    from hierwalk.preprocess import define_snapshots_for_sources
+
+    snapshot_order = (
+        list(define_snapshot_sources)
+        if define_snapshot_sources is not None
+        else parse_sources
+    )
+    snapshots = define_snapshots_for_sources(
+        snapshot_order,
+        include_dirs=include_dirs,
+        base_defines=defines,
+        skip_path_patterns=skip_tuple,
+    )
     tasks: List[
         Tuple[str, Tuple[str, ...], Tuple[Tuple[str, str], ...], ScanMode, Tuple[str, ...]]
     ] = [
-        (fpath, inc_dirs, define_items, "parse", skip_tuple) for fpath in parse_sources
+        (
+            fpath,
+            inc_dirs,
+            snapshots.get(str(Path(fpath).resolve()), define_items),
+            "parse",
+            skip_tuple,
+        )
+        for fpath in parse_sources
     ]
     merged: Dict[str, ModuleRecord] = {}
     if not tasks:
@@ -610,6 +650,7 @@ class DesignIndex:
         preprocess_include_dirs: Optional[Sequence[str]] = None,
         preprocess_defines: Optional[Mapping[str, str]] = None,
         preprocessed_sources: Optional[Mapping[str, str]] = None,
+        parse_sources: Optional[Sequence[str]] = None,
         low_memory: bool = False,
     ) -> None:
         self.modules: Dict[str, ModuleRecord] = dict(modules)
@@ -630,6 +671,20 @@ class DesignIndex:
         self._preprocessed_sources: Dict[str, str] = {
             str(Path(k)): v for k, v in (preprocessed_sources or {}).items()
         }
+        self._parse_sources: List[str] = [
+            str(Path(p).resolve()) for p in (parse_sources or ())
+        ]
+        if not self._parse_sources:
+            seen: Set[str] = set()
+            for rec in modules.values():
+                fp = (rec.file_path or "").strip()
+                if not fp:
+                    continue
+                rp = str(Path(fp).resolve())
+                if rp in seen:
+                    continue
+                seen.add(rp)
+                self._parse_sources.append(rp)
         self.low_memory: bool = low_memory
         self.index_jobs: int = 1
         self.file_modules: Dict[str, List[str]] = defaultdict(list)
@@ -669,7 +724,23 @@ class DesignIndex:
         for names in self.file_modules.values():
             names.sort()
 
-    def _source_text(self, file_path: str, *, full: bool = False) -> str:
+    def effective_defines(
+        self, extra: Mapping[str, str] | None = None
+    ) -> Dict[str, str]:
+        from hierwalk.connectivity import _effective_defines
+
+        merged = dict(self._preprocess_defines)
+        if extra:
+            merged.update(extra)
+        return _effective_defines(self, merged)
+
+    def _source_text(
+        self,
+        file_path: str,
+        *,
+        full: bool = False,
+        defines: Mapping[str, str] | None = None,
+    ) -> str:
         keys = (file_path, str(Path(file_path)), str(Path(file_path).resolve()))
         for key in keys:
             hit = self._preprocessed_sources.get(key)
@@ -683,7 +754,9 @@ class DesignIndex:
             from hierwalk.preprocess import preprocess_file, preprocess_file_for_index
 
             inc = [Path(p) for p in self._preprocess_include_dirs]
-            defs: Dict[str, str] = dict(self._preprocess_defines)
+            defs: Dict[str, str] = (
+                dict(defines) if defines is not None else self.effective_defines()
+            )
             if full or not (lazy_processing_enabled() and lazy_on_demand_full_preprocess()):
                 return preprocess_file(path, inc, defs, set())
             return preprocess_file_for_index(path, inc, defs, set())
@@ -744,7 +817,16 @@ class DesignIndex:
             self._preprocess_include_dirs = [str(Path(p)) for p in include_dirs]
         if defines is not None:
             self._preprocess_defines = dict(defines)
+        scan_include_dirs = (
+            [str(Path(p)) for p in include_dirs]
+            if include_dirs
+            else list(self._preprocess_include_dirs)
+        )
+        scan_defines = (
+            dict(defines) if defines is not None else dict(self._preprocess_defines)
+        )
         removed = set(removed_files)
+        removed_resolved = {str(Path(p).resolve()) for p in removed_files}
         touched = set(changed_files) | removed
         for name in list(self.modules):
             if self.modules[name].file_path in touched:
@@ -757,22 +839,45 @@ class DesignIndex:
             file_filelist_chain=self.file_filelist_chain,
         )
         if parse_sources:
+            from hierwalk.connect_scan import design_parse_sources
+
+            define_snapshot_sources = [
+                p
+                for p in design_parse_sources(self)
+                if p not in removed_resolved
+            ]
+            for raw in parse_sources:
+                rp = str(Path(raw).resolve())
+                if rp not in define_snapshot_sources:
+                    define_snapshot_sources.append(rp)
             merged = _build_merged_from_sources(
                 parse_sources,
                 [],
-                include_dirs=include_dirs,
-                defines=defines or {},
+                include_dirs=scan_include_dirs,
+                defines=scan_defines,
                 jobs=jobs,
                 low_memory=self.low_memory,
                 skip_path_patterns=self.ignore_path_patterns,
                 on_progress=on_progress,
                 file_via_filelist=self.file_via_filelist,
+                define_snapshot_sources=define_snapshot_sources,
             )
             for name, rec in merged.items():
                 self.modules[name] = rec
         self._rebuild_file_modules()
         self._instance_cache.clear()
         self._rebuild_default_ctx()
+        self._parse_sources = [
+            p for p in self._parse_sources if p not in removed_resolved
+        ]
+        for p in parse_sources:
+            rp = str(Path(p).resolve())
+            if rp not in self._parse_sources:
+                self._parse_sources.append(rp)
+        self._preprocessed_sources.clear()
+        from hierwalk.path_refine import clear_module_chunk_cache
+
+        clear_module_chunk_cache()
 
     @classmethod
     def _assemble(
@@ -794,6 +899,7 @@ class DesignIndex:
         preprocess_include_dirs: Optional[Sequence[str]] = None,
         preprocess_defines: Optional[Mapping[str, str]] = None,
         preprocessed_sources: Optional[Mapping[str, str]] = None,
+        parse_sources: Optional[Sequence[str]] = None,
         low_memory: bool = False,
     ) -> "DesignIndex":
         for name, rec in list(merged.items()):
@@ -847,6 +953,7 @@ class DesignIndex:
             preprocess_include_dirs=preprocess_include_dirs,
             preprocess_defines=preprocess_defines,
             preprocessed_sources=preprocessed_sources,
+            parse_sources=parse_sources,
             low_memory=low_memory,
         )
         index.index_jobs = index_jobs
@@ -881,10 +988,7 @@ class DesignIndex:
             ignore_modules=ignore_modules or (),
             ignore_filelists=ignore_filelists or (),
         )
-        src_list = sorted(
-            {str(Path(s).resolve()) for s in sources},
-            key=str,
-        )
+        src_list = _dedupe_paths_preserve_order(sources)
         parse_sources, ignore_sources = partition_sources(
             src_list,
             path_patterns,
@@ -930,6 +1034,7 @@ class DesignIndex:
             index_jobs=_resolve_jobs(jobs, len(parse_sources) + len(ignore_sources)),
             preprocess_include_dirs=include_dirs,
             preprocess_defines=defines,
+            parse_sources=parse_sources,
             low_memory=low_memory,
         )
 
@@ -959,9 +1064,8 @@ class DesignIndex:
             ignore_modules=ignore_modules or (),
             ignore_filelists=ignore_filelists or (),
         )
-        sources = sorted(preprocessed.keys())
         parse_sources, ignore_sources = partition_sources(
-            sources,
+            _dedupe_paths_preserve_order(preprocessed.keys()),
             path_patterns,
             filelist_patterns=filelist_patterns,
             file_via_filelist=file_via_filelist,
@@ -989,6 +1093,7 @@ class DesignIndex:
             filelist_edges=filelist_edges,
             index_jobs=_resolve_jobs(jobs, len(parse_sources) + len(ignore_sources)),
             preprocessed_sources=preprocessed,
+            parse_sources=parse_sources,
         )
 
     def get_module(self, name: str) -> Optional[ModuleRecord]:
@@ -1076,13 +1181,13 @@ class DesignIndex:
             return list(rec.instances)
 
         raw_params = rec.raw_params
-        compile_defines: Dict[str, str] = dict(self._preprocess_defines)
+        compile_defines: Dict[str, str] = self.effective_defines()
         if rec.needs_generate_fold:
             from hierwalk.preprocess import preprocess_file
 
             path = Path(rec.file_path)
             inc = [Path(p) for p in self._preprocess_include_dirs]
-            fold_defs = dict(self._preprocess_defines)
+            fold_defs = dict(compile_defines)
             text = preprocess_file(path, inc, fold_defs, set())
             compile_defines = fold_defs
             hdr, full_body = _module_header_body(text, mod_name)

@@ -230,9 +230,27 @@ def execute_run(cfg: RunConfig, ap) -> int:
 
     if not cfg.quiet:
         from hierwalk.config_env_audit import emit_verilog_defines_audit
+        from hierwalk.connect_scan import collect_design_defines
+        from hierwalk.index import DesignIndex
 
+        audit_sources = [str(p) for p in fl.source_files]
+        audit_index = DesignIndex._assemble(
+            {},
+            path_patterns=[],
+            module_patterns=[],
+            preprocess_include_dirs=[str(p) for p in fl.include_dirs],
+            preprocess_defines=dict(fl.defines),
+            parse_sources=audit_sources,
+        )
+        audit_extra = dict(cfg.defines_map or {})
+        if connect_request is not None:
+            audit_extra.update(connect_request.defines)
         emit_verilog_defines_audit(
-            effective_defines=fl.defines,
+            effective_defines=collect_design_defines(
+                audit_index,
+                sources=audit_sources,
+                extra_defines=audit_extra,
+            ),
             json_defines=cfg.defines_map,
             connect_defines=(
                 connect_request.defines if connect_request is not None else None
@@ -294,7 +312,7 @@ def execute_run(cfg: RunConfig, ap) -> int:
                 rows=pw_state.rows(),
                 index=index,
                 top=top_name,
-                defines=compile_defines,
+                defines=extra_defines or None,
             )
             record_verification_item(
                 cfg.inst_trace.instance,
@@ -732,15 +750,13 @@ def execute_run(cfg: RunConfig, ap) -> int:
             or cfg.top
             or (tops[0] if tops else "")
         )
-        compile_defines = dict(fl.defines)
-        compile_defines.update(extra_defines)
         _item_t0 = time.perf_counter()
         trace_result = run_inst_trace(
             cfg.inst_trace,
             rows=rows,
             index=index,
             top=top_name,
-            defines=compile_defines,
+            defines=extra_defines or None,
         )
         record_verification_item(
             cfg.inst_trace.instance,

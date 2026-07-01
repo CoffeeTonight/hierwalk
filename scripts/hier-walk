@@ -2,5 +2,5 @@
 # Wrapper when `pip install -e .` did not put hier-walk on PATH (common on corp PCs).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-export PYTHONPATH="${ROOT}/src${PYTHONPATH:+:$PYTHONPATH}"
+eval "$(python3 "$ROOT/bootstrap_path.py" --export --anchor "$0")"
 exec python3 -m hierwalk "$@"

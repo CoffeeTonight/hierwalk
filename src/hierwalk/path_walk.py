@@ -169,9 +169,13 @@ class ModuleFileResolver:
         sources: Sequence[str | Path],
         *,
         skip_path_patterns: Sequence[str] = (),
+        include_dirs: Sequence[str | Path] = (),
+        defines: Mapping[str, str] | None = None,
     ) -> None:
         self._sources = [str(Path(s).resolve()) for s in sources]
         self._skip = tuple(skip_path_patterns)
+        self._include_dirs = [Path(p) for p in include_dirs]
+        self._defines = dict(defines or {})
         self._module_to_file: Dict[str, str] = {}
         self._scanned_files: Set[str] = set()
 
@@ -195,9 +199,22 @@ class ModuleFileResolver:
         if self._skip and source_path_matches(path, self._skip):
             return
         try:
-            text = Path(path).read_text(encoding="utf-8", errors="ignore")
+            raw = Path(path).read_text(encoding="utf-8", errors="ignore")
         except OSError:
             return
+        if self._include_dirs or self._defines:
+            from hierwalk.preprocess import preprocess_file_for_index
+
+            defs = dict(self._defines)
+            text = preprocess_file_for_index(
+                Path(path),
+                self._include_dirs,
+                defs,
+                set(),
+                apply_ifdef=True,
+            )
+        else:
+            text = raw
         for m in _MODULE_DEF_RE.finditer(text):
             self._module_to_file.setdefault(m.group(1), path)
 
@@ -1000,7 +1017,15 @@ class PathWalkState:
         if rec is None:
             return []
         pmap = resolve_param_map(rec.raw_params, parent=row.param_ctx)
-        fold_ctx = dict(self.index._preprocess_defines)
+        from hierwalk.connectivity import _effective_defines
+
+        fold_ctx = dict(
+            _effective_defines(
+                self.index,
+                self.mod_db._defines,
+                sources=self.mod_db._sources,
+            )
+        )
         fold_ctx.update(pmap)
         cache_key = (row.module, _ctx_key(fold_ctx))
         cached = self._expanded_inst_cache.get(cache_key)
@@ -3089,6 +3114,20 @@ def create_path_walk_index(
         jobs=1,
     )
     merged = dict(stubs)
+    all_sources = [str(Path(p).resolve()) for p in fl.source_files]
+    sources, _ignored_sources = partition_sources(
+        all_sources,
+        path_patterns,
+        filelist_patterns=filelist_patterns,
+        file_via_filelist={
+            str(Path(k).resolve()): v
+            for k, v in (fl.source_via_filelist or {}).items()
+        },
+        file_filelist_chain={
+            str(Path(k).resolve()): v
+            for k, v in (fl.source_filelist_chain or {}).items()
+        },
+    )
     index = DesignIndex._assemble(
         merged,
         path_patterns=list(path_patterns),
@@ -3107,20 +3146,7 @@ def create_path_walk_index(
         },
         preprocess_include_dirs=[str(p) for p in fl.include_dirs],
         preprocess_defines=dict(defines),
-    )
-    all_sources = [str(Path(p).resolve()) for p in fl.source_files]
-    sources, _ignored_sources = partition_sources(
-        all_sources,
-        path_patterns,
-        filelist_patterns=filelist_patterns,
-        file_via_filelist={
-            str(Path(k).resolve()): v
-            for k, v in (fl.source_via_filelist or {}).items()
-        },
-        file_filelist_chain={
-            str(Path(k).resolve()): v
-            for k, v in (fl.source_filelist_chain or {}).items()
-        },
+        parse_sources=sources,
     )
     if path_digests is None:
         path_digests = LazyPathDigests.for_paths(all_sources, jobs=jobs)
@@ -3339,6 +3365,7 @@ def run_path_walk_connect(
             index=index,
             top=top_name,
             defines=defines,
+            sources=state.mod_db._sources,
             strict_generate=request.strict_generate,
             ff_barrier=not request.include_ff,
             over_approximate_if=request.over_approximate_if,
