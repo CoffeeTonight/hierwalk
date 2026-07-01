@@ -12,6 +12,7 @@ from hierwalk.connect_scan import (
     _expand_concat_elements,
     _is_braced_concat_rhs,
     _is_compound_port_map_expr,
+    _is_literal_slice_suffix,
     _port_select_suffix,
     _range_to_bit_indices,
     extract_connect_nodes,
@@ -147,6 +148,14 @@ def _parent_port_map_roots(
     roots = parent_idx.expr_roots.get(expr) or frozenset()
     if roots:
         if _is_braced_concat_rhs(expr) and bit_idx is None:
+            return frozenset()
+        if _is_compound_port_map_expr(expr):
+            if suffix and _is_literal_slice_suffix(suffix):
+                return frozenset(
+                    root + suffix
+                    for root in roots
+                    if "[" not in root.split(".", 1)[0]
+                )
             return frozenset()
         return roots
     return frozenset()

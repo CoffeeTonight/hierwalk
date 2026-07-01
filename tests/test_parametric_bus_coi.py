@@ -117,6 +117,34 @@ def test_text_conn_port_or_expr_does_not_bridge_operands(tmp_path: Path):
     assert session.check("top.b", "top.q").connected is True
 
 
+def test_text_conn_port_xor_expr_does_not_bridge_operands(tmp_path: Path):
+    """XOR operands must not reach each other or unrelated nets via parent-up bloom."""
+    v = """
+    module zz_bridge_ping(input logic [1:0][2:0] din, output logic [1:0][2:0] dout);
+    endmodule
+    module top;
+      wire [1:0][2:0] chain_in, shallow_return, q;
+      zz_bridge_ping u (.din(chain_in ^ shallow_return), .dout(q));
+      assign q = shallow_return;
+    endmodule
+    """
+    rtl = tmp_path / "top.v"
+    rtl.write_text(v, encoding="utf-8")
+    index = DesignIndex.build({str(rtl): v})
+    _, rows = elaborate(index, "top")
+    from hierwalk.connectivity import ConnectivitySession
+
+    session = ConnectivitySession(
+        rows=rows,
+        index=index,
+        top="top",
+        resolve_param_dims=False,
+    )
+    assert session.check("top.chain_in[1][2]", "top.q[1][2]").connected is False
+    assert session.check("top.chain_in[1][2]", "top.shallow_return[1][2]").connected is False
+    assert session.check("top.shallow_return[1][2]", "top.q[1][2]").connected is True
+
+
 def test_text_conn_port_xor_expr_keeps_operand_to_port(tmp_path: Path):
     """XOR port maps still connect each operand to the child port (parent-up path)."""
     v = """
