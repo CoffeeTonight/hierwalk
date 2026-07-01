@@ -979,6 +979,28 @@ def collect_hierarchy_evidence_for_check(
     )
 
 
+def _format_hierarchy_evidence_row_line(
+    row: HierarchyEvidenceRow,
+    *,
+    phase: str = "text",
+) -> str:
+    phase_label = str(phase).strip().lower() or "text"
+    return "\t".join(
+        (
+            row.check_id,
+            row.side,
+            row.kind,
+            row.path,
+            row.status,
+            row.module,
+            row.rtl,
+            row.via_filelist,
+            row.filelist_chain,
+            phase_label,
+        )
+    )
+
+
 def format_hierarchy_evidence_tsv(
     evidence: Sequence[HierarchyEvidenceRow],
     *,
@@ -993,22 +1015,7 @@ def format_hierarchy_evidence_tsv(
     )
     lines = ["\t".join(_hierarchy_tsv_headers())]
     for row in rows:
-        lines.append(
-            "\t".join(
-                (
-                    row.check_id,
-                    row.side,
-                    row.kind,
-                    row.path,
-                    row.status,
-                    row.module,
-                    row.rtl,
-                    row.via_filelist,
-                    row.filelist_chain,
-                    phase_label,
-                )
-            )
-        )
+        lines.append(_format_hierarchy_evidence_row_line(row, phase=phase_label))
     return "\n".join(lines) + "\n"
 
 
@@ -1034,12 +1041,25 @@ def write_hierarchy_evidence_tsv(
 
 @dataclass
 class IncrementalHierarchyTsvWriter:
-    """Record hierarchy evidence one row at a time; rewrite TSV after each append."""
+    """Record hierarchy evidence one row at a time; append rows incrementally."""
 
     path: Path
     phase: str = "text"
     _rows: List[HierarchyEvidenceRow] = field(default_factory=list)
     _seen: set[tuple[str, str, str, str, str]] = field(default_factory=set)
+    _header_written: bool = False
+
+    def _append_row_line(self, row: HierarchyEvidenceRow) -> Path:
+        out = self.path.expanduser().resolve()
+        out.parent.mkdir(parents=True, exist_ok=True)
+        line = _format_hierarchy_evidence_row_line(row, phase=self.phase) + "\n"
+        with out.open("a", encoding="utf-8") as fh:
+            if not self._header_written:
+                if not out.is_file() or out.stat().st_size == 0:
+                    fh.write("\t".join(_hierarchy_tsv_headers()) + "\n")
+                self._header_written = True
+            fh.write(line)
+        return out
 
     def append_row(self, row: HierarchyEvidenceRow) -> Path:
         key = (row.check_id, row.side, row.kind, row.path, row.status)
@@ -1047,12 +1067,7 @@ class IncrementalHierarchyTsvWriter:
             return self.path.expanduser().resolve()
         self._seen.add(key)
         self._rows.append(row)
-        return write_hierarchy_evidence_tsv(
-            self.path,
-            self._rows,
-            phase=self.phase,
-            compact=False,
-        )
+        return self._append_row_line(row)
 
     def record_check(
         self,

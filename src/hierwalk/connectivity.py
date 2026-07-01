@@ -720,47 +720,62 @@ def _connect_pair_text_deduped(
     )
     errors = list(err_a) + list(err_b)
     key = _text_coi_dedup_key(ep_a, ep_b, errors)
-
-    def _run() -> ConnectResult:
-        dedup_stats[0] += 1
-        hit = dedup_cache.get(key)
-        if hit is not None:
-            return _fanout_text_coi_result(
-                hit,
-                spec_a=endpoint_a,
-                spec_b=endpoint_b,
-                ep_a=ep_a,
-                ep_b=ep_b,
-                check_id=check_id,
-            )
-        dedup_stats[1] += 1
-        result = _connect_pair(
-            endpoint_a,
-            endpoint_b,
-            rows=rows,
-            index=index,
-            top=top,
-            effective_defines=effective_defines,
-            trace=trace,
-            strict_generate=strict_generate,
-            ff_barrier=ff_barrier,
-            over_approximate_if=over_approximate_if,
-            mod_cache=mod_cache,
-            param_ctx_cache=param_ctx_cache,
-            check_id=check_id,
-            elab_index=elab_index,
-            rows_by_path=rows_by_path,
-            resolve_param_dims=False,
-            endpoint_cache=endpoint_cache,
-            endpoint_cache_lock=endpoint_cache_lock,
-        )
-        dedup_cache[key] = result
-        return result
+    dedup_stats[0] += 1
 
     if dedup_lock is not None:
         with dedup_lock:
-            return _run()
-    return _run()
+            hit = dedup_cache.get(key)
+    else:
+        hit = dedup_cache.get(key)
+    if hit is not None:
+        return _fanout_text_coi_result(
+            hit,
+            spec_a=endpoint_a,
+            spec_b=endpoint_b,
+            ep_a=ep_a,
+            ep_b=ep_b,
+            check_id=check_id,
+        )
+
+    result = _connect_pair(
+        endpoint_a,
+        endpoint_b,
+        rows=rows,
+        index=index,
+        top=top,
+        effective_defines=effective_defines,
+        trace=trace,
+        strict_generate=strict_generate,
+        ff_barrier=ff_barrier,
+        over_approximate_if=over_approximate_if,
+        mod_cache=mod_cache,
+        param_ctx_cache=param_ctx_cache,
+        check_id=check_id,
+        elab_index=elab_index,
+        rows_by_path=rows_by_path,
+        resolve_param_dims=False,
+        endpoint_cache=endpoint_cache,
+        endpoint_cache_lock=endpoint_cache_lock,
+    )
+
+    if dedup_lock is not None:
+        with dedup_lock:
+            existing = dedup_cache.get(key)
+            if existing is not None:
+                return _fanout_text_coi_result(
+                    existing,
+                    spec_a=endpoint_a,
+                    spec_b=endpoint_b,
+                    ep_a=ep_a,
+                    ep_b=ep_b,
+                    check_id=check_id,
+                )
+            dedup_cache[key] = result
+            dedup_stats[1] += 1
+    else:
+        dedup_cache[key] = result
+        dedup_stats[1] += 1
+    return result
 
 
 @dataclass
@@ -800,9 +815,8 @@ class ConnectivitySession:
     _effective_defines_stamp: Tuple[
         Tuple[str, ...],
         Tuple[Tuple[str, str], ...],
-        Tuple[str, ...],
-        Tuple[Tuple[str, str], ...],
-    ] = field(default=((), (), (), ()), repr=False)
+        str,
+    ] = field(default=((), (), ""), repr=False)
 
     def __post_init__(self) -> None:
         if self.elab_index is None and self.rows:
@@ -812,7 +826,7 @@ class ConnectivitySession:
         self._refresh_effective_defines()
 
     def _refresh_effective_defines(self) -> Dict[str, str]:
-        from hierwalk.connect_scan import design_parse_sources
+        from hierwalk.connect_scan import design_parse_sources, sources_content_digest
 
         srcs = (
             list(self.sources)
@@ -820,14 +834,7 @@ class ConnectivitySession:
             else design_parse_sources(self.index)
         )
         defines_stamp = tuple(sorted(self.defines.items()))
-        parse_stamp = tuple(getattr(self.index, "_parse_sources", ()) or ())
-        modules_stamp = tuple(
-            sorted(
-                (name, rec.file_path)
-                for name, rec in self.index.modules.items()
-            )
-        )
-        stamp = (parse_stamp, modules_stamp, tuple(srcs), defines_stamp)
+        stamp = (tuple(srcs), defines_stamp, sources_content_digest(srcs))
         if stamp != self._effective_defines_stamp or not self._effective_defines_cache:
             self._effective_defines_cache = _effective_defines(
                 self.index,

@@ -4110,6 +4110,7 @@ def collect_design_defines(
 
 
 _bind_records_memo: Dict[Tuple[int, str, str], Tuple[BindRecord, ...]] = {}
+_design_bind_index: Dict[int, Tuple[str, Dict[str, Tuple[BindRecord, ...]]]] = {}
 _bind_records_memo_guard = threading.Lock()
 
 
@@ -4124,9 +4125,7 @@ def _design_source_paths_fallback(index: object) -> List[str]:
     return []
 
 
-def file_modules_bind_digest(index: object) -> str:
-    """Digest of RTL files in *index* for bind-memo invalidation."""
-    paths = _design_source_paths_fallback(index)
+def _paths_content_digest(paths: Sequence[str]) -> str:
     if not paths:
         return "0" * 16
     from pathlib import Path
@@ -4150,22 +4149,41 @@ def file_modules_bind_digest(index: object) -> str:
     return hasher.hexdigest()[:16]
 
 
+def sources_content_digest(paths: Sequence[str]) -> str:
+    """Content digest for an explicit RTL source list (define-cache stamp)."""
+    return _paths_content_digest(paths)
+
+
+def file_modules_bind_digest(index: object) -> str:
+    """Digest of RTL files in *index* for bind-memo invalidation."""
+    paths = _design_source_paths_fallback(index)
+    digest = _paths_content_digest(paths)
+    paths_stamp = tuple(paths)
+    cached_stamp = getattr(index, "_bind_digest_paths_stamp", None)
+    cached_digest = getattr(index, "_bind_digest_value", None)
+    if cached_stamp == paths_stamp and cached_digest == digest:
+        return digest
+    try:
+        index._bind_digest_paths_stamp = paths_stamp
+        index._bind_digest_value = digest
+    except (AttributeError, TypeError):
+        pass
+    return digest
+
+
 def clear_bind_records_memo() -> None:
     """Drop per-design bind scan memo (for tests)."""
     with _bind_records_memo_guard:
         _bind_records_memo.clear()
+        _design_bind_index.clear()
 
 
-def collect_bind_records_for_module(index: object, mod_name: str) -> List[BindRecord]:
-    """Scan RTL sources for ``bind`` statements targeting *mod_name*."""
-    memo_key = (id(index), mod_name, file_modules_bind_digest(index))
-    with _bind_records_memo_guard:
-        hit = _bind_records_memo.get(memo_key)
-        if hit is not None:
-            return list(hit)
-    paths = _design_source_paths_fallback(index)
+def _scan_design_bind_index(
+    index: object,
+    paths: Sequence[str],
+) -> Dict[str, Tuple[BindRecord, ...]]:
     if not paths:
-        return []
+        return {}
     from pathlib import Path
 
     from hierwalk.preprocess import include_guard_macro_names, preprocess_file_for_index
@@ -4177,7 +4195,7 @@ def collect_bind_records_for_module(index: object, mod_name: str) -> List[BindRe
         or ()
     )
     running: Dict[str, str] = dict(getattr(index, "_preprocess_defines", {}) or {})
-    out: List[BindRecord] = []
+    by_target: Dict[str, List[BindRecord]] = {}
     for fpath in paths:
         path = Path(fpath)
         if not path.is_file():
@@ -4200,9 +4218,37 @@ def collect_bind_records_for_module(index: object, mod_name: str) -> List[BindRe
             defs.pop(name, None)
         running = defs
         for target, records in scan_bind_records(text).items():
-            if target == mod_name:
-                out.extend(records)
-    frozen = tuple(out)
+            by_target.setdefault(target, []).extend(records)
+    return {name: tuple(recs) for name, recs in by_target.items()}
+
+
+def _design_bind_lookup(index: object) -> Dict[str, Tuple[BindRecord, ...]]:
+    files_digest = file_modules_bind_digest(index)
+    index_id = id(index)
+    with _bind_records_memo_guard:
+        entry = _design_bind_index.get(index_id)
+        if entry is not None and entry[0] == files_digest:
+            return entry[1]
+    paths = _design_source_paths_fallback(index)
+    scanned = _scan_design_bind_index(index, paths)
+    with _bind_records_memo_guard:
+        entry = _design_bind_index.get(index_id)
+        if entry is not None and entry[0] == files_digest:
+            return entry[1]
+        _design_bind_index[index_id] = (files_digest, scanned)
+    return scanned
+
+
+def collect_bind_records_for_module(index: object, mod_name: str) -> List[BindRecord]:
+    """Scan RTL sources for ``bind`` statements targeting *mod_name*."""
+    files_digest = file_modules_bind_digest(index)
+    memo_key = (id(index), mod_name, files_digest)
+    with _bind_records_memo_guard:
+        hit = _bind_records_memo.get(memo_key)
+        if hit is not None:
+            return list(hit)
+    by_target = _design_bind_lookup(index)
+    frozen = by_target.get(mod_name, ())
     with _bind_records_memo_guard:
         _bind_records_memo[memo_key] = frozen
     return list(frozen)

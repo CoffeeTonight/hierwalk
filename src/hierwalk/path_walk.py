@@ -1017,15 +1017,7 @@ class PathWalkState:
         if rec is None:
             return []
         pmap = resolve_param_map(rec.raw_params, parent=row.param_ctx)
-        from hierwalk.connectivity import _effective_defines
-
-        fold_ctx = dict(
-            _effective_defines(
-                self.index,
-                self.mod_db._defines,
-                sources=self.mod_db._sources,
-            )
-        )
+        fold_ctx = dict(self.mod_db._tier1_defines())
         fold_ctx.update(pmap)
         cache_key = (row.module, _ctx_key(fold_ctx))
         cached = self._expanded_inst_cache.get(cache_key)
@@ -3296,7 +3288,7 @@ def run_path_walk_connect(
             index = suite.index
             top_name = suite.top_name
             state = suite.state
-            if do_text:
+            if do_text and not use_connect_pipeline:
                 _extend_path_walk_connect(
                     state,
                     request,
@@ -3418,7 +3410,7 @@ def run_path_walk_connect(
             batch: Optional[ConnectivityBatchResult] = None
             if do_text:
                 state._hierarchy_flush_phase = "text"
-                if not use_connect_pipeline or reuse_suite_session:
+                if not use_connect_pipeline:
                     for chk in request.checks:
                         _flush_hierarchy_tsv_for_check(state, chk)
                 if timing_rec is not None:
@@ -3436,7 +3428,7 @@ def run_path_walk_connect(
                         f"connect_jobs={conn_workers}"
                     )
                     try:
-                        if use_connect_pipeline and not reuse_suite_session:
+                        if use_connect_pipeline:
                             batch = _pipeline_path_walk_text_conn(
                                 state,
                                 request,

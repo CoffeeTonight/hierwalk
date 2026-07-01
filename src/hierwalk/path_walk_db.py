@@ -413,21 +413,18 @@ class PathWalkModuleDb:
         return self._cache_root
 
     def _compute_tier1_defines_stamp(self) -> Tuple[Any, ...]:
+        from hierwalk.connect_scan import sources_content_digest
+
         return (
             tuple(self._sources),
             tuple(sorted(self._defines.items())),
-            tuple(getattr(self._index, "_parse_sources", ()) or ()),
-            tuple(
-                sorted(
-                    (name, rec.file_path)
-                    for name, rec in self._index.modules.items()
-                )
-            ),
+            sources_content_digest(self._sources),
         )
 
     def _invalidate_tier1_defines_cache(self) -> None:
         self._tier1_defines_cache = None
         self._tier1_defines_stamp = ()
+        self._defines_digest = _defines_digest(self._defines)
 
     def _tier1_defines(self) -> Dict[str, str]:
         """Filelist + RTL-collected defines (same basis as connect COI)."""
@@ -439,6 +436,7 @@ class PathWalkModuleDb:
         merged = _effective_defines(self._index, self._defines, sources=self._sources)
         self._tier1_defines_cache = dict(merged)
         self._tier1_defines_stamp = stamp
+        self._defines_digest = _defines_digest(merged)
         return dict(merged)
 
     def _trace(self, message: str) -> None:

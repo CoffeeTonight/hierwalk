@@ -1037,11 +1037,11 @@ def _module_index(
     )
     hit = cache.get(key)
     if hit is not None:
-        return hit.copy()
+        return hit
     with _mod_cache_lock(cache, key):
         hit = cache.get(key)
         if hit is not None:
-            return hit.copy()
+            return hit
         built = _build_module_index_entry(
             cache,
             index,
@@ -1105,7 +1105,7 @@ def _build_module_index_entry(
     disk_hit = _load_module_connect_sidecar(sidecar_key, meta=sidecar_meta)
     if disk_hit is not None:
         cache[key] = disk_hit
-        return disk_hit.copy()
+        return disk_hit
     if not body.strip():
         built = ModuleConnectIndex()
         passthrough = _empty_module_passthrough_ports(
@@ -1151,4 +1151,4 @@ def _build_module_index_entry(
             built = base
     cache[key] = built
     _save_module_connect_sidecar(sidecar_key, built, meta=sidecar_meta)
-    return built.copy()
+    return built

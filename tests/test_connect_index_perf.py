@@ -330,16 +330,13 @@ def test_module_index_disk_sidecar_bind_digest_invalidation(tmp_path: Path):
     assert adj_a == adj_b
 
 
-def test_module_index_session_cache_returns_copy(tmp_path: Path):
+def test_module_index_session_cache_returns_shared_readonly(tmp_path: Path):
     index = _bind_design(tmp_path)
     cache: dict = {}
     idx1 = _module_index(cache, index, "top", {}, defines={})
     idx2 = _module_index(cache, index, "top", {}, defines={})
-    assert idx1 is not idx2
+    assert idx1 is idx2
     assert idx1.rep_adj == idx2.rep_adj
-    idx1.rep_adj.setdefault("_mut_probe", set()).add("x")
-    idx3 = _module_index(cache, index, "top", {}, defines={})
-    assert "_mut_probe" not in idx3.rep_adj
 
 
 def test_bind_memo_invalidates_when_bind_file_changes(tmp_path: Path):

@@ -116,3 +116,104 @@ def test_tier1_defines_cached_until_index_changes(tmp_path: Path):
     ) as spy2:
         db._tier1_defines()
     assert spy2.call_count == 1
+
+
+def test_tier1_defines_survives_module_growth_without_rescan(tmp_path: Path):
+    from hierwalk.connectivity import _effective_defines
+    from hierwalk.index import DesignIndex, ModuleRecord
+    from hierwalk.path_walk_db import PathWalkModuleDb
+
+    rtl = tmp_path / "top.v"
+    rtl.write_text("module top(); endmodule\n", encoding="utf-8")
+    path = str(rtl.resolve())
+    index = DesignIndex.build_from_sources([path], include_dirs=[], defines={})
+    db = PathWalkModuleDb([path], index, defines={})
+    db._tier1_defines()
+
+    index.modules["leaf"] = ModuleRecord(
+        module_name="leaf",
+        file_path=path,
+        body="module leaf(); endmodule",
+        raw_params={},
+        instances=[],
+    )
+    index._rebuild_file_modules()
+
+    with patch(
+        "hierwalk.connectivity._effective_defines",
+        wraps=_effective_defines,
+    ) as spy:
+        db._tier1_defines()
+        db._tier1_defines()
+    assert spy.call_count == 0
+
+
+def test_design_bind_index_scans_once_per_design(tmp_path: Path):
+    from hierwalk.connect_scan import (
+        clear_bind_records_memo,
+        collect_bind_records_for_module,
+    )
+    from hierwalk.index import DesignIndex
+
+    rtl = tmp_path / "d.v"
+    rtl.write_text(
+        """
+        module top(input a, output z);
+          wire n;
+          assign z = n;
+          assign n = a;
+        endmodule
+        module leaf(input in, output out);
+          assign out = in;
+        endmodule
+        bind top bind_leaf u (.in(a), .out(z));
+        """,
+        encoding="utf-8",
+    )
+    index = DesignIndex.build({str(rtl.resolve()): rtl.read_text(encoding="utf-8")})
+    clear_bind_records_memo()
+    with patch(
+        "hierwalk.connect_scan._scan_design_bind_index",
+        wraps=__import__(
+            "hierwalk.connect_scan", fromlist=["_scan_design_bind_index"]
+        )._scan_design_bind_index,
+    ) as spy:
+        collect_bind_records_for_module(index, "top")
+        collect_bind_records_for_module(index, "leaf")
+        collect_bind_records_for_module(index, "top")
+    assert spy.call_count == 1
+
+
+def test_connectivity_defines_cache_ignores_module_growth(tmp_path: Path):
+    from hierwalk.connectivity import ConnectivitySession
+    from hierwalk.elab import elaborate
+    from hierwalk.index import DesignIndex, ModuleRecord
+
+    rtl = tmp_path / "top.v"
+    rtl.write_text("module top(); endmodule\n", encoding="utf-8")
+    path = str(rtl.resolve())
+    index = DesignIndex.build({path: rtl.read_text(encoding="utf-8")})
+    _, rows = elaborate(index, "top")
+    session = ConnectivitySession(
+        rows=rows,
+        index=index,
+        top="top",
+        sources=[path],
+        resolve_param_dims=False,
+    )
+    session.effective_defines()
+
+    index.modules["extra"] = ModuleRecord(
+        module_name="extra",
+        file_path=path,
+        body="module extra(); endmodule",
+        raw_params={},
+        instances=[],
+    )
+    index._rebuild_file_modules()
+
+    with patch(
+        "hierwalk.connect_scan.collect_design_defines",
+    ) as spy:
+        session.effective_defines()
+    assert spy.call_count == 0
