@@ -1209,12 +1209,9 @@ def _apply_suite_conn_defaults(specs: List[Dict[str, Any]]) -> List[Dict[str, An
 
 
 def _fanin_merge_check() -> ConnectivityCheck:
-    """Fan-in via fanout expand: list sources in a, scalar sink in b.
-
-    chain_in is omitted: text-conn cannot prove chain_in->merge_tap through fork;
-    fork_main == chain_in at d4 but only shallow_return + fork_main are listed.
-    """
+    """Fan-in via fanout expand: list sources in a, scalar sink in b."""
     ep_a = (
+        f"{DEEP_D4}.chain_in[1][2]",
         f"{DEEP_D4}.shallow_return[1][2]",
         f"{DEEP_D4}.fork_main[1][2]",
     )
@@ -1420,6 +1417,7 @@ def _suite_conn_checks() -> List[Dict[str, Any]]:
         {
             "id": "zz_fanin_merge",
             "a": [
+                f"{DEEP_D4}.chain_in[1][2]",
                 f"{DEEP_D4}.shallow_return[1][2]",
                 f"{DEEP_D4}.fork_main[1][2]",
             ],

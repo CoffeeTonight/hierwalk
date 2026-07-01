@@ -171,6 +171,46 @@ def test_text_conn_port_xor_expr_keeps_operand_to_port(tmp_path: Path):
     assert session.check("top.shallow_return[1][2]", "top.u.din[1][2]").connected is True
 
 
+def test_text_conn_scalar_port_map_survives_slice_or_assign(tmp_path: Path):
+    """Whole-bus inst port maps must stay reachable when a slice OR assign references the bus."""
+    v = """
+    module zz_y_fork (
+      input  logic [2:0][3:0] din,
+      output logic [2:0][3:0] main_out,
+      output logic [2:0][3:0] decoy_out
+    );
+      assign main_out = din;
+      assign decoy_out = 12'b0;
+    endmodule
+    module top;
+      logic [2:0][3:0] chain_in, shallow_return, fork_main, fork_decoy;
+      logic merge_tap;
+      zz_y_fork u (
+        .din(chain_in),
+        .main_out(fork_main),
+        .decoy_out(fork_decoy)
+      );
+      assign merge_tap = fork_main[1][2] | shallow_return[1][2];
+    endmodule
+    """
+    rtl = tmp_path / "top.v"
+    rtl.write_text(v, encoding="utf-8")
+    index = DesignIndex.build({str(rtl): v})
+    _, rows = elaborate(index, "top")
+    from hierwalk.connectivity import ConnectivitySession
+
+    session = ConnectivitySession(
+        rows=rows,
+        index=index,
+        top="top",
+        resolve_param_dims=False,
+    )
+    assert session.check("top.chain_in[1][2]", "top.fork_main[1][2]").connected is True
+    assert session.check("top.fork_main[1][2]", "top.merge_tap").connected is True
+    assert session.check("top.shallow_return[1][2]", "top.merge_tap").connected is True
+    assert session.check("top.chain_in[1][2]", "top.merge_tap").connected is True
+
+
 def test_text_conn_md_bus_slice_bit_precise(tmp_path: Path):
     """Literal ``[i][j]`` assigns must not bloom-unwire other MD elements in text-conn."""
     v = """

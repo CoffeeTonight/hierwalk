@@ -4509,14 +4509,33 @@ def module_connect_index_stats() -> Tuple[int, int]:
     return _build_index_uncached_calls, _build_index_mem_hits
 
 
+def _scalar_bases_from_inst_ports(
+    inst_ports: Mapping[str, List[Tuple[str, str]]],
+    param_map: Mapping[str, str],
+) -> Set[str]:
+    """Whole-net instance port maps imply a scalar bus hookup (not slice-only)."""
+    cache: Dict[str, FrozenSet[str]] = {}
+    scalars: Set[str] = set()
+    for _inst, ports in inst_ports.items():
+        for _port, expr in ports:
+            if _is_compound_port_map_expr(expr) or _is_braced_concat_rhs(expr):
+                continue
+            for root in _cached_expr_roots(expr, cache, param_map=param_map):
+                base = root.split("[", 1)[0]
+                if root == base:
+                    scalars.add(base)
+    return scalars
+
+
 def _compute_bit_precise_bases(
     assign_adj: Mapping[str, Set[str]],
     *,
     extra: Optional[Set[str]] = None,
+    scalar_bases_extra: Optional[Set[str]] = None,
 ) -> FrozenSet[str]:
     """Bases wired only via literal single-bit slices (skip bloom base promotion)."""
     slice_bases: Set[str] = set()
-    scalar_bases: Set[str] = set()
+    scalar_bases: Set[str] = set(scalar_bases_extra or ())
     for key in assign_adj:
         if "[" not in key:
             scalar_bases.add(key)
@@ -4708,6 +4727,7 @@ def _build_module_connect_index_uncached(
         bit_precise_bases = _compute_bit_precise_bases(
             assign_adj,
             extra=braced_concat_bases or None,
+            scalar_bases_extra=_scalar_bases_from_inst_ports(inst_ports, full_pmap),
         )
         _promote_slice_edges_to_bases(
             assign_adj,

@@ -127,7 +127,7 @@ def test_round17_conn_check_shapes(suite_bundle):
     )
     assert xor_chk["b"] == f"{DEEP_D2}.u_bridge_expr.din[1][2]"
     assert build_expand_meta(tuple(xor_chk["a"]), xor_chk["b"]).map_kind == "fanout"
-    assert f"{DEEP_D4}.chain_in[1][2]" not in fanin["a"]
+    assert f"{DEEP_D4}.chain_in[1][2]" in fanin["a"]
 
 
 def test_round18_rtl_probes_in_generated_files(suite_bundle):

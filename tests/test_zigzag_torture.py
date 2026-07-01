@@ -200,7 +200,7 @@ def test_round18_design_suite_check_parity():
             assert dc.endpoint_b == sc["b"], cid
 
     fanin_a = suite_by_id["zz_fanin_merge"]["a"]
-    assert f"{DEEP_D4}.chain_in[1][2]" not in fanin_a
+    assert f"{DEEP_D4}.chain_in[1][2]" in fanin_a
 
 
 def test_path_walk_index_all_hierarchy_specs(torture_bundle, tmp_path: Path):
