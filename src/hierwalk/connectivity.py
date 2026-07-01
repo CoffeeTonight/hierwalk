@@ -1098,9 +1098,20 @@ class ConnectivitySession:
         dedup_cache: Dict[Tuple[Any, ...], ConnectResult],
         dedup_stats: List[int],
         dedup_lock: Optional[threading.Lock] = None,
+        rows: Optional[Sequence[FlatRow]] = None,
+        elab_index: Optional[ElabIndex] = None,
     ) -> ConnectResult:
         """Single text-phase check with shared coarse COI dedup cache."""
-        lookup = self.rows_by_path
+        active_rows = self.rows if rows is None else rows
+        if elab_index is not None:
+            active_elab = elab_index
+            lookup = elab_index.rows_by_path
+        elif rows is not None:
+            active_elab = ElabIndex.from_rows(active_rows)
+            lookup = active_elab.rows_by_path
+        else:
+            active_elab = self.elab_index
+            lookup = self.rows_by_path
         if chk.expand is not None and chk.expand.map_kind == "waypoint-fanout":
             return self.check_entry(chk, trace=trace)
 
@@ -1116,7 +1127,7 @@ class ConnectivitySession:
             return _connect_pair_text_deduped(
                 pair.endpoint_a,
                 pair.endpoint_b,
-                rows=self.rows,
+                rows=active_rows,
                 index=self.index,
                 top=self.top,
                 effective_defines=self.effective_defines(),
@@ -1127,7 +1138,7 @@ class ConnectivitySession:
                 mod_cache=self.mod_cache,
                 param_ctx_cache=self.param_ctx_cache,
                 check_id=sub_id,
-                elab_index=self.elab_index,
+                elab_index=active_elab,
                 rows_by_path=lookup,
                 dedup_cache=dedup_cache,
                 dedup_stats=dedup_stats,
@@ -1148,7 +1159,7 @@ class ConnectivitySession:
                 _connect_pair_text_deduped(
                     pair.endpoint_a,
                     pair.endpoint_b,
-                    rows=self.rows,
+                    rows=active_rows,
                     index=self.index,
                     top=self.top,
                     effective_defines=self.effective_defines(),
@@ -1159,7 +1170,7 @@ class ConnectivitySession:
                     mod_cache=self.mod_cache,
                     param_ctx_cache=self.param_ctx_cache,
                     check_id=sub_id,
-                    elab_index=self.elab_index,
+                    elab_index=active_elab,
                     rows_by_path=lookup,
                     dedup_cache=dedup_cache,
                     dedup_stats=dedup_stats,

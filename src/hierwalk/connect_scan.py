@@ -570,6 +570,36 @@ def _range_to_bit_indices(
     return list(range(msb, lsb + 1))
 
 
+def _literal_range_to_bit_indices(inner: str) -> Optional[List[int]]:
+    """``[2:0]`` style ranges only — no parameter or expression evaluation."""
+    inner = inner.strip()
+    if ":" not in inner:
+        return None
+    msb_s, lsb_s = inner.split(":", 1)
+    msb_s, lsb_s = msb_s.strip(), lsb_s.strip()
+    if not msb_s.isdigit() or not lsb_s.isdigit():
+        return None
+    msb, lsb = int(msb_s), int(lsb_s)
+    if msb >= lsb:
+        return list(range(lsb, msb + 1))
+    return list(range(msb, lsb + 1))
+
+
+def _collect_literal_decl_bit_indices(body: str) -> Dict[str, List[int]]:
+    """Literal bus widths for text-conn (no parametric dim resolution)."""
+    out: Dict[str, List[int]] = {}
+    pat = re.compile(
+        r"\b(?:input|output|inout)?\s*(?:logic|wire|reg)?\s*\[([^\]]+)\]\s*"
+        r"((?:\\(?:[A-Za-z_]\w*|\S+)|[A-Za-z_]\w*))",
+        re.IGNORECASE,
+    )
+    for m in pat.finditer(body):
+        bits = _literal_range_to_bit_indices(m.group(1))
+        if bits:
+            out.setdefault(m.group(2), bits)
+    return out
+
+
 def _collect_decl_bit_indices(
     body: str,
     param_map: Mapping[str, str],
@@ -2721,6 +2751,7 @@ def _link_braced_concat_assign(
     zero_nets: Optional[Mapping[str, int]] = None,
     over_approximate_if: bool = True,
     iface_insts: Optional[Set[str]] = None,
+    braced_concat_bases: Optional[Set[str]] = None,
 ) -> bool:
     """
     ``lhs = {a,b,…}`` MSB-first: leftmost element maps to the MSB of *lhs* bus.
@@ -2771,6 +2802,8 @@ def _link_braced_concat_assign(
                 line=stmt_line,
                 kind="assign",
             )
+    if braced_concat_bases is not None:
+        braced_concat_bases.add(lhs_base)
     return True
 
 
@@ -2814,6 +2847,7 @@ def _parse_assign_stmt(
     edge_prov: Optional[Dict[Tuple[str, str], ConnectEdgeProv]] = None,
     stmt_line: int = 0,
     iface_insts: Optional[Set[str]] = None,
+    braced_concat_bases: Optional[Set[str]] = None,
 ) -> None:
     pmap = dict(param_map or {})
     if not _stmt_starts_with(stmt, "assign"):
@@ -2856,6 +2890,7 @@ def _parse_assign_stmt(
         zero_nets=zero_nets,
         over_approximate_if=over_approximate_if,
         iface_insts=ifaces,
+        braced_concat_bases=braced_concat_bases,
     ):
         return
     rhs_roots = _effective_assign_rhs_roots(
@@ -3320,6 +3355,7 @@ def scan_assign_adjacency(
     decl_md_suffixes: Optional[Mapping[str, List[str]]] = None,
     edge_prov: Optional[Dict[Tuple[str, str], ConnectEdgeProv]] = None,
     iface_insts: Optional[Set[str]] = None,
+    braced_concat_bases: Optional[Set[str]] = None,
 ) -> Dict[str, Set[str]]:
     consts, pmap = _collect_const_assigns_fixed(body, param_map=param_map)
     zero_nets = {
@@ -3352,6 +3388,7 @@ def scan_assign_adjacency(
             edge_prov=edge_prov,
             stmt_line=stmt_line,
             iface_insts=iface_insts,
+            braced_concat_bases=braced_concat_bases,
         )
         _parse_decl_alias_stmt(stmt, adj, param_map=pmap, zero_nets=zero_nets)
         _parse_primitive_gate_stmt(stmt, adj)
@@ -4350,13 +4387,22 @@ def module_connect_index_stats() -> Tuple[int, int]:
     return _build_index_uncached_calls, _build_index_mem_hits
 
 
-def _promote_slice_edges_to_bases(adj: Dict[str, Set[str]]) -> None:
+def _promote_slice_edges_to_bases(
+    adj: Dict[str, Set[str]],
+    *,
+    skip_bases: Optional[Set[str]] = None,
+) -> None:
     """Text-conn bloom filter: any slice edge also links the participating base nets."""
+    skip = skip_bases or set()
     extra: List[Tuple[str, str]] = []
     for a, peers in adj.items():
         a_base, _ = _split_net_base_suffix(a)
+        if a_base in skip:
+            continue
         for b in peers:
             b_base, _ = _split_net_base_suffix(b)
+            if b_base in skip:
+                continue
             if a_base != a or b_base != b:
                 extra.append((a_base, b))
                 extra.append((a, b_base))
@@ -4472,12 +4518,13 @@ def _build_module_connect_index_uncached(
     full_pmap = resolve_param_map(body_params, parent=pmap, overrides=pmap)
     hier_links: Dict[str, List[Tuple[str, str]]] = {}
     hier_ref_targets: Dict[Tuple[str, str], Set[str]] = {}
+    braced_concat_bases: Set[str] = set()
     if resolve_param_dims:
         decl_widths = _collect_decl_bit_indices(text, full_pmap)
         for name, bits in (port_decl_widths or {}).items():
             decl_widths.setdefault(name, list(bits))
     else:
-        decl_widths = {}
+        decl_widths = _collect_literal_decl_bit_indices(text)
     decl_md_suffixes = _collect_decl_md_suffixes(
         text,
         full_pmap,
@@ -4509,9 +4556,13 @@ def _build_module_connect_index_uncached(
         decl_md_suffixes=decl_md_suffixes,
         edge_prov=raw_edge_prov,
         iface_insts=iface_insts,
+        braced_concat_bases=braced_concat_bases,
     )
     if not resolve_param_dims:
-        _promote_slice_edges_to_bases(assign_adj)
+        _promote_slice_edges_to_bases(
+            assign_adj,
+            skip_bases=braced_concat_bases or None,
+        )
     _expand_hier_bit_links(
         hier_links,
         hier_ref_targets,

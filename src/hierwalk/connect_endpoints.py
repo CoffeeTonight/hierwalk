@@ -876,9 +876,7 @@ def _resolve_module_index_key(
     with _module_index_key_memo_guard:
         entry = _module_index_key_memo.get(partial)
         if entry is not None and entry[0] == body_digest:
-            fresh_binds = collect_bind_records_for_module(index, mod_name)
-            if entry[1] == binds_digest(fresh_binds):
-                return entry[2], fresh_binds
+            return entry[2], list(entry[3])
     binds = collect_bind_records_for_module(index, mod_name)
     bind_digest = binds_digest(binds)
     full_key = make_module_index_cache_key(

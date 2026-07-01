@@ -4,9 +4,15 @@ from __future__ import annotations
 
 from hierwalk.connect_expand import build_expand_meta, expand_check_to_pairs
 from hierwalk.connect_request import parse_connect_request_json
-from hierwalk.connectivity import format_connect_results_tsv, run_connectivity_request
+from hierwalk.connectivity import (
+    ConnectivitySession,
+    format_connect_results_tsv,
+    run_connectivity_request,
+)
 from hierwalk.elab import elaborate
+from hierwalk.filelist import parse_filelist
 from hierwalk.index import DesignIndex
+from hierwalk.path_walk import run_path_walk_connect
 
 
 def _elab(verilog: str, tmp_path, top: str = "top"):
@@ -104,6 +110,87 @@ def test_braced_concat_assign_bit_precise_connectivity(tmp_path):
         (sr.endpoint_a.spec, sr.endpoint_b.spec): sr.connected
         for sr in parent.sub_results
     }
+    assert by_pair[("top.wa", "top.wq")] is False
+    assert by_pair[("top.wc", "top.wq")] is False
+    assert by_pair[("top.wb", "top.wq")] is True
+
+
+def _fan_concat_by_pair(batch):
+    parent = batch.results[0]
+    return {
+        (sr.endpoint_a.spec, sr.endpoint_b.spec): sr.connected
+        for sr in parent.sub_results
+    }
+
+
+def test_braced_concat_text_conn_bit_precise(tmp_path):
+    """Text-conn (resolve_param_dims=False) must keep braced-concat bit precision."""
+    verilog = """
+    module top;
+      wire wa, wb, wc, wq;
+      wire [2:0] ASD;
+      assign ASD = {wa, wb, wc};
+      assign wq = wb;
+    endmodule
+    """
+    index, rows, top = _elab(verilog, tmp_path)
+    req = parse_connect_request_json(
+        {
+            "checks": [
+                {
+                    "id": "fan",
+                    "a": ["top.wa", "top.wc", "top.wb"],
+                    "b": "top.wq",
+                }
+            ]
+        }
+    )
+    session = ConnectivitySession(rows=rows, index=index, top=top)
+    session.resolve_param_dims = False
+    text_batch = session.run_text_request(req)
+    by_pair = _fan_concat_by_pair(text_batch)
+    assert by_pair[("top.wa", "top.wq")] is False
+    assert by_pair[("top.wc", "top.wq")] is False
+    assert by_pair[("top.wb", "top.wq")] is True
+
+
+def test_braced_concat_path_walk_text_bit_precise(tmp_path, monkeypatch):
+    """Path-walk text-conn pipeline must not collapse braced-concat bits."""
+    monkeypatch.setenv("HIERWALK_CONNECT_JOBS", "4")
+    verilog = """
+    module top;
+      wire wa, wb, wc, wq;
+      wire [2:0] ASD;
+      assign ASD = {wa, wb, wc};
+      assign wq = wb;
+    endmodule
+    """
+    rtl = tmp_path / "d.v"
+    rtl.write_text(verilog, encoding="utf-8")
+    fl_path = tmp_path / "fl.f"
+    fl_path.write_text(f"{rtl.resolve()}\n", encoding="utf-8")
+    fl = parse_filelist(str(fl_path))
+    req = parse_connect_request_json(
+        {
+            "checks": [
+                {
+                    "id": "fan",
+                    "a": ["top.wa", "top.wc", "top.wb"],
+                    "b": "top.wq",
+                }
+            ],
+            "top": "top",
+        }
+    )
+    batch, _, _ = run_path_walk_connect(
+        req,
+        fl,
+        top="top",
+        connect_phase="text",
+        connect_jobs=4,
+        no_cache=True,
+    )
+    by_pair = _fan_concat_by_pair(batch)
     assert by_pair[("top.wa", "top.wq")] is False
     assert by_pair[("top.wc", "top.wq")] is False
     assert by_pair[("top.wb", "top.wq")] is True

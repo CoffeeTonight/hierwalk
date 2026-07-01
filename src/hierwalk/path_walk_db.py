@@ -22,7 +22,7 @@ import time
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple, Union
 
 from hierwalk.ignore_path import source_path_matches
 from hierwalk.index import _module_name_ignored
@@ -343,6 +343,8 @@ class PathWalkModuleDb:
         self._skip = tuple(skip_path_patterns)
         self._ignore_modules = tuple(ignore_module_patterns)
         self._no_cache = no_cache
+        self._tier1_defines_cache: Optional[Dict[str, str]] = None
+        self._tier1_defines_stamp: Tuple[Any, ...] = ()
         self._defines_digest = _defines_digest(self._tier1_defines())
         self._on_trace = on_trace
         self._on_progress = on_progress
@@ -410,11 +412,34 @@ class PathWalkModuleDb:
     def cache_root(self) -> Optional[Path]:
         return self._cache_root
 
+    def _compute_tier1_defines_stamp(self) -> Tuple[Any, ...]:
+        return (
+            tuple(self._sources),
+            tuple(sorted(self._defines.items())),
+            tuple(getattr(self._index, "_parse_sources", ()) or ()),
+            tuple(
+                sorted(
+                    (name, rec.file_path)
+                    for name, rec in self._index.modules.items()
+                )
+            ),
+        )
+
+    def _invalidate_tier1_defines_cache(self) -> None:
+        self._tier1_defines_cache = None
+        self._tier1_defines_stamp = ()
+
     def _tier1_defines(self) -> Dict[str, str]:
         """Filelist + RTL-collected defines (same basis as connect COI)."""
+        stamp = self._compute_tier1_defines_stamp()
+        if self._tier1_defines_cache is not None and stamp == self._tier1_defines_stamp:
+            return dict(self._tier1_defines_cache)
         from hierwalk.connectivity import _effective_defines
 
-        return _effective_defines(self._index, self._defines, sources=self._sources)
+        merged = _effective_defines(self._index, self._defines, sources=self._sources)
+        self._tier1_defines_cache = dict(merged)
+        self._tier1_defines_stamp = stamp
+        return dict(merged)
 
     def _trace(self, message: str) -> None:
         if self._on_trace is not None and message:
@@ -2244,6 +2269,7 @@ class PathWalkModuleDb:
             stop_reason=prior.stop_reason if prior else "",
         )
         self._index._rebuild_file_modules()
+        self._invalidate_tier1_defines_cache()
         self._note_regex_modules(key, [module_name])
         self._prefer_file[module_name] = key
         self._register_inst_edges(module_name, {}, instances)
@@ -2286,6 +2312,7 @@ class PathWalkModuleDb:
         affected = set(prior) | set(modules)
         self._index.invalidate_instance_cache_for_modules(sorted(affected))
         self._index._rebuild_default_ctx()
+        self._invalidate_tier1_defines_cache()
         self._invalidate_folded_edges_cache(mod_names=affected, file_path=key)
         self._invalidate_inst_leaf_index(affected)
         for name, rec in modules.items():

@@ -2621,12 +2621,22 @@ def _pipeline_path_walk_text_conn(
                     f"connect-pipeline hierarchy-ready check={chk.check_id or idx} "
                     f"ms={walk_ms:.1f}"
                 )
+                from hierwalk.models import ElabIndex
+
+                walk_rows = tuple(state.rows())
+                walk_lookup = {r.full_path: r for r in walk_rows}
+                walk_elab = ElabIndex.from_rows_by_path(
+                    walk_lookup,
+                    rows=walk_rows,
+                )
                 t0 = time.perf_counter()
 
                 def _run_check(
                     _chk=chk,
                     _idx=idx,
                     _t0=t0,
+                    _rows=walk_rows,
+                    _elab=walk_elab,
                 ):
                     conn_session.resolve_param_dims = False
                     result = conn_session.text_check_entry(
@@ -2635,6 +2645,8 @@ def _pipeline_path_walk_text_conn(
                         dedup_cache=dedup_cache,
                         dedup_stats=dedup_stats,
                         dedup_lock=dedup_lock,
+                        rows=_rows,
+                        elab_index=_elab,
                     )
                     record_connect_check(
                         check_id=_chk.check_id,
