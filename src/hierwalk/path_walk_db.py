@@ -732,6 +732,13 @@ class PathWalkModuleDb:
             self._index._rebuild_file_modules()
         self._prefer_file[top] = key
         self._note_regex_modules(key, [top])
+        modules = self.tier1_scan_file(key)
+        if modules:
+            self._apply_file_modules(key, modules)
+        self._trace(
+            f"pw-db seed top {top} ({Path(key).name}) "
+            f"tier1_mods={len(modules)}"
+        )
 
     def _source_digest(self, path: str) -> Optional[str]:
         return path_content_digest(Path(path), path_digests=self._path_digests)
@@ -771,8 +778,8 @@ class PathWalkModuleDb:
         )
 
     def _include_closure_digest(self, path: str) -> str:
-        from hierwalk.perf import pw_include_closure_max
-        from hierwalk.preprocess import _collect_include_closure
+        from hierwalk.perf import pw_include_closure_direct, pw_include_closure_max
+        from hierwalk.preprocess import _collect_include_closure, _includes_in_file
         from hierwalk.preprocess_log import PP_CLOSURE, emit_pp_log
 
         key = str(Path(path).resolve())
@@ -780,16 +787,23 @@ class PathWalkModuleDb:
         if cached is not None:
             return cached
 
-        max_includes = pw_include_closure_max()
-        cap_note = "" if max_includes is None else f" cap={max_includes}"
+        direct = pw_include_closure_direct()
+        max_includes = None if direct else pw_include_closure_max()
+        cap_note = " direct" if direct else (
+            "" if max_includes is None else f" cap={max_includes}"
+        )
         emit_pp_log(PP_CLOSURE, path, detail=f"start{cap_note}")
         t0 = time.perf_counter()
-        closure, _ = _collect_include_closure(
-            [path],
-            self._include_dirs,
-            skip_path_patterns=self._skip,
-            max_includes=max_includes,
-        )
+        if direct:
+            src = Path(key)
+            closure = _includes_in_file(src, src, self._include_dirs)
+        else:
+            closure, _ = _collect_include_closure(
+                [path],
+                self._include_dirs,
+                skip_path_patterns=self._skip,
+                max_includes=max_includes,
+            )
         hasher = hashlib.sha256()
         for inc in sorted({str(p.resolve()) for p in closure}):
             hasher.update(inc.encode())
@@ -1782,7 +1796,7 @@ class PathWalkModuleDb:
             cache_root=cache_root,
             content_digest=digest,
             skip_patterns=tuple(self._skip),
-            defines=tuple(sorted(self._tier1_defines_cache.items())),
+            defines=tuple(sorted(self._tier1_defines().items())),
         )
 
     def _ingest_tier0_result(self, result: _Tier0ScanResult) -> None:
@@ -2035,7 +2049,7 @@ class PathWalkModuleDb:
             return names
 
         t0 = time.perf_counter()
-        names = tier0_regex_module_names_from_path(key, self._tier1_defines_cache)
+        names = tier0_regex_module_names_from_path(key, self._tier1_defines())
         if not names and not Path(key).is_file():
             self.files_regex_scanned += 1
             self._trace(f"pw-db tier0 read-fail {Path(key).name}")
@@ -2582,15 +2596,14 @@ class PathWalkModuleDb:
         fpath: str,
     ) -> Optional[InstanceEdge]:
         """Targeted parent-body scan for one instance (no full tier1 file walk)."""
-        body = self._parent_module_body_text(fpath, parent_module)
-        if not body:
-            return None
-        rec = self._index.get_module(parent_module)
         try:
             text = self._preprocessed_text_for_file(fpath)
         except OSError:
-            text = ""
-        header, _ = _module_header_body(text, parent_module)
+            return None
+        header, body = _module_header_body(text, parent_module)
+        if not body:
+            return None
+        rec = self._index.get_module(parent_module)
         raw_params = dict(rec.raw_params) if rec and rec.raw_params else parse_param_pairs(header)
         pmap = resolve_param_map(raw_params, parent=parent_ctx)
         return find_hierarchy_instance(body, inst_leaf, param_map=pmap)
@@ -2673,7 +2686,6 @@ class PathWalkModuleDb:
             stop_reason=prior.stop_reason if prior else "",
         )
         self._index._rebuild_file_modules()
-        self._invalidate_tier1_defines_cache()
         self._note_regex_modules(key, [module_name])
         self._prefer_file[module_name] = key
         self._register_inst_edges(module_name, {}, instances)
@@ -2716,7 +2728,6 @@ class PathWalkModuleDb:
         affected = set(prior) | set(modules)
         self._index.invalidate_instance_cache_for_modules(sorted(affected))
         self._index._rebuild_default_ctx()
-        self._invalidate_tier1_defines_cache()
         self._invalidate_folded_edges_cache(mod_names=affected, file_path=key)
         self._invalidate_inst_leaf_index(affected)
         for name, rec in modules.items():

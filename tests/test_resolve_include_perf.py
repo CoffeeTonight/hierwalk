@@ -38,6 +38,7 @@ def test_pw_include_closure_digest_emits_start_before_scan(tmp_path: Path, monke
     from hierwalk.index import DesignIndex
     from hierwalk.path_walk_db import PathWalkModuleDb
 
+    monkeypatch.setenv("HIERWALK_PW_INCLUDE_CLOSURE_FULL", "1")
     monkeypatch.setenv("HIERWALK_PW_INCLUDE_CLOSURE_MAX", "3")
     incs = []
     for i in range(5):

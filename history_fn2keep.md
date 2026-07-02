@@ -138,7 +138,8 @@
 | `HIERWALK_PW_TIER0_GLOBAL_SCAN_MAX` | (perf.py 참고) | recovery global scan 상한 |
 | `HIERWALK_PW_DEFINE_INCLUDES` | `0` | tier1 define accumulate include 추적 (기본 off) |
 | `HIERWALK_PW_DEFINE_ACCUM_MAX` | `128` | tier1 define batch cap (0=무제한) |
-| `HIERWALK_PW_INCLUDE_CLOSURE_MAX` | `200` (warm max 와 동일) | tier1 cache digest 용 include closure 상한 |
+| `HIERWALK_PW_INCLUDE_CLOSURE_MAX` | `200` (full 모드만) | transitive closure 상한 |
+| `HIERWALK_PW_INCLUDE_CLOSURE_FULL` | `0` | `1` 이면 transitive closure (느림) |
 
 ---
 
@@ -172,7 +173,9 @@ pytest tests/test_path_walk_db.py \
 | 2026-07 | recovery scoped-pool hit 시 조기 return | RECOVERY 는 map 에 stub만 있어도 global scan 계속 |
 | 2026-07 | tier1 `_ensure_defines_for_file` 가 0..idx 전역+include closure | chain scope + `follow_includes=False` 기본 |
 | 2026-07 | `top.a` signal-tail → `module_body` → `effective_defines` 13k | `_source_text`/`port_scan` seed defines |
-| 2026-07 | tier1 `_include_closure_digest` 무제한 BFS → `pp-*` 전에 `_resolve_include` 강종 | closure cap + `_resolve_include` cache + `pp-closure start` 로그 |
+| 2026-07 | tier1 `_include_closure_digest` 무제한 BFS → `pp-*` 전에 `_resolve_include` 강종 | direct closure + `_resolve_include` cache + `pp-closure start` 로그 |
+| 2026-07 | `_apply_file_modules` 가 define cache 무효화 → 매 preprocess 0..idx 재누적 | define cache 유지; tier0 는 `_tier1_defines()` 사용 |
+| 2026-07 | `top.a` 첫 hit cold preprocess + tier0 `NoneType` | seed 시 tier1 prewarm; `_tier0_make_job` 안전화 |
 
 ---
 

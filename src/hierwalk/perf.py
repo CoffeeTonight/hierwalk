@@ -181,12 +181,22 @@ def pw_define_accum_max_files() -> int:
     return 128
 
 
+def pw_include_closure_direct() -> bool:
+    """
+    Path-walk tier1 cache keys use direct `` `include `` lines only (default on).
+
+    Full transitive closure is opt-in via ``HIERWALK_PW_INCLUDE_CLOSURE_FULL=1``.
+    """
+    raw = os.environ.get("HIERWALK_PW_INCLUDE_CLOSURE_FULL", "").strip().lower()
+    return raw not in ("1", "true", "yes", "on")
+
+
 def pw_include_closure_max() -> Optional[int]:
     """
     Cap `` `include `` files per path-walk closure digest (0 = no cap).
 
-    Default matches ``HIERWALK_INCLUDE_WARM_MAX`` (200) so tier1 cache keys stay
-    bounded without scanning entire include forests before the first pp log line.
+    Used only when ``pw_include_closure_direct()`` is false.  Default matches
+    ``HIERWALK_INCLUDE_WARM_MAX`` (200).
     """
     raw = os.environ.get("HIERWALK_PW_INCLUDE_CLOSURE_MAX", "").strip()
     if not raw:

@@ -833,7 +833,17 @@ class PathWalkState:
         hit = self._module_body_cache.get(key)
         if hit is not None:
             return hit
-        body = _module_body_for_row(self.index, row)
+        body = ""
+        if row.file:
+            try:
+                from hierwalk.path_walk_db import _module_header_body
+
+                text = self.mod_db._preprocessed_text_for_file(row.file)
+                _header, body = _module_header_body(text, row.module)
+            except OSError:
+                body = ""
+        if not body:
+            body = _module_body_for_row(self.index, row)
         self._module_body_cache[key] = body
         return body
 
