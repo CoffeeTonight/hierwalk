@@ -441,15 +441,17 @@ def port_index_for_design_module(
     source_text = getattr(index, "_source_text", None)
     if callable(source_text) and rec.file_path:
         if defines is not None:
-            module_text = source_text(rec.file_path, full=True, defines=defines)
+            eff: Mapping[str, str] = defines
         else:
-            effective = getattr(index, "effective_defines", None)
-            if callable(effective):
-                module_text = source_text(
-                    rec.file_path, full=True, defines=effective()
-                )
+            from hierwalk.lazy_scope import lazy_processing_enabled
+
+            seed = getattr(index, "seed_preprocess_defines", None)
+            if lazy_processing_enabled() and callable(seed):
+                eff = seed()
             else:
-                module_text = source_text(rec.file_path, full=True)
+                effective = getattr(index, "effective_defines", None)
+                eff = effective() if callable(effective) else {}
+        module_text = source_text(rec.file_path, full=True, defines=eff)
     return port_index_for_module(
         rec.file_path,
         module_name,

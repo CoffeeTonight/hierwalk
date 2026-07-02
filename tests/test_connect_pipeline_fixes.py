@@ -407,6 +407,35 @@ def test_tier0_submit_skips_preprocess(tmp_path: Path):
         db.shutdown_workers(wait=True)
 
 
+def test_module_body_lazy_skips_full_define_scan(tmp_path: Path, monkeypatch):
+    """``top.a`` signal-tail must not walk all RTL for ``collect_design_defines``."""
+    from unittest.mock import patch
+
+    from hierwalk.index import DesignIndex
+
+    monkeypatch.setenv("HIERWALK_LAZY", "1")
+    (tmp_path / "top.v").write_text(
+        "module top(input a, output z); assign z = a; endmodule\n",
+        encoding="utf-8",
+    )
+    sources = [str((tmp_path / "top.v").resolve())]
+    for i in range(200):
+        p = tmp_path / f"noise_{i}.v"
+        p.write_text(f"module noise_{i} (); endmodule\n", encoding="utf-8")
+        sources.append(str(p.resolve()))
+    index = DesignIndex.build_from_sources(
+        sources,
+        include_dirs=[],
+        defines={"SEED": "1"},
+    )
+    with patch(
+        "hierwalk.connect.logical.scan.collect_design_defines",
+    ) as spy:
+        body = index.module_body("top")
+    assert spy.call_count == 0
+    assert "assign z = a" in body
+
+
 def test_pw_define_accum_scoped_to_filelist_chain(tmp_path: Path):
     """Tier1 define accumulate must not walk unrelated filelist branches."""
     from unittest.mock import patch

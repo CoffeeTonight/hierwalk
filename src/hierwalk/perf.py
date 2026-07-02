@@ -168,6 +168,45 @@ def pw_define_follow_includes() -> bool:
     return raw in ("1", "true", "yes", "on")
 
 
+def pw_define_accum_max_files() -> int:
+    """Cap RTL files per path-walk define-accumulate step (0 = no cap)."""
+    raw = os.environ.get("HIERWALK_PW_DEFINE_ACCUM_MAX", "").strip()
+    if raw.lower() in ("0", "off", "false", "no", "disable", "disabled"):
+        return 0
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    return 128
+
+
+def pw_include_closure_max() -> Optional[int]:
+    """
+    Cap `` `include `` files per path-walk closure digest (0 = no cap).
+
+    Default matches ``HIERWALK_INCLUDE_WARM_MAX`` (200) so tier1 cache keys stay
+    bounded without scanning entire include forests before the first pp log line.
+    """
+    raw = os.environ.get("HIERWALK_PW_INCLUDE_CLOSURE_MAX", "").strip()
+    if not raw:
+        warm = os.environ.get("HIERWALK_INCLUDE_WARM_MAX", "").strip()
+        if warm.lower() in ("0", "off", "false", "no", "disable", "disabled"):
+            return None
+        if warm:
+            try:
+                return max(1, int(warm))
+            except ValueError:
+                pass
+        return DEFAULT_INCLUDE_WARM_MAX
+    if raw.lower() in ("0", "off", "false", "no", "disable", "disabled"):
+        return None
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return DEFAULT_INCLUDE_WARM_MAX
+
+
 def text_grep_prewarm_enabled() -> bool:
     """Opt-in eager text-grep index prewarm (``HIERWALK_TEXT_GREP_PREWARM=1``)."""
     raw = os.environ.get("HIERWALK_TEXT_GREP_PREWARM", "").strip().lower()

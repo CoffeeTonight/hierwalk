@@ -726,15 +726,23 @@ class DesignIndex:
         for names in self.file_modules.values():
             names.sort()
 
-    def effective_defines(
-        self, extra: Mapping[str, str] | None = None
+    def seed_preprocess_defines(
+        self,
+        extra: Mapping[str, str] | None = None,
     ) -> Dict[str, str]:
-        from hierwalk.connect.session import _effective_defines
-
+        """Filelist ``+define+`` only — no whole-design RTL define walk."""
         merged = dict(self._preprocess_defines)
         if extra:
             merged.update(extra)
-        return _effective_defines(self, merged)
+        return merged
+
+    def effective_defines(
+        self,
+        extra: Mapping[str, str] | None = None,
+    ) -> Dict[str, str]:
+        from hierwalk.connect.session import _effective_defines
+
+        return _effective_defines(self, self.seed_preprocess_defines(extra))
 
     def _source_text(
         self,
@@ -756,9 +764,16 @@ class DesignIndex:
             from hierwalk.preprocess import preprocess_file, preprocess_file_for_index
 
             inc = [Path(p) for p in self._preprocess_include_dirs]
-            defs: Dict[str, str] = (
-                dict(defines) if defines is not None else self.effective_defines()
-            )
+            if defines is not None:
+                defs = dict(defines)
+            else:
+                from hierwalk.lazy_scope import lazy_processing_enabled
+
+                defs = (
+                    self.seed_preprocess_defines()
+                    if lazy_processing_enabled()
+                    else self.effective_defines()
+                )
             if full or not (lazy_processing_enabled() and lazy_on_demand_full_preprocess()):
                 return preprocess_file(path, inc, defs, set())
             return preprocess_file_for_index(path, inc, defs, set())

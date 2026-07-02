@@ -80,6 +80,23 @@
 
 **`HIERWALK_PW_DEFINE_INCLUDES=1`** — tier1 define accumulate 가 `` `include `` 를 따라감 (기본 **off**). 느리면 켜지 말 것; include 안 define 필요 시 filelist `+define+` 또는 RTL 직접 define 권장.
 
+**`HIERWALK_PW_DEFINE_ACCUM_MAX`** (기본 128) — chain batch 상한; 초과 시 target 파일만.
+
+### KEEP: lazy index body / defines (`index.py`, `port_scan.py`, `path_walk.py`)
+
+| 함수 | lazy 기본 | 금지 |
+|------|-----------|------|
+| `DesignIndex.seed_preprocess_defines` | filelist `+define+` 만 | — |
+| `DesignIndex.effective_defines(full=False)` | seed only | `top.a` 에서 13k `collect_design_defines` |
+| `DesignIndex._source_text` | seed defines | `effective_defines()` 묵시 호출 |
+| `port_index_for_design_module` | seed defines | — |
+| `index.module_body` / `_source_text` | lazy 시 seed defines 로 **단일 파일** preprocess | `effective_defines()` 경유 13k walk |
+| `port_index_for_design_module` | lazy 시 `seed_preprocess_defines` | `effective_defines()` 경유 |
+
+`index.effective_defines()` 는 명시 호출 시 전체 RTL walk 유지 (connect 호환). `top.a` hot path 는 `_source_text`·port_scan 이 seed 사용.
+
+전체 RTL define merge 필요 시 `collect_design_defines(...)` 명시 호출.
+
 ### 인스턴스 resolve (tier1)
 
 | 함수 | 역할 |
@@ -120,6 +137,8 @@
 | `HIERWALK_PW_MODULE_FILE_CAP` | `32` | confident per-module file cap |
 | `HIERWALK_PW_TIER0_GLOBAL_SCAN_MAX` | (perf.py 참고) | recovery global scan 상한 |
 | `HIERWALK_PW_DEFINE_INCLUDES` | `0` | tier1 define accumulate include 추적 (기본 off) |
+| `HIERWALK_PW_DEFINE_ACCUM_MAX` | `128` | tier1 define batch cap (0=무제한) |
+| `HIERWALK_PW_INCLUDE_CLOSURE_MAX` | `200` (warm max 와 동일) | tier1 cache digest 용 include closure 상한 |
 
 ---
 
@@ -152,6 +171,8 @@ pytest tests/test_path_walk_db.py \
 | 2026-07 | text-conn path-walk 시 전체 preprocess prewarm | lazy + `register_preprocessed_source` 1회화 |
 | 2026-07 | recovery scoped-pool hit 시 조기 return | RECOVERY 는 map 에 stub만 있어도 global scan 계속 |
 | 2026-07 | tier1 `_ensure_defines_for_file` 가 0..idx 전역+include closure | chain scope + `follow_includes=False` 기본 |
+| 2026-07 | `top.a` signal-tail → `module_body` → `effective_defines` 13k | `_source_text`/`port_scan` seed defines |
+| 2026-07 | tier1 `_include_closure_digest` 무제한 BFS → `pp-*` 전에 `_resolve_include` 강종 | closure cap + `_resolve_include` cache + `pp-closure start` 로그 |
 
 ---
 

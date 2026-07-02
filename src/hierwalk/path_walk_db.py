@@ -542,7 +542,7 @@ class PathWalkModuleDb:
         if end_idx < self._define_sources_upto:
             return
         from hierwalk.connect.logical.scan.core import accumulate_design_defines_for_paths
-        from hierwalk.perf import pw_define_follow_includes
+        from hierwalk.perf import pw_define_accum_max_files, pw_define_follow_includes
         from hierwalk.preprocess_log import PP_DEFINES, emit_pp_log
 
         chain = self._define_chain_sources(key)
@@ -554,6 +554,18 @@ class PathWalkModuleDb:
         self._define_sources_upto = end_idx + 1
         if not batch:
             return
+        cap = pw_define_accum_max_files()
+        if cap > 0 and len(batch) > cap:
+            self._trace(
+                f"pw-db defines cap {len(batch)}>{cap} module={Path(key).name} "
+                f"-> target-only"
+            )
+            batch = [key]
+        emit_pp_log(
+            PP_DEFINES,
+            key,
+            detail=f"start files={len(batch)} thru={end_idx + 1}/{len(self._sources)}",
+        )
         t0 = time.perf_counter()
         if self._tier1_defines_cache is None:
             self._tier1_defines_cache = dict(self._defines)
@@ -759,6 +771,7 @@ class PathWalkModuleDb:
         )
 
     def _include_closure_digest(self, path: str) -> str:
+        from hierwalk.perf import pw_include_closure_max
         from hierwalk.preprocess import _collect_include_closure
         from hierwalk.preprocess_log import PP_CLOSURE, emit_pp_log
 
@@ -767,11 +780,15 @@ class PathWalkModuleDb:
         if cached is not None:
             return cached
 
+        max_includes = pw_include_closure_max()
+        cap_note = "" if max_includes is None else f" cap={max_includes}"
+        emit_pp_log(PP_CLOSURE, path, detail=f"start{cap_note}")
         t0 = time.perf_counter()
         closure, _ = _collect_include_closure(
             [path],
             self._include_dirs,
             skip_path_patterns=self._skip,
+            max_includes=max_includes,
         )
         hasher = hashlib.sha256()
         for inc in sorted({str(p.resolve()) for p in closure}):

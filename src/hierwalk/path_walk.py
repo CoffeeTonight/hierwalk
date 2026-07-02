@@ -3499,6 +3499,7 @@ def run_path_walk_connect(
             strict_generate=request.strict_generate,
             ff_barrier=not request.include_ff,
             over_approximate_if=request.over_approximate_if,
+            resolve_param_dims=False,
             elab_index=ElabIndex.from_rows_by_path(
                 state.rows_by_path,
                 rows=walk_rows,

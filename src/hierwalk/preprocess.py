@@ -71,6 +71,7 @@ def clear_include_unit_cache() -> None:
     """Drop cached include expansions (tests / long-lived workers)."""
     _INCLUDE_UNIT_CACHE.clear()
     _SOURCE_PREPROCESS_CACHE.clear()
+    clear_resolve_include_cache()
 
 
 def _snapshot_include_cache() -> Dict[_IncludeCacheKey, str]:
@@ -765,26 +766,58 @@ def apply_ifdef_filter(text: str, defines: Mapping[str, str]) -> str:
     return _preprocess_conditional_pass(text, defs, apply_ifdef=True)
 
 
+_RESOLVE_INCLUDE_CACHE: Dict[
+    Tuple[str, str, str, Tuple[str, ...]],
+    Optional[Path],
+] = {}
+
+
+def clear_resolve_include_cache() -> None:
+    """Drop cached include resolution (tests / long runs)."""
+    _RESOLVE_INCLUDE_CACHE.clear()
+
+
+def _resolve_include_hit(path: Path) -> Path:
+    try:
+        return path.resolve()
+    except OSError:
+        return path
+
+
 def _resolve_include(
     name: str,
     bracket: str,
     source_file: Path,
     include_dirs: Sequence[Path],
 ) -> Optional[Path]:
+    dir_key = tuple(str(d) for d in include_dirs)
+    cache_key = (name, bracket, str(source_file.parent), dir_key)
+    cached = _RESOLVE_INCLUDE_CACHE.get(cache_key)
+    if cached is not None or cache_key in _RESOLVE_INCLUDE_CACHE:
+        return cached
+
+    hit: Optional[Path] = None
     if bracket == "<":
         for d in include_dirs:
-            p = (d / name).resolve()
-            if p.is_file():
-                return p
-        return None
-    p = (source_file.parent / name).resolve()
-    if p.is_file():
-        return p
-    for d in include_dirs:
-        p = (d / name).resolve()
-        if p.is_file():
-            return p
-    return None
+            candidate = d / name
+            if candidate.is_file():
+                hit = _resolve_include_hit(candidate)
+                break
+    else:
+        candidate = source_file.parent / name
+        if candidate.is_file():
+            hit = _resolve_include_hit(candidate)
+        else:
+            for d in include_dirs:
+                candidate = d / name
+                if candidate.is_file():
+                    hit = _resolve_include_hit(candidate)
+                    break
+
+    if len(_RESOLVE_INCLUDE_CACHE) > 65536:
+        _RESOLVE_INCLUDE_CACHE.clear()
+    _RESOLVE_INCLUDE_CACHE[cache_key] = hit
+    return hit
 
 
 def _apply_define_ops(
@@ -1448,6 +1481,7 @@ def define_snapshots_for_sources(
     on_progress: Optional[Callable[[str], None]] = None,
     progress_every: int = 100,
     file_via_filelist: Optional[Mapping[str, str]] = None,
+    follow_includes: bool = False,
 ) -> Dict[str, Tuple[Tuple[str, str], ...]]:
     """Per-file starting defines keyed by resolved path (filelist order)."""
     from hierwalk.lazy_scope import lazy_index_ifdef
@@ -1481,6 +1515,7 @@ def define_snapshots_for_sources(
                     set(),
                     skip_path_patterns=skip,
                     apply_ifdef=use_ifdef,
+                    follow_includes=follow_includes,
                 )
                 for name in guards:
                     defs_copy.pop(name, None)
