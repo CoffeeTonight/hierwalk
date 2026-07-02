@@ -267,7 +267,7 @@ def test_tier1_reuses_preprocessed_text_cache(tmp_path: Path):
         wraps=preprocess_file_for_index,
     ) as spy:
         db.tier1_scan_file(path)
-        db._tier0_preprocessed_text(path)
+        db._tier0_scan_file(path)
     assert spy.call_count == 1
 
 

@@ -2186,6 +2186,9 @@ def clear_path_walk_suite_session() -> None:
 
         clear_digest_scope()
         clear_module_chunk_cache()
+    from hierwalk.preprocess_log import clear_pp_log_sinks
+
+    clear_pp_log_sinks()
     _suite_session = None
 
 
@@ -2780,6 +2783,43 @@ def _path_walk_trace_emit(
         on_progress(f"path-walk: {message}")
 
 
+def _mirror_progress_to_log(
+    on_progress: Optional[Callable[[str], None]],
+    trace_log_fh: Optional[TextIO],
+) -> Optional[Callable[[str], None]]:
+    """Duplicate progress lines into the run log file (``trace_log_fh``)."""
+    if trace_log_fh is None:
+        return on_progress
+    from hierwalk.progress import format_hierwalk_log
+
+    base_track = getattr(on_progress, "track", None) if on_progress is not None else None
+
+    def _emit(message: str) -> None:
+        print(format_hierwalk_log(message), file=trace_log_fh, flush=True)
+        if on_progress is not None:
+            on_progress(message)
+
+    if callable(base_track):
+        _emit.track = base_track  # type: ignore[attr-defined]
+    return _emit
+
+
+def _register_path_walk_pp_log_sink(
+    *,
+    trace_log_fh: Optional[TextIO] = None,
+) -> None:
+    """Mirror pp lines to the run log file (stderr is already handled by emit_pp_log)."""
+    if trace_log_fh is None:
+        return
+    from hierwalk.preprocess_log import register_pp_log_sink
+    from hierwalk.progress import format_hierwalk_log
+
+    def _sink(line: str) -> None:
+        print(format_hierwalk_log(line, prefix=""), file=trace_log_fh, flush=True)
+
+    register_pp_log_sink(_sink)
+
+
 def _wire_db_trace_to_state(mod_db: PathWalkModuleDb, state: PathWalkState) -> None:
     mod_db._on_trace = state._emit_walk
 
@@ -3237,6 +3277,9 @@ def create_path_walk_index(
         skip_path_patterns=path_patterns,
         path_digests=path_digests,
     )
+    on_progress = _mirror_progress_to_log(on_progress, trace_log_fh)
+    _register_path_walk_pp_log_sink(trace_log_fh=trace_log_fh)
+
     def _db_trace(msg: str) -> None:
         _path_walk_trace_emit(
             msg,

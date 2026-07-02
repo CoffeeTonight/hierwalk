@@ -133,11 +133,6 @@ class _Tier0ScanJob:
     cache_root: str
     content_digest: str
     skip_patterns: Tuple[str, ...]
-    include_dirs: Tuple[str, ...]
-    defines: Tuple[Tuple[str, str], ...]
-    defines_digest: str = ""
-    include_closure_digest: str = ""
-    source_digest: str = ""
 
 
 @dataclass(frozen=True)
@@ -192,89 +187,8 @@ def _tier0_save_sidecar_worker(
     tmp.replace(sidecar)
 
 
-def _preprocessed_sidecar_path_worker(
-    cache_root: str,
-    path: str,
-    *,
-    defines_digest: str,
-    include_closure_digest: str,
-) -> Path:
-    return (
-        Path(cache_root)
-        / "preprocessed"
-        / f"{_file_cache_token(path)}_{defines_digest}_{include_closure_digest}.pkl"
-    )
-
-
-def _tier0_load_preprocessed_worker(job: _Tier0ScanJob) -> Optional[str]:
-    if not job.cache_root or not job.defines_digest:
-        return None
-    sidecar = _preprocessed_sidecar_path_worker(
-        job.cache_root,
-        job.path,
-        defines_digest=job.defines_digest,
-        include_closure_digest=job.include_closure_digest,
-    )
-    if not sidecar.is_file():
-        return None
-    try:
-        with sidecar.open("rb") as fh:
-            obj = pickle.load(fh)
-    except (OSError, pickle.PickleError, EOFError, ValueError):
-        return None
-    if not isinstance(obj, _FilePreprocessedCacheEntry):
-        return None
-    if job.source_digest and obj.content_digest != job.source_digest:
-        return None
-    if obj.defines_digest != job.defines_digest:
-        return None
-    if obj.include_closure_digest != job.include_closure_digest:
-        return None
-    return obj.text
-
-
-def _tier0_save_preprocessed_worker(job: _Tier0ScanJob, text: str) -> None:
-    if not job.cache_root or not job.source_digest or not job.defines_digest:
-        return
-    sidecar = _preprocessed_sidecar_path_worker(
-        job.cache_root,
-        job.path,
-        defines_digest=job.defines_digest,
-        include_closure_digest=job.include_closure_digest,
-    )
-    entry = _FilePreprocessedCacheEntry(
-        job.source_digest,
-        job.defines_digest,
-        job.include_closure_digest,
-        text,
-    )
-    sidecar.parent.mkdir(parents=True, exist_ok=True)
-    tmp = sidecar.with_suffix(sidecar.suffix + ".tmp")
-    with tmp.open("wb") as fh:
-        pickle.dump(entry, fh, protocol=pickle.HIGHEST_PROTOCOL)
-    tmp.replace(sidecar)
-
-
-def _tier0_preprocessed_text_worker(
-    path: str,
-    include_dirs: Sequence[str],
-    defines: Mapping[str, str],
-    skip_patterns: Sequence[str],
-) -> str:
-    from hierwalk.preprocess import preprocess_file_for_index
-
-    return preprocess_file_for_index(
-        Path(path),
-        [Path(p) for p in include_dirs],
-        dict(defines),
-        set(),
-        skip_path_patterns=skip_patterns,
-        apply_ifdef=True,
-    )
-
-
 def _tier0_worker_scan(job: _Tier0ScanJob) -> _Tier0ScanResult:
-    """Process-pool worker: light-preprocess one RTL file, harvest decl names."""
+    """Process-pool worker: read one RTL file, harvest decl names, persist regex sidecar."""
     key = str(Path(job.path).resolve())
     if job.skip_patterns and source_path_matches(key, job.skip_patterns):
         return _Tier0ScanResult(key, (), False, True, False)
@@ -284,15 +198,7 @@ def _tier0_worker_scan(job: _Tier0ScanJob) -> _Tier0ScanResult:
         return _Tier0ScanResult(key, cached, True, False, False)
 
     try:
-        text = _tier0_load_preprocessed_worker(job)
-        if text is None:
-            text = _tier0_preprocessed_text_worker(
-                key,
-                job.include_dirs,
-                dict(job.defines),
-                job.skip_patterns,
-            )
-            _tier0_save_preprocessed_worker(job, text)
+        text = Path(key).read_text(encoding="utf-8", errors="ignore")
     except OSError:
         return _Tier0ScanResult(key, (), False, False, True)
 
@@ -311,7 +217,7 @@ def _resolve_pw_db_jobs(jobs: int, num_tasks: int) -> int:
 
 
 def tier0_regex_module_names(text: str) -> List[str]:
-    """Fast declaration harvest on preprocessed text (ifdef-gated names excluded)."""
+    """Fast declaration harvest (no preprocess). May include ifdef-gated names."""
     names: List[str] = []
     seen: Set[str] = set()
     for m in _MODULE_DECL_RE.finditer(text):
@@ -692,25 +598,6 @@ class PathWalkModuleDb:
     def _source_digest(self, path: str) -> Optional[str]:
         return path_content_digest(Path(path), path_digests=self._path_digests)
 
-    def _tier0_scan_digest(self, path: str) -> Optional[str]:
-        """Tier-0 sidecar key: raw content + defines + include closure."""
-        content = self._source_digest(path)
-        if content is None:
-            return None
-        defines_digest = _defines_digest(self._tier1_defines())
-        include_digest = self._include_closure_digest(path)
-        hasher = hashlib.sha256()
-        hasher.update(b"tier0-preprocessed\0")
-        hasher.update(content.encode())
-        hasher.update(b"\0")
-        hasher.update(defines_digest.encode())
-        hasher.update(b"\0")
-        hasher.update(include_digest.encode())
-        return hasher.hexdigest()[:32]
-
-    def _tier0_preprocessed_text(self, path: str) -> str:
-        return self._preprocessed_text_for_file(path)
-
     def _regex_sidecar(self, path: str) -> Optional[Path]:
         if self._cache_root is None:
             return None
@@ -785,7 +672,7 @@ class PathWalkModuleDb:
             return None
         if not isinstance(obj, _FileRegexCacheEntry):
             return None
-        live = self._tier0_scan_digest(path)
+        live = self._source_digest(path)
         if live is None or live != obj.content_digest:
             return None
         return obj
@@ -794,7 +681,7 @@ class PathWalkModuleDb:
         sidecar = self._regex_sidecar(path)
         if sidecar is None:
             return
-        digest = self._tier0_scan_digest(path)
+        digest = self._source_digest(path)
         if digest is None:
             return
         entry = _FileRegexCacheEntry(digest, tuple(names))
@@ -1500,19 +1387,13 @@ class PathWalkModuleDb:
 
     def _tier0_make_job(self, path: str) -> _Tier0ScanJob:
         key = str(Path(path).resolve())
-        digest = self._tier0_scan_digest(key) or ""
+        digest = self._source_digest(key) or ""
         cache_root = str(self._cache_root) if self._cache_root is not None else ""
-        defs = self._tier1_defines()
         return _Tier0ScanJob(
             path=key,
             cache_root=cache_root,
             content_digest=digest,
             skip_patterns=tuple(self._skip),
-            include_dirs=tuple(str(p) for p in self._include_dirs),
-            defines=tuple(sorted(defs.items())),
-            defines_digest=_defines_digest(defs),
-            include_closure_digest=self._include_closure_digest(key),
-            source_digest=self._source_digest(key) or "",
         )
 
     def _ingest_tier0_result(self, result: _Tier0ScanResult) -> None:
@@ -1544,7 +1425,7 @@ class PathWalkModuleDb:
             emit_pp_log(PP_T0, key, names=len(names), detail="worker")
         self._note_regex_modules(key, names)
         if not result.from_cache and self._cache_root is not None:
-            digest = self._tier0_scan_digest(key)
+            digest = self._source_digest(key)
             if digest is not None:
                 self._save_regex_sidecar(key, names)
         self.files_regex_scanned += 1
@@ -1773,7 +1654,7 @@ class PathWalkModuleDb:
 
         t0 = time.perf_counter()
         try:
-            text = self._tier0_preprocessed_text(key)
+            text = Path(key).read_text(encoding="utf-8", errors="ignore")
         except OSError:
             self.files_regex_scanned += 1
             self._trace(f"pw-db tier0 read-fail {Path(key).name}")

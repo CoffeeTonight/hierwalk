@@ -6,7 +6,14 @@ import io
 import os
 from contextlib import redirect_stderr
 
-from hierwalk.preprocess_log import PP_DISK, PP_MEM, PP_MISS, emit_pp_log
+from hierwalk.preprocess_log import (
+    PP_DISK,
+    PP_MEM,
+    PP_MISS,
+    clear_pp_log_sinks,
+    emit_pp_log,
+    register_pp_log_sink,
+)
 
 
 def test_emit_pp_log_off(monkeypatch):
@@ -57,3 +64,18 @@ def test_preprocess_log_level_default_brief(monkeypatch):
     from hierwalk.perf import preprocess_log_level
 
     assert preprocess_log_level() == 1
+
+
+def test_emit_pp_log_sink_writes_log_file(monkeypatch):
+    monkeypatch.setenv("HIERWALK_PP_LOG", "1")
+    clear_pp_log_sinks()
+    log = io.StringIO()
+    register_pp_log_sink(log.write)
+    buf = io.StringIO()
+    try:
+        with redirect_stderr(buf):
+            emit_pp_log(PP_MISS, "/rtl/foo.v", ms=100.0)
+    finally:
+        clear_pp_log_sinks()
+    assert "[hier-walk pp] pp-miss foo.v" in buf.getvalue()
+    assert "[hier-walk pp] pp-miss foo.v" in log.getvalue()
