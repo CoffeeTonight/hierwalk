@@ -3302,9 +3302,13 @@ def create_path_walk_index(
 
     via_map, _chain_map = filelist_provenance_maps(fl)
     if on_progress:
-        on_progress(
-            f"path-walk: pw-db init ({len(sources)} sources, lazy defines)"
-        )
+        ignored_n = len(_ignored_sources)
+        init_detail = f"{len(sources)} sources"
+        if ignored_n:
+            init_detail += f", {ignored_n} ignored"
+        if path_patterns:
+            init_detail += f", patterns={list(path_patterns)!r}"
+        on_progress(f"path-walk: pw-db init ({init_detail}, lazy defines)")
     root_fl = ""
     if fl.raw is not None:
         root_fl = str(fl.raw.top_path.resolve())
