@@ -111,11 +111,10 @@ def test_tier1_defines_cached_until_index_changes(tmp_path: Path):
 
     db._invalidate_tier1_defines_cache()
     with patch(
-        "hierwalk.connect.session._effective_defines",
-        wraps=_effective_defines,
+        "hierwalk.connect.logical.scan.core.accumulate_design_defines_for_paths",
     ) as spy2:
         db._tier1_defines()
-    assert spy2.call_count == 1
+    assert spy2.call_count == 0
 
 
 def test_tier1_defines_survives_module_growth_without_rescan(tmp_path: Path):
@@ -406,6 +405,105 @@ def test_tier0_submit_skips_preprocess(tmp_path: Path):
         assert "m3" in db._module_to_files
     finally:
         db.shutdown_workers(wait=True)
+
+
+def test_pw_define_accum_scoped_to_filelist_chain(tmp_path: Path):
+    """Tier1 define accumulate must not walk unrelated filelist branches."""
+    from unittest.mock import patch
+
+    from hierwalk.filelist import parse_filelist
+    from hierwalk.index import DesignIndex
+    from hierwalk.path_walk_db import PathWalkModuleDb
+
+    (tmp_path / "soc.v").write_text(
+        "`define SOC_FLAG 1\nmodule SOC; endmodule\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "gpu.v").write_text(
+        "`define GPU_FLAG 1\nmodule GPU; endmodule\n",
+        encoding="utf-8",
+    )
+    lists = tmp_path / "lists"
+    lists.mkdir()
+    (lists / "soc.f").write_text(
+        str((tmp_path / "soc.v").resolve()) + "\n",
+        encoding="utf-8",
+    )
+    (lists / "gpu.f").write_text(
+        str((tmp_path / "gpu.v").resolve()) + "\n",
+        encoding="utf-8",
+    )
+    root = tmp_path / "root.f"
+    root.write_text(
+        "\n".join(
+            [
+                f"-f {(lists / 'soc.f').resolve()}",
+                f"-f {(lists / 'gpu.f').resolve()}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    fl = parse_filelist(str(root), index_cwd=str(tmp_path))
+    index = DesignIndex._assemble(
+        {},
+        path_patterns=[],
+        module_patterns=[],
+        preprocess_include_dirs=[str(p) for p in fl.include_dirs],
+        preprocess_defines=dict(fl.defines),
+    )
+    via_map = {
+        str(Path(k).resolve()): str(Path(v).resolve())
+        for k, v in (fl.source_via_filelist or {}).items()
+    }
+    db = PathWalkModuleDb(
+        [str(p.resolve()) for p in fl.source_files],
+        index,
+        include_dirs=[str(p) for p in fl.include_dirs],
+        defines=dict(fl.defines),
+        file_via_filelist=via_map,
+        filelist_children={
+            str(Path(k).resolve()): [str(Path(c).resolve()) for c in v]
+            for k, v in (fl.filelist_children or {}).items()
+        },
+        root_filelist=str(root.resolve()),
+        no_cache=True,
+    )
+    soc = str((tmp_path / "soc.v").resolve())
+    with patch(
+        "hierwalk.connect.logical.scan.core.accumulate_design_defines_for_paths",
+    ) as spy:
+        db._ensure_defines_for_file(soc)
+    assert spy.call_count == 1
+    batch = list(spy.call_args[0][1])
+    assert batch == [soc]
+
+
+def test_pw_define_accum_skips_include_by_default(tmp_path: Path, monkeypatch):
+    """Path-walk define accumulate must not recurse `` `include `` unless opted in."""
+    from unittest.mock import patch
+
+    from hierwalk.index import DesignIndex
+    from hierwalk.path_walk_db import PathWalkModuleDb
+
+    monkeypatch.delenv("HIERWALK_PW_DEFINE_INCLUDES", raising=False)
+    inc = tmp_path / "defs.vh"
+    inc.write_text("`define FROM_INC 1\n", encoding="utf-8")
+    rtl = tmp_path / "top.v"
+    rtl.write_text(f'`include "{inc.name}"\nmodule top(); endmodule\n', encoding="utf-8")
+    path = str(rtl.resolve())
+    index = DesignIndex.build_from_sources(
+        [path],
+        include_dirs=[str(tmp_path)],
+        defines={},
+    )
+    db = PathWalkModuleDb([path], index, include_dirs=[str(tmp_path)], defines={})
+    with patch(
+        "hierwalk.preprocess.accumulate_defines_from_file",
+    ) as spy:
+        db._ensure_defines_for_file(path)
+    assert spy.call_count == 1
+    assert spy.call_args.kwargs.get("follow_includes") is False
 
 
 def test_logical_enriches_from_text_grep_seed():

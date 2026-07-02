@@ -162,6 +162,12 @@ def pw_inst_resolve_tier1_max(policy: str) -> int:
     return 12
 
 
+def pw_define_follow_includes() -> bool:
+    """Path-walk tier1 define accumulate follows `` `include `` (default off)."""
+    raw = os.environ.get("HIERWALK_PW_DEFINE_INCLUDES", "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
 def text_grep_prewarm_enabled() -> bool:
     """Opt-in eager text-grep index prewarm (``HIERWALK_TEXT_GREP_PREWARM=1``)."""
     raw = os.environ.get("HIERWALK_TEXT_GREP_PREWARM", "").strip().lower()

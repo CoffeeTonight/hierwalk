@@ -4101,6 +4101,7 @@ def accumulate_design_defines_for_paths(
     out: MutableMapping[str, str],
     *,
     seen: Optional[Set[str]] = None,
+    follow_includes: bool = True,
 ) -> None:
     """Apply filelist-order ``define``/``undef`` from *paths* into *out* (in place)."""
     from pathlib import Path
@@ -4133,6 +4134,7 @@ def accumulate_design_defines_for_paths(
             set(),
             skip_path_patterns=skip,
             apply_ifdef=True,
+            follow_includes=follow_includes,
         )
         for name in guards:
             out.pop(name, None)

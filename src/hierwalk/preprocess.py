@@ -597,6 +597,7 @@ def _preprocess_conditional_pass(
     visiting: Optional[Set[Path]] = None,
     skip_path_patterns: Sequence[str] = (),
     defines_only: bool = False,
+    follow_includes: bool = True,
 ) -> str:
     """
     Single ordered pass: `` `ifdef `` → `` `define ``/`` `undef `` → `` `include `` → macros.
@@ -659,7 +660,7 @@ def _preprocess_conditional_pass(
         if inc is not None:
             if not _stack_active(stack):
                 continue
-            if source_file is None:
+            if source_file is None or not follow_includes:
                 continue
             bracket, name = inc
             inc_path = _resolve_include(name, bracket, line_src, include_dirs)
@@ -731,6 +732,7 @@ def accumulate_defines_from_file(
     *,
     skip_path_patterns: Sequence[str] = (),
     apply_ifdef: bool = True,
+    follow_includes: bool = True,
 ) -> None:
     """
     Apply per-file `` `define `` / `` `undef `` / include / ifdef to *defines* only.
@@ -754,6 +756,7 @@ def accumulate_defines_from_file(
         visiting=visiting_paths,
         skip_path_patterns=skip_path_patterns,
         defines_only=True,
+        follow_includes=follow_includes,
     )
 
 

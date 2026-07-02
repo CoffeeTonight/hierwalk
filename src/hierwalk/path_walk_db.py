@@ -515,6 +515,23 @@ class PathWalkModuleDb:
         self._defines_digest = _defines_digest(merged)
         return dict(merged)
 
+    def _define_chain_sources(self, fpath: str) -> Optional[Set[str]]:
+        """RTL whose filelist-order defines may affect *fpath*.
+
+        Returns ``None`` for flat/metadata-less filelists → use global prefix order.
+        """
+        key = str(Path(fpath).resolve())
+        listing = self._listing_for_rtl(key)
+        if not listing:
+            return None
+        listing_key = str(Path(listing).resolve())
+        ancestors = set(self._ancestor_listings(listing_key))
+        scoped = self._scoped_sources_for_listings(
+            ancestors,
+            include_anchor_rtl=key,
+        )
+        return {str(Path(s).resolve()) for s in scoped}
+
     def _ensure_defines_for_file(self, fpath: str) -> None:
         """Accumulate filelist-order defines through *fpath* (path-walk lazy scope)."""
         key = str(Path(fpath).resolve())
@@ -525,9 +542,16 @@ class PathWalkModuleDb:
         if end_idx < self._define_sources_upto:
             return
         from hierwalk.connect.logical.scan.core import accumulate_design_defines_for_paths
+        from hierwalk.perf import pw_define_follow_includes
         from hierwalk.preprocess_log import PP_DEFINES, emit_pp_log
 
-        batch = self._sources[self._define_sources_upto : end_idx + 1]
+        chain = self._define_chain_sources(key)
+        batch = [
+            self._sources[i]
+            for i in range(self._define_sources_upto, end_idx + 1)
+            if chain is None or self._sources[i] in chain
+        ]
+        self._define_sources_upto = end_idx + 1
         if not batch:
             return
         t0 = time.perf_counter()
@@ -538,15 +562,18 @@ class PathWalkModuleDb:
             batch,
             self._tier1_defines_cache,
             seen=self._define_sources_seen,
+            follow_includes=pw_define_follow_includes(),
         )
-        self._define_sources_upto = end_idx + 1
         self._defines_digest = _defines_digest(self._tier1_defines_cache)
         ms = (time.perf_counter() - t0) * 1000.0
         emit_pp_log(
             PP_DEFINES,
             key,
             ms=ms,
-            detail=f"files={len(batch)} thru={end_idx + 1}/{len(self._sources)}",
+            detail=(
+                f"files={len(batch)} chain={len(chain) if chain is not None else 'all'} "
+                f"thru={end_idx + 1}/{len(self._sources)}"
+            ),
         )
 
     def _publish_preprocessed_to_index(self, path: str, text: str) -> None:
@@ -1448,54 +1475,79 @@ class PathWalkModuleDb:
             ):
                 return
 
-    def _tier0_fallback_decl_scan(
+    def _has_filelist_hierarchy(self) -> bool:
+        """True when progressive shell scan can use real filelist tree metadata."""
+        return bool(self._root_filelist or self._filelist_children)
+
+    def _tier0_regex_queue_scan(
         self,
         module_name: str,
         *,
         scope_anchor: str = "",
         policy: ResolvePolicy = RESOLVE_CONFIDENT,
         inst_leaf: str = "",
+        fl_center: str = "",
     ) -> None:
-        """Flat or metadata-less filelists: rank sources and scan with a cap."""
+        """Proven tier-0 path: ranked global queue, batched parallel, early exit on hit."""
         from hierwalk.perf import pw_module_file_cap, pw_tier0_global_scan_max
 
-        if (
-            module_name in self._module_to_files
-            and policy == RESOLVE_CONFIDENT
-            and not inst_leaf
-        ):
-            return
+        if not self._regex_queue:
+            pending = [
+                s
+                for s in self._sources
+                if s not in self._regex_scanned and s not in self._tier0_inflight
+            ]
+            pending = self._sort_files_by_resolve_rank(
+                pending,
+                scope_anchor=scope_anchor,
+                module_name=module_name,
+                inst_leaf=inst_leaf,
+                fl_center=fl_center,
+            )
+            self._regex_queue = pending
 
+        workers = _resolve_pw_db_jobs(self._jobs, len(self._sources))
+        batch_size = max(workers * 4, _PARALLEL_MIN_TIER0)
         scan_cap = (
             pw_module_file_cap()
             if policy == RESOLVE_CONFIDENT
             else pw_tier0_global_scan_max()
         )
-        pending = [
-            src
-            for src in self._sources
-            if src not in self._regex_scanned and src not in self._tier0_inflight
-        ]
-        if not pending:
-            return
-        pending = self._sort_files_by_resolve_rank(
-            pending,
-            scope_anchor=scope_anchor,
-            module_name=module_name,
-            inst_leaf=inst_leaf,
-        )
-        self._trace(
-            f"pw-db tier0 fallback policy={policy} module={module_name} "
-            f"files={min(len(pending), scan_cap)}"
-        )
-        self._tier0_scan_sources(
-            pending[:scan_cap],
-            target_module=self._tier0_target_module(
-                module_name,
-                policy=policy,
-                inst_leaf=inst_leaf,
-            ),
-        )
+        files_scanned = 0
+        while self._regex_queue and files_scanned < scan_cap:
+            if (
+                policy == RESOLVE_CONFIDENT
+                and module_name in self._module_to_files
+                and not inst_leaf
+            ):
+                break
+            batch: List[str] = []
+            while self._regex_queue and len(batch) < batch_size:
+                nxt = self._regex_queue.pop(0)
+                key = str(Path(nxt).resolve())
+                if key in self._regex_scanned or key in self._tier0_inflight:
+                    continue
+                batch.append(key)
+            if not batch:
+                self._tier0_drain_completed(block=True, timeout=0.1)
+                if not self._tier0_inflight:
+                    break
+                continue
+            self._tier0_scan_sources(
+                batch,
+                target_module=self._tier0_target_module(
+                    module_name,
+                    policy=policy,
+                    inst_leaf=inst_leaf,
+                ),
+            )
+            files_scanned += len(batch)
+            if (
+                module_name in self._module_to_files
+                and policy == RESOLVE_CONFIDENT
+                and not inst_leaf
+            ):
+                break
 
     @staticmethod
     def _normalize_name_hint(name: str) -> str:
@@ -2070,30 +2122,46 @@ class PathWalkModuleDb:
         policy: ResolvePolicy = RESOLVE_CONFIDENT,
         inst_leaf: str = "",
     ) -> List[str]:
-        from hierwalk.perf import pw_module_file_cap, pw_tier0_global_scan_max
+        from hierwalk.perf import pw_tier0_global_scan_max
 
         if self._is_ignored_module(module_name):
             return []
 
-        center_listing = ""
-        child_only = False
         if scope_anchor:
-            center_listing = self._listing_for_rtl(scope_anchor) or ""
+            scoped_pool = self._scoped_pool_for_policy(scope_anchor, policy=policy)
+            if scoped_pool:
+                self._tier0_scan_sources(
+                    scoped_pool,
+                    target_module=self._tier0_target_module(
+                        module_name,
+                        policy=policy,
+                        inst_leaf=inst_leaf,
+                    ),
+                )
+                if module_name in self._module_to_files and policy == RESOLVE_CONFIDENT:
+                    files = list(self._module_to_files.get(module_name, []))
+                    return self._sort_module_files(
+                        module_name,
+                        files,
+                        scope_anchor=scope_anchor,
+                        policy=policy,
+                        scope_pool=scoped_pool,
+                        inst_leaf=inst_leaf,
+                    )
             if policy == RESOLVE_CONFIDENT:
-                child_only = True
-            elif not center_listing:
-                center_listing = self._infer_root_filelist()
-        else:
-            center_listing = self._infer_root_filelist()
+                return []
 
-        if center_listing:
+        center_listing = self._infer_root_filelist()
+        used_progressive = False
+        if center_listing and self._has_filelist_hierarchy():
+            used_progressive = True
             self._progressive_tier0_decl_scan(
                 module_name,
                 center_listing=center_listing,
                 scope_anchor=scope_anchor,
                 policy=policy,
                 inst_leaf=inst_leaf,
-                child_filelists_only=child_only and bool(scope_anchor),
+                child_filelists_only=False,
             )
             if module_name in self._module_to_files and policy == RESOLVE_CONFIDENT:
                 scoped_pool = (
@@ -2112,30 +2180,15 @@ class PathWalkModuleDb:
                 )
             if policy == RESOLVE_CONFIDENT:
                 return []
-        else:
-            self._tier0_fallback_decl_scan(
+
+        if not used_progressive:
+            self._tier0_regex_queue_scan(
                 module_name,
                 scope_anchor=scope_anchor,
                 policy=policy,
                 inst_leaf=inst_leaf,
+                fl_center=center_listing,
             )
-            if module_name in self._module_to_files and policy == RESOLVE_CONFIDENT:
-                scoped_pool = (
-                    self._scoped_pool_for_policy(scope_anchor, policy=policy)
-                    if scope_anchor
-                    else None
-                )
-                files = list(self._module_to_files.get(module_name, []))
-                return self._sort_module_files(
-                    module_name,
-                    files,
-                    scope_anchor=scope_anchor,
-                    policy=policy,
-                    scope_pool=scoped_pool,
-                    inst_leaf=inst_leaf,
-                )
-            if policy == RESOLVE_CONFIDENT:
-                return []
 
         if policy == RESOLVE_RECOVERY:
             remaining = [
