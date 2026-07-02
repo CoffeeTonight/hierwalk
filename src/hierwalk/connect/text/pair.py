@@ -5,7 +5,12 @@ from __future__ import annotations
 import threading
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from hierwalk.connect.shared.endpoints import DeclNetCache, _prune_rows_lca
+from hierwalk.connect.shared.endpoints import (
+    DeclNetCache,
+    ModuleBodyCache,
+    _lca,
+    _prune_rows_lca,
+)
 from hierwalk.connect.shared.modes import _has_port, _is_ancestor, _mode
 from hierwalk.connect.shared.resolve_cache import (
     EndpointResolveCache,
@@ -18,9 +23,11 @@ from hierwalk.connect.text.dedup import (
 from hierwalk.connect.text.index import TextGrepCache
 from hierwalk.connect.text.walk import (
     TextWalkSessionCaches,
+    _resolve_over_approximate_if,
     bidirectional_text_grep,
     forward_text_grep_to_scope,
     text_connect_note,
+    text_walk_verdict_key,
 )
 from hierwalk.connect.logical.walk_log import build_walk_notes
 from hierwalk.index import DesignIndex
@@ -48,6 +55,8 @@ def connect_pair_text(
     endpoint_cache_lock: Optional[threading.Lock] = None,
     walk_caches: Optional[TextWalkSessionCaches] = None,
     decl_net_cache: Optional[DeclNetCache] = None,
+    module_body_cache: Optional[ModuleBodyCache] = None,
+    walk_cache_lock: Optional[threading.Lock] = None,
 ) -> ConnectResult:
     """
     Text-conn: name grep only — not whether a value actually propagates.
@@ -69,6 +78,7 @@ def connect_pair_text(
         cache=endpoint_cache,
         cache_lock=endpoint_cache_lock,
         decl_net_cache=decl_net_cache,
+        module_body_cache=module_body_cache,
     )
     ep_b, err_b = resolve_endpoint_cached(
         endpoint_b,
@@ -79,6 +89,7 @@ def connect_pair_text(
         cache=endpoint_cache,
         cache_lock=endpoint_cache_lock,
         decl_net_cache=decl_net_cache,
+        module_body_cache=module_body_cache,
     )
     errors = list(err_a) + list(err_b)
 
@@ -104,10 +115,103 @@ def connect_pair_text(
 
     pruned = _prune_rows_lca(rows, ep_a.inst_path, ep_b.inst_path)
     mode = _mode(ep_a, ep_b)
+    over_approx = _resolve_over_approximate_if(strict_generate, over_approximate_if)
+    lca = _lca(ep_a.inst_path, ep_b.inst_path)
+    lookup_map = lookup or {}
+
+    def _lookup_walk_verdict(
+        start: Tuple[str, str],
+        goal: Tuple[str, str],
+    ) -> Optional[Tuple[bool, int, object]]:
+        if trace or walk_caches is None:
+            return None
+        vkey = text_walk_verdict_key(
+            mode,
+            lca=lca,
+            start=start,
+            goal=goal,
+            rows_by_path=lookup_map,
+            index=index,
+            top=top,
+            grep_cache=text_grep_cache,
+            walk_caches=walk_caches,
+            defines=effective_defines,
+            over_approximate_if=over_approx,
+            param_ctx_cache=param_ctx_cache,
+        )
+        if vkey is None:
+            return None
+        if walk_cache_lock is not None:
+            with walk_cache_lock:
+                hit = walk_caches.walk_verdict_cache.get(vkey)
+                if hit is None:
+                    return None
+                walk_caches.walk_verdict_hits += 1
+                return hit
+        hit = walk_caches.walk_verdict_cache.get(vkey)
+        if hit is None:
+            return None
+        walk_caches.walk_verdict_hits += 1
+        return hit
+
+    def _store_walk_verdict(
+        start: Tuple[str, str],
+        goal: Tuple[str, str],
+        ok: bool,
+        mod_n: int,
+        diag: object,
+    ) -> None:
+        if trace or walk_caches is None:
+            return
+        vkey = text_walk_verdict_key(
+            mode,
+            lca=lca,
+            start=start,
+            goal=goal,
+            rows_by_path=lookup_map,
+            index=index,
+            top=top,
+            grep_cache=text_grep_cache,
+            walk_caches=walk_caches,
+            defines=effective_defines,
+            over_approximate_if=over_approx,
+            param_ctx_cache=param_ctx_cache,
+        )
+        if vkey is None:
+            return
+        stored = (ok, mod_n, diag)
+        if walk_cache_lock is not None:
+            with walk_cache_lock:
+                walk_caches.walk_verdict_cache.setdefault(vkey, stored)
+        else:
+            walk_caches.walk_verdict_cache.setdefault(vkey, stored)
 
     if mode == "port-port":
         start = (ep_a.inst_path, ep_a.port_name or "")
         goal = (ep_b.inst_path, ep_b.port_name or "")
+        cached = _lookup_walk_verdict(start, goal)
+        if cached is not None:
+            ok, mod_n, diag = cached
+            walk_notes: List[str] = []
+            if not ok and diag is not None:
+                walk_notes = build_walk_notes(
+                    diag,
+                    rows_by_path=lookup_map,
+                    start=start,
+                    goal=goal,
+                )
+            return ConnectResult(
+                ep_a,
+                ep_b,
+                ok,
+                mode,
+                hops=[],
+                errors=errors,
+                note=text_connect_note(ok, mod_n),
+                check_id=check_id,
+                walk_notes=walk_notes,
+                coi_walk=diag,
+            )
         ok, hops, mod_n, diag = bidirectional_text_grep(
             start,
             goal,
@@ -123,11 +227,12 @@ def connect_pair_text(
             elab_index=elab_index,
             walk_caches=walk_caches,
         )
+        _store_walk_verdict(start, goal, ok, mod_n, diag)
         walk_notes: List[str] = []
         if not ok and diag is not None:
             walk_notes = build_walk_notes(
                 diag,
-                rows_by_path=lookup or {},
+                rows_by_path=lookup_map,
                 start=start,
                 goal=goal,
             )
@@ -148,6 +253,30 @@ def connect_pair_text(
         port_ep = ep_a if _has_port(ep_a) else ep_b
         hier_ep = ep_b if _has_port(ep_a) else ep_a
         start = (port_ep.inst_path, port_ep.port_name or "")
+        goal = (hier_ep.inst_path, "")
+        cached = _lookup_walk_verdict(start, goal)
+        if cached is not None:
+            ok, mod_n, diag = cached
+            walk_notes: List[str] = []
+            if not ok and diag is not None:
+                walk_notes = build_walk_notes(
+                    diag,
+                    rows_by_path=lookup_map,
+                    start=start,
+                    goal=goal,
+                )
+            return ConnectResult(
+                ep_a,
+                ep_b,
+                ok,
+                mode,
+                hops=[],
+                errors=errors,
+                note=text_connect_note(ok, mod_n, hier=True),
+                check_id=check_id,
+                walk_notes=walk_notes,
+                coi_walk=diag,
+            )
         ok, hops, mod_n, diag = forward_text_grep_to_scope(
             start,
             hier_ep.inst_path,
@@ -163,13 +292,14 @@ def connect_pair_text(
             elab_index=elab_index,
             walk_caches=walk_caches,
         )
+        _store_walk_verdict(start, goal, ok, mod_n, diag)
         walk_notes: List[str] = []
         if not ok and diag is not None:
             walk_notes = build_walk_notes(
                 diag,
-                rows_by_path=lookup or {},
+                rows_by_path=lookup_map,
                 start=start,
-                goal=(hier_ep.inst_path, ""),
+                goal=goal,
             )
         return ConnectResult(
             ep_a,
@@ -224,6 +354,7 @@ def connect_pair_text_deduped(
     endpoint_cache_lock: Optional[threading.Lock] = None,
     walk_caches: Optional[TextWalkSessionCaches] = None,
     decl_net_cache: Optional[DeclNetCache] = None,
+    module_body_cache: Optional[ModuleBodyCache] = None,
 ) -> ConnectResult:
     lookup = rows_by_path
     ep_a, err_a = resolve_endpoint_cached(
@@ -235,6 +366,7 @@ def connect_pair_text_deduped(
         cache=endpoint_cache,
         cache_lock=endpoint_cache_lock,
         decl_net_cache=decl_net_cache,
+        module_body_cache=module_body_cache,
     )
     ep_b, err_b = resolve_endpoint_cached(
         endpoint_b,
@@ -245,6 +377,7 @@ def connect_pair_text_deduped(
         cache=endpoint_cache,
         cache_lock=endpoint_cache_lock,
         decl_net_cache=decl_net_cache,
+        module_body_cache=module_body_cache,
     )
     errors = list(err_a) + list(err_b)
     key = text_dedup_key(ep_a, ep_b, errors)
@@ -285,6 +418,8 @@ def connect_pair_text_deduped(
         endpoint_cache_lock=endpoint_cache_lock,
         walk_caches=walk_caches,
         decl_net_cache=decl_net_cache,
+        module_body_cache=module_body_cache,
+        walk_cache_lock=dedup_lock,
     )
 
     if dedup_lock is not None:

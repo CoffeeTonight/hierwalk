@@ -67,13 +67,14 @@ def build_text_grep_index(
     defines: Optional[Mapping[str, str]] = None,
     over_approximate_if: bool = True,
 ) -> TextGrepIndex:
-    """Build grep-only adjacency (no FF barrier, no parametric dim resolution)."""
+    """Build grep-only adjacency (no FF scan, no generate-fold, no param dim resolve)."""
     mci = build_module_connect_index(
         body,
         param_map=param_map,
         defines=defines,
         over_approximate_if=over_approximate_if,
-        ff_barrier=False,
+        fold_generate=False,
+        ff_barrier=True,
         resolve_param_dims=False,
     )
     return TextGrepIndex.from_module_index(mci)
@@ -95,7 +96,7 @@ def text_grep_index(
         mod_name,
         param_ctx,
         defines,
-        ff_barrier=False,
+        ff_barrier=True,
         over_approximate_if=over_approximate_if,
         resolve_param_dims=False,
     )

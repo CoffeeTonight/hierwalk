@@ -21,7 +21,14 @@ from hierwalk.connect.pipeline.artifacts import (
     hierarchy_output_basename,
     work_dir_artifact_path,
 )
-from hierwalk.connect.shared.expand import hierarchy_endpoint_specs, parse_list_display_spec
+from hierwalk.connect.shared.expand import (
+    _LOOP_PLACEHOLDER_RE,
+    _expand_bus_endpoint,
+    _expand_looped_endpoint,
+    _parse_loop_map,
+    hierarchy_endpoint_specs,
+    parse_list_display_spec,
+)
 from hierwalk.cache import resolve_run_work_dir, work_base_dir
 from hierwalk.run_request import RUN_CONE_TRACE, RUN_CONN_CHECK, RUN_IO_TRACE, RunConfig
 from hierwalk.suite_conn_policy import CONN_VERDICT_SKIP_IDS
@@ -344,6 +351,41 @@ def _validate_expect_hierarchy(
     return issues
 
 
+def _suite_side_endpoint_specs(
+    item: Mapping[str, Any],
+    side_key: str,
+) -> Tuple[str, ...]:
+    raw = item.get(side_key)
+    if raw is None:
+        return ()
+    if isinstance(raw, (list, tuple)):
+        expected_paths = tuple(str(x).strip() for x in raw)
+    else:
+        text = str(raw).strip()
+        listed = parse_list_display_spec(text)
+        expected_paths = listed if listed is not None else (text,)
+    loop_raw = item.get("loop")
+    loop_map = _parse_loop_map(loop_raw) if loop_raw else {}
+    specs: List[str] = []
+    for ep in expected_paths:
+        if not ep:
+            continue
+        if ep.startswith("{"):
+            continue
+        texts = (
+            _expand_looped_endpoint(ep, loop_map)
+            if _LOOP_PLACEHOLDER_RE.search(ep) and loop_map
+            else (ep,)
+        )
+        for text in texts:
+            bus = _expand_bus_endpoint(text)
+            if bus is not None:
+                specs.extend(bus)
+            else:
+                specs.extend(hierarchy_endpoint_specs(text))
+    return tuple(specs)
+
+
 def _hierarchy_covers_path(
     rows: Sequence[Mapping[str, str]],
     *,
@@ -407,20 +449,7 @@ def _validate_hierarchy_tsv(
                 continue
             cid = str(item.get("id") or item.get("name") or "").strip()
             for side_key, side in (("a", "a"), ("b", "b")):
-                raw = item.get(side_key)
-                if raw is None:
-                    continue
-                if isinstance(raw, (list, tuple)):
-                    expected_paths = tuple(str(x).strip() for x in raw)
-                else:
-                    text = str(raw).strip()
-                    listed = parse_list_display_spec(text)
-                    expected_paths = listed if listed is not None else (text,)
-                for ep in expected_paths:
-                    if not ep or ep.startswith("{"):
-                        continue
-                    specs = hierarchy_endpoint_specs(ep)
-                    for spec_path in specs:
+                for spec_path in _suite_side_endpoint_specs(item, side_key):
                         if _hierarchy_covers_path(
                             rows,
                             path=spec_path,

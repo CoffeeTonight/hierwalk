@@ -15,6 +15,8 @@ from hierwalk.connect.session import (
     format_connect_results_tsv,
 )
 from hierwalk.connect.shared.expand import (
+    _LOOP_PLACEHOLDER_RE,
+    _expand_looped_endpoint,
     aggregate_connect_results,
     expand_check_to_pairs,
     hierarchy_endpoint_specs,
@@ -1066,11 +1068,13 @@ def _endpoint_signal_kind(
     return "wire"
 
 
-def _endpoint_matches_signal_path(ep: ConnectEndpoint, target_path: str) -> bool:
-    """True when *target_path* belongs to *ep* (including ``[a, b]`` display specs)."""
+def _endpoint_match_strength(ep: ConnectEndpoint, target_path: str) -> int:
+    """Return match strength for *target_path* on *ep* (0 = no match, higher = tighter)."""
     text = (target_path or "").strip()
     if not text:
-        return False
+        return 0
+    spec_text = (ep.spec or "").strip()
+    best = 0
     for spec_path in hierarchy_endpoint_specs(
         ep.spec,
         inst_path=ep.inst_path,
@@ -1078,26 +1082,40 @@ def _endpoint_matches_signal_path(ep: ConnectEndpoint, target_path: str) -> bool
         port_found=ep.port_found,
     ):
         if text == spec_path:
-            return True
-        if spec_path.endswith("." + text.rsplit(".", 1)[-1]):
-            return True
-        if text.startswith(spec_path + ".") or spec_path.startswith(text + "."):
-            return True
+            return 100
+        if text.startswith(spec_path + "."):
+            best = max(best, 80)
+        elif spec_path.startswith(text + "."):
+            best = max(best, 60)
     parent = (ep.inst_path or "").strip()
-    if parent and (text == parent or text.startswith(parent + ".")):
-        return True
-    return False
+    if parent and spec_text == parent:
+        if text == parent:
+            best = max(best, 50)
+        elif text.startswith(parent + "."):
+            best = max(best, 40)
+    return best
+
+
+def _endpoint_matches_signal_path(ep: ConnectEndpoint, target_path: str) -> bool:
+    """True when *target_path* belongs to *ep* (including ``[a, b]`` display specs)."""
+    return _endpoint_match_strength(ep, target_path) > 0
 
 
 def _match_signal_tail_to_check(
     target_path: str,
     result: ConnectResult,
-) -> Optional[str]:
-    """Return ``a`` or ``b`` when *target_path* belongs to this check's endpoint."""
+) -> Optional[tuple[str, int]]:
+    """Return ``(side, strength)`` when *target_path* belongs to this check's endpoint."""
+    best_side: Optional[str] = None
+    best_strength = 0
     for side, ep in (("a", result.endpoint_a), ("b", result.endpoint_b)):
-        if _endpoint_matches_signal_path(ep, target_path):
-            return side
-    return None
+        strength = _endpoint_match_strength(ep, target_path)
+        if strength > best_strength:
+            best_strength = strength
+            best_side = side
+    if best_side is None or best_strength <= 0:
+        return None
+    return best_side, best_strength
 
 
 def _provenance_for_evidence_path(
@@ -1138,6 +1156,42 @@ def _hierarchy_tsv_headers() -> List[str]:
     ]
 
 
+def _preferred_hierarchy_paths_for_check(
+    chk: ConnectivityCheck,
+) -> Dict[tuple[str, str], frozenset[str]]:
+    loop_map = dict(chk.expand.loop) if chk.expand and chk.expand.loop else {}
+    out: Dict[tuple[str, str], set[str]] = {}
+    for pair in expand_check_to_pairs(
+        chk.endpoint_a,
+        chk.endpoint_b,
+        check_id=chk.check_id,
+        expand=chk.expand,
+    ):
+        sub_id = (
+            f"{chk.check_id}{pair.sub_id}"
+            if chk.check_id and pair.sub_id
+            else (chk.check_id or pair.sub_id.strip("[]->"))
+        )
+        for side, raw in (("a", pair.endpoint_a), ("b", pair.endpoint_b)):
+            text = str(raw).strip()
+            if not text:
+                continue
+            if _LOOP_PLACEHOLDER_RE.search(text) and loop_map:
+                texts = _expand_looped_endpoint(text, loop_map)
+            else:
+                texts = (text,)
+            paths: set[str] = set()
+            for item in texts:
+                for spec_path in hierarchy_endpoint_specs(item):
+                    if spec_path:
+                        paths.add(spec_path)
+                        for prefix in path_spine_prefixes(spec_path):
+                            paths.add(prefix)
+            if paths:
+                out.setdefault((sub_id, side), set()).update(paths)
+    return {key: frozenset(values) for key, values in out.items()}
+
+
 def _check_id_keys(chk: ConnectivityCheck) -> frozenset[str]:
     pairs = expand_check_to_pairs(
         chk.endpoint_a,
@@ -1175,10 +1229,7 @@ def collect_hierarchy_evidence_for_check(
         check_id=chk.check_id,
         expand=chk.expand,
     )
-    empty_ep = _placeholder_endpoint("", "")
-    parent_id = chk.check_id or ""
     shells: List[ConnectResult] = []
-    seen_b_specs: Set[str] = set()
     resolve_cache: Dict[str, ConnectEndpoint] = {}
 
     def _cached_resolve(spec: str) -> ConnectEndpoint:
@@ -1206,22 +1257,7 @@ def collect_hierarchy_evidence_for_check(
             ConnectResult(
                 check_id=sub_id,
                 endpoint_a=_cached_resolve(pair.endpoint_a),
-                endpoint_b=empty_ep,
-                connected=False,
-                mode="",
-                note="",
-            )
-        )
-        b_spec = str(pair.endpoint_b).strip()
-        if b_spec in seen_b_specs:
-            continue
-        seen_b_specs.add(b_spec)
-        b_check_id = parent_id if len(pairs) > 1 and parent_id else sub_id
-        shells.append(
-            ConnectResult(
-                check_id=b_check_id,
-                endpoint_a=empty_ep,
-                endpoint_b=_cached_resolve(b_spec),
+                endpoint_b=_cached_resolve(pair.endpoint_b),
                 connected=False,
                 mode="",
                 note="",
@@ -1318,6 +1354,23 @@ class IncrementalHierarchyTsvWriter:
             fh.write(line)
         return out
 
+    def _rewrite_file(self) -> Path:
+        out = self.path.expanduser().resolve()
+        out.parent.mkdir(parents=True, exist_ok=True)
+        lines = ["\t".join(_hierarchy_tsv_headers())]
+        for row in self._rows:
+            lines.append(_format_hierarchy_evidence_row_line(row, phase=self.phase))
+        body = "\n".join(lines) + "\n"
+        tmp = out.with_name(f"{out.name}.tmp.{os.getpid()}")
+        try:
+            tmp.write_text(body, encoding="utf-8")
+            tmp.replace(out)
+        finally:
+            if tmp.exists():
+                tmp.unlink(missing_ok=True)
+        self._header_written = True
+        return out
+
     def append_row(self, row: HierarchyEvidenceRow) -> Path:
         key = (row.check_id, row.side, row.kind, row.path, row.status)
         if key in self._seen:
@@ -1337,6 +1390,7 @@ class IncrementalHierarchyTsvWriter:
         top: str = "",
     ) -> Path:
         keys = _check_id_keys(chk)
+        preferred = _preferred_hierarchy_paths_for_check(chk)
         evidence = compact_hierarchy_evidence(
             collect_hierarchy_evidence_for_check(
                 chk,
@@ -1345,7 +1399,8 @@ class IncrementalHierarchyTsvWriter:
                 signal_tails=signal_tails,
                 index=index,
                 top=top,
-            )
+            ),
+            preferred=preferred,
         )
         if keys:
             self._rows = [row for row in self._rows if row.check_id not in keys]
@@ -1355,8 +1410,12 @@ class IncrementalHierarchyTsvWriter:
                 if key[0] not in keys
             }
         for row in evidence:
-            self.append_row(row)
-        return self.path.expanduser().resolve()
+            key = (row.check_id, row.side, row.kind, row.path, row.status)
+            if key in self._seen:
+                continue
+            self._seen.add(key)
+            self._rows.append(row)
+        return self._rewrite_file()
 
     def flush_empty(self) -> Path:
         """Write header-only TSV so downstream tools can watch the file early."""
@@ -1465,35 +1524,53 @@ def collect_hierarchy_evidence(
         kind = normalize_hierarchy_kind(rec.kind)
         status = "hit" if rec.hit else "miss"
         matched_check = ""
-        matched_side = "-"
+        matched_side = ""
+        best_strength = 0
         for result in flat:
-            side = _match_signal_tail_to_check(rec.target_path, result)
-            if side is not None:
+            hit = _match_signal_tail_to_check(rec.target_path, result)
+            if hit is None:
+                continue
+            side, strength = hit
+            if strength > best_strength:
+                best_strength = strength
                 matched_check = result.check_id or ""
                 matched_side = side
-                break
+        if not matched_check or not matched_side:
+            continue
         _add(matched_check, matched_side, kind, rec.target_path, status, rec.module)
 
     return out
 
 
-def _hierarchy_final_row_rank(row: HierarchyEvidenceRow) -> tuple[int, int, str]:
-    """Prefer deepest path; port/wire/reg beat inst at the same depth."""
+def _hierarchy_compact_row_rank(
+    row: HierarchyEvidenceRow,
+    *,
+    preferred: frozenset[str],
+) -> tuple[int, int, int, int, str]:
+    """Prefer suite endpoint paths, then hits, then deepest signal rows."""
     depth = len([part for part in row.path.split(".") if part])
     signal_rank = 0 if row.kind == "inst" else 1
-    return (depth, signal_rank, row.path)
+    if preferred and row.path in preferred:
+        hit_rank = 1 if row.status == "hit" else 0
+        inst_bonus = 1 if row.kind == "inst" else 0
+        return (3, hit_rank, inst_bonus, -depth, row.path)
+    return (0, depth, signal_rank, row.path)
 
 
 def compact_hierarchy_evidence(
     evidence: Sequence[HierarchyEvidenceRow],
+    *,
+    preferred: Optional[Mapping[tuple[str, str], frozenset[str]]] = None,
 ) -> List[HierarchyEvidenceRow]:
     """
     One row per ``(check_id, side)``: the endpoint's final hit/miss only.
 
     Intermediate inst spine prefixes (``top``, ``top.a``, …) are dropped when a
     deeper port/wire/reg path exists for the same side.  When the endpoint is
-    inst-only, the deepest inst path is kept.
+    inst-only, the deepest inst path is kept.  Rows matching suite endpoint
+    paths in *preferred* win over deeper walked paths.
     """
+    pref_map = preferred or {}
     by_group: dict[tuple[str, str], List[HierarchyEvidenceRow]] = {}
     for row in evidence:
         side = row.side if row.side in ("a", "b", "-", "?") else "-"
@@ -1502,8 +1579,36 @@ def compact_hierarchy_evidence(
     compact: List[HierarchyEvidenceRow] = []
     for key in sorted(by_group, key=lambda item: (item[0], item[1])):
         rows = by_group[key]
-        if rows:
-            compact.append(max(rows, key=_hierarchy_final_row_rank))
+        if not rows:
+            continue
+        pref = pref_map.get(key, frozenset())
+        if pref:
+            by_path: dict[str, List[HierarchyEvidenceRow]] = {}
+            for row in rows:
+                if row.path not in pref:
+                    continue
+                by_path.setdefault(row.path, []).append(row)
+            if by_path:
+                for path in sorted(by_path):
+                    compact.append(
+                        max(
+                            by_path[path],
+                            key=lambda row: _hierarchy_compact_row_rank(
+                                row,
+                                preferred=pref,
+                            ),
+                        )
+                    )
+                continue
+        compact.append(
+            max(
+                rows,
+                key=lambda row: _hierarchy_compact_row_rank(
+                    row,
+                    preferred=pref,
+                ),
+            )
+        )
     return compact
 
 

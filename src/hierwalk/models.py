@@ -71,6 +71,20 @@ class ElabIndex:
             depth_by_path=depth_by_path,
         )
 
+    def extend_rows(self, rows_by_path: Mapping[str, "FlatRow"]) -> "ElabIndex":
+        """Append new hierarchy rows without rebuilding existing lookups."""
+        changed = False
+        for path, row in rows_by_path.items():
+            if path in self.rows_by_path:
+                continue
+            self.rows_by_path[path] = row
+            self.rows.append(row)
+            self.depth_by_path[path] = row.depth
+            if row.parent_path:
+                self.child_by_parent_leaf[(row.parent_path, row.inst_leaf)] = path
+            changed = True
+        return self
+
 
 @dataclass
 class FlatRow:

@@ -280,6 +280,7 @@ class PathWalkState:
     _hierarchy_text_writer: object = field(default=None, repr=False)
     _hierarchy_logical_writer: object = field(default=None, repr=False)
     _hierarchy_flush_phase: str = field(default="", repr=False)
+    _connect_elab_index: object = field(default=None, repr=False)
 
     def _trace_streams(self) -> List[TextIO]:
         out: List[TextIO] = []
@@ -2520,6 +2521,7 @@ def _walk_hierarchy_for_check(
     key = (a, b)
     if seen_lca is not None:
         if key in seen_lca:
+            _flush_hierarchy_tsv_for_check(state, chk)
             return
         seen_lca.add(key)
     if state._is_walk_blocked(a) and state._is_walk_blocked(b):
@@ -2628,12 +2630,18 @@ def _pipeline_path_walk_text_conn(
                 )
                 from hierwalk.models import ElabIndex
 
-                walk_rows = tuple(state.rows())
-                walk_lookup = {r.full_path: r for r in walk_rows}
-                walk_elab = ElabIndex.from_rows_by_path(
-                    walk_lookup,
-                    rows=walk_rows,
-                )
+                walk_lookup = state.rows_by_path
+                walk_elab = state._connect_elab_index
+                if walk_elab is None:
+                    walk_rows = tuple(state.rows())
+                    walk_elab = ElabIndex.from_rows_by_path(
+                        walk_lookup,
+                        rows=list(walk_rows),
+                    )
+                    state._connect_elab_index = walk_elab
+                else:
+                    walk_elab.extend_rows(walk_lookup)
+                    walk_rows = tuple(walk_elab.rows)
                 t0 = time.perf_counter()
 
                 def _run_check(
@@ -2694,7 +2702,10 @@ def _pipeline_path_walk_text_conn(
             f"expand={wc.expand_calls} "
             f"equiv_scans={wc.equiv_linear_scans} "
             f"grep_miss={wc.grep_cache_miss} "
-            f"rep_adj_capped={wc.rep_adj_capped}"
+            f"rep_adj_capped={wc.rep_adj_capped} "
+            f"verdict_hits={wc.walk_verdict_hits} "
+            f"goal_shortcut={wc.goal_rep_shortcuts} "
+            f"scope_shortcut={wc.scope_reach_shortcuts}"
         )
     state._emit_walk(
         f"connect-pipeline done checks={len(results)} workers={workers}"
@@ -3442,6 +3453,7 @@ def run_path_walk_connect(
                 rows=walk_rows,
             ),
             decl_net_cache=state._decl_net_cache,
+            module_body_cache=state._module_body_cache,
         )
         from hierwalk.connect.pipeline.artifacts import (
             apply_connect_logical_phase,

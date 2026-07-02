@@ -232,10 +232,17 @@ class TextWalkSessionCaches:
         List[Tuple[str, str, str, bool, Optional[str]]],
     ] = field(default_factory=dict)
     scope_mod_idx: Dict[str, TextGrepIndex] = field(default_factory=dict)
+    walk_verdict_cache: Dict[
+        Tuple[str, ...],
+        Tuple[bool, int, Optional[CoiWalkDiagnostic]],
+    ] = field(default_factory=dict)
     expand_calls: int = 0
     equiv_linear_scans: int = 0
     grep_cache_miss: int = 0
     rep_adj_capped: int = 0
+    walk_verdict_hits: int = 0
+    goal_rep_shortcuts: int = 0
+    scope_reach_shortcuts: int = 0
 
 
 @dataclass
@@ -975,6 +982,104 @@ def _expand_state(
     return out
 
 
+def _slice_suffix(net: str) -> Optional[str]:
+    """Bracket suffix on the net stem (``bus[0]`` → ``[0]``); ``None`` for base nets."""
+    stem = net.split(".", 1)[0]
+    if "[" not in stem:
+        return None
+    return stem[stem.index("[") :]
+
+
+def _net_rep_at_scope(
+    scope: str,
+    net: str,
+    *,
+    rows_by_path: Mapping[str, FlatRow],
+    index: DesignIndex,
+    top: str,
+    grep_cache: TextGrepCache,
+    walk_caches: TextWalkSessionCaches,
+    defines: Mapping[str, str],
+    over_approximate_if: bool,
+    param_ctx_cache: Dict[str, Mapping[str, str]],
+) -> str:
+    if not net:
+        return ""
+    row = rows_by_path.get(scope)
+    if row is None:
+        return net
+    pmap = param_ctx_cache.get(row.full_path)
+    if pmap is None:
+        pmap = _port_param_ctx(index, row, top, resolve_param_dims=False)
+        param_ctx_cache[row.full_path] = pmap
+
+    def _on_grep_miss() -> None:
+        walk_caches.grep_cache_miss += 1
+
+    mod_idx = walk_caches.scope_mod_idx.get(scope)
+    if mod_idx is None:
+        mod_idx = text_grep_index(
+            grep_cache,
+            index,
+            row.module,
+            pmap,
+            defines=defines,
+            over_approximate_if=over_approximate_if,
+            on_cache_miss=_on_grep_miss,
+        )
+        walk_caches.scope_mod_idx[scope] = mod_idx
+    return _cached_net_rep(mod_idx, net, walk_caches.net_rep_cache)
+
+
+def text_walk_verdict_key(
+    mode: str,
+    *,
+    lca: str,
+    start: NetState,
+    goal: NetState,
+    rows_by_path: Mapping[str, FlatRow],
+    index: DesignIndex,
+    top: str,
+    grep_cache: TextGrepCache,
+    walk_caches: TextWalkSessionCaches,
+    defines: Mapping[str, str],
+    over_approximate_if: bool,
+    param_ctx_cache: Dict[str, Mapping[str, str]],
+) -> Optional[Tuple[str, ...]]:
+    """Rep-level BFS verdict key (finer than coarse dedup when ``trace=False``)."""
+    if mode == "hierarchy-hierarchy":
+        return None
+    start_scope, start_net = start
+    goal_scope, goal_net = goal
+    start_rep = _net_rep_at_scope(
+        start_scope,
+        start_net,
+        rows_by_path=rows_by_path,
+        index=index,
+        top=top,
+        grep_cache=grep_cache,
+        walk_caches=walk_caches,
+        defines=defines,
+        over_approximate_if=over_approximate_if,
+        param_ctx_cache=param_ctx_cache,
+    )
+    if mode == "port-hierarchy":
+        return ("ph", lca, start_scope, start_rep, goal_scope)
+    goal_rep = _net_rep_at_scope(
+        goal_scope,
+        goal_net,
+        rows_by_path=rows_by_path,
+        index=index,
+        top=top,
+        grep_cache=grep_cache,
+        walk_caches=walk_caches,
+        defines=defines,
+        over_approximate_if=over_approximate_if,
+        param_ctx_cache=param_ctx_cache,
+    )
+    return ("pp", lca, start_scope, start_rep, goal_scope, goal_rep)
+
+
 def _scope_rep_key(
     scope: str,
     net: str,
@@ -1005,6 +1110,7 @@ class _SeenRepIndex:
     by_exact: Dict[Tuple[str, str], Set[NetState]] = field(default_factory=dict)
     by_rep_all: Dict[Tuple[str, str], Set[NetState]] = field(default_factory=dict)
     by_rep_base: Dict[Tuple[str, str], Set[NetState]] = field(default_factory=dict)
+    by_rep_slice: Dict[Tuple[str, str, str], Set[NetState]] = field(default_factory=dict)
 
     def add(
         self,
@@ -1018,9 +1124,13 @@ class _SeenRepIndex:
         key = _scope_rep_key(scope, net, ctx, mod_idx=mod_idx)
         if key is None:
             return
+        scope_key, rep = key
         self.by_rep_all.setdefault(key, set()).add(state)
         if "[" not in net:
             self.by_rep_base.setdefault(key, set()).add(state)
+        suffix = _slice_suffix(net)
+        if suffix is not None:
+            self.by_rep_slice.setdefault((scope_key, rep, suffix), set()).add(state)
 
     def find_in(
         self,
@@ -1037,12 +1147,20 @@ class _SeenRepIndex:
         key = _scope_rep_key(scope, net, ctx, mod_idx=mod_idx)
         if key is None:
             return None
+        scope_key, rep = key
         if "[" in net:
             overlap = self.by_rep_base.get(key, set()) & candidates
+            if overlap:
+                return min(overlap, key=lambda s: (len(s[1]), s[1]))
+            suffix = _slice_suffix(net)
+            if suffix is not None:
+                overlap = self.by_rep_slice.get((scope_key, rep, suffix), set()) & candidates
+                if overlap:
+                    return min(overlap, key=lambda s: (len(s[1]), s[1]))
         else:
             overlap = self.by_rep_all.get(key, set()) & candidates
-        if overlap:
-            return min(overlap, key=lambda s: (len(s[1]), s[1]))
+            if overlap:
+                return min(overlap, key=lambda s: (len(s[1]), s[1]))
         return None
 
 
@@ -1225,6 +1343,8 @@ def bidirectional_text_grep(
         start_idx,
         net_rep_cache=ctx.net_rep_cache,
     )):
+        if ctx.walk_caches is not None:
+            ctx.walk_caches.goal_rep_shortcuts += 1
         return True, [], len(cache), None
 
     if goal_scope_only:
@@ -1487,6 +1607,8 @@ def forward_text_grep_to_scope(
         net_rep_cache=ctx.net_rep_cache,
     )
     if start_key[0] == goal_scope:
+        if ctx.walk_caches is not None:
+            ctx.walk_caches.scope_reach_shortcuts += 1
         return True, [], len(cache), None
 
     seen: Set[NetState] = {start_key}

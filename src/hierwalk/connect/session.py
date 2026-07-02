@@ -20,6 +20,7 @@ from hierwalk.connect.logical.scan import (
 from hierwalk.connect.logical.search import _resolve_over_approximate_if
 from hierwalk.connect.shared.endpoints import (
     DeclNetCache,
+    ModuleBodyCache,
     parse_connect_endpoint,
     resolve_endpoint,
 )
@@ -305,6 +306,22 @@ def _effective_defines(
     )
 
 
+def _text_define_sources(
+    index: DesignIndex,
+    rows: Sequence[FlatRow],
+) -> List[str]:
+    """RTL files for walked rows only (text-conn; avoids whole-design define scan)."""
+    from hierwalk.connect.logical.scan import (
+        design_parse_sources,
+        design_sources_from_rows,
+    )
+
+    scoped = design_sources_from_rows(rows)
+    if scoped:
+        return scoped
+    return design_parse_sources(index)
+
+
 def _resolve_connect_jobs(jobs: int, num_tasks: int) -> int:
     if jobs < 0:
         return 1
@@ -409,6 +426,7 @@ class ConnectivitySession:
         repr=False,
     )
     decl_net_cache: DeclNetCache = field(default_factory=dict, repr=False)
+    module_body_cache: ModuleBodyCache = field(default_factory=dict, repr=False)
     _endpoint_resolve_lock: threading.Lock = field(
         default_factory=threading.Lock,
         repr=False,
@@ -432,13 +450,21 @@ class ConnectivitySession:
     def _refresh_effective_defines(self) -> Dict[str, str]:
         from hierwalk.connect.logical.scan import design_parse_sources, sources_content_digest
 
-        srcs = (
-            list(self.sources)
-            if self.sources is not None
-            else design_parse_sources(self.index)
-        )
+        if self.resolve_param_dims:
+            srcs = (
+                list(self.sources)
+                if self.sources is not None
+                else design_parse_sources(self.index)
+            )
+        else:
+            srcs = _text_define_sources(self.index, self.rows)
         defines_stamp = tuple(sorted(self.defines.items()))
-        stamp = (tuple(srcs), defines_stamp, sources_content_digest(srcs))
+        stamp = (
+            self.resolve_param_dims,
+            tuple(srcs),
+            defines_stamp,
+            sources_content_digest(srcs),
+        )
         if stamp != self._effective_defines_stamp or not self._effective_defines_cache:
             self._effective_defines_cache = _effective_defines(
                 self.index,
@@ -448,8 +474,32 @@ class ConnectivitySession:
             self._effective_defines_stamp = stamp
         return dict(self._effective_defines_cache)
 
-    def effective_defines(self) -> Dict[str, str]:
-        """Filelist + RTL defines; recomputed when the index or source list changes."""
+    def effective_defines(
+        self,
+        *,
+        rows: Optional[Sequence[FlatRow]] = None,
+    ) -> Dict[str, str]:
+        """Filelist + RTL defines; text-conn uses row-scoped RTL when *rows* given."""
+        if rows is not None and not self.resolve_param_dims:
+            from hierwalk.connect.logical.scan import sources_content_digest
+
+            srcs = _text_define_sources(self.index, rows)
+            defines_stamp = tuple(sorted(self.defines.items()))
+            stamp = (
+                False,
+                tuple(srcs),
+                defines_stamp,
+                sources_content_digest(srcs),
+            )
+            if stamp == self._effective_defines_stamp and self._effective_defines_cache:
+                return dict(self._effective_defines_cache)
+            self._effective_defines_cache = _effective_defines(
+                self.index,
+                self.defines,
+                sources=srcs or None,
+            )
+            self._effective_defines_stamp = stamp
+            return dict(self._effective_defines_cache)
         return self._refresh_effective_defines()
 
     @property
@@ -469,6 +519,7 @@ class ConnectivitySession:
         self.param_ctx_cache.clear()
         self.endpoint_resolve_cache.clear()
         self.decl_net_cache.clear()
+        self.module_body_cache.clear()
         self._effective_defines_stamp = ((), (), "")
         self._effective_defines_cache.clear()
 
@@ -787,7 +838,7 @@ class ConnectivitySession:
                 rows=active_rows,
                 index=self.index,
                 top=self.top,
-                effective_defines=self.effective_defines(),
+                effective_defines=self.effective_defines(rows=active_rows),
                 trace=trace,
                 strict_generate=self.strict_generate,
                 ff_barrier=self.ff_barrier,
@@ -804,6 +855,7 @@ class ConnectivitySession:
                 endpoint_cache_lock=self._endpoint_resolve_lock,
                 walk_caches=self.text_walk_caches,
                 decl_net_cache=self.decl_net_cache,
+                module_body_cache=self.module_body_cache,
             )
 
         fanout_mode = chk.expand.fanout_mode if chk.expand is not None else "all"
@@ -821,7 +873,7 @@ class ConnectivitySession:
                     rows=active_rows,
                     index=self.index,
                     top=self.top,
-                    effective_defines=self.effective_defines(),
+                    effective_defines=self.effective_defines(rows=active_rows),
                     trace=trace,
                     strict_generate=self.strict_generate,
                     ff_barrier=self.ff_barrier,
@@ -838,6 +890,7 @@ class ConnectivitySession:
                     endpoint_cache_lock=self._endpoint_resolve_lock,
                     walk_caches=self.text_walk_caches,
                     decl_net_cache=self.decl_net_cache,
+                    module_body_cache=self.module_body_cache,
                 )
             )
         return aggregate_connect_results(
@@ -872,6 +925,11 @@ class ConnectivitySession:
         dedup_stats = [0, 0]
         checks = list(request.checks)
         workers = _resolve_connect_jobs(jobs, len(checks))
+        self.prewarm_text_grep_from_request(
+            request,
+            workers=workers,
+            checks_count=len(checks),
+        )
         dedup_lock = threading.Lock() if workers > 1 else None
         checks_done = 0
         checks_done_lock = threading.Lock() if workers > 1 else None
@@ -946,7 +1004,10 @@ class ConnectivitySession:
                 f"expand={wc.expand_calls} "
                 f"equiv_scans={wc.equiv_linear_scans} "
                 f"grep_miss={wc.grep_cache_miss} "
-                f"rep_adj_capped={wc.rep_adj_capped}"
+                f"rep_adj_capped={wc.rep_adj_capped} "
+                f"verdict_hits={wc.walk_verdict_hits} "
+                f"goal_shortcut={wc.goal_rep_shortcuts} "
+                f"scope_shortcut={wc.scope_reach_shortcuts}"
             )
         if on_progress is not None and workers > 1:
             on_progress(f"connect: text-coi parallel workers={workers}")
@@ -957,6 +1018,79 @@ class ConnectivitySession:
             text_coi_leaves=leaves,
             text_coi_unique=unique,
         )
+
+    def prewarm_text_grep_inst(self, inst_path: str) -> bool:
+        """Build text ``TextGrepIndex`` for the module at *inst_path* (if known)."""
+        row = self.rows_by_path.get(inst_path)
+        if row is None:
+            return False
+        from hierwalk.connect.shared.endpoints import _port_param_ctx, _shared_cache_lock
+        from hierwalk.connect.text.index import text_grep_index
+
+        over_approx = _resolve_over_approximate_if(
+            self.strict_generate,
+            self.over_approximate_if,
+        )
+        path = row.full_path
+        hit = self.param_ctx_cache.get(path)
+        if hit is None:
+            with _shared_cache_lock(self.param_ctx_cache, path):
+                hit = self.param_ctx_cache.get(path)
+                if hit is None:
+                    hit = _port_param_ctx(
+                        self.index,
+                        row,
+                        self.top,
+                        resolve_param_dims=False,
+                    )
+                    self.param_ctx_cache[path] = hit
+        wc = self.text_walk_caches
+
+        def _on_grep_miss() -> None:
+            wc.grep_cache_miss += 1
+
+        idx = text_grep_index(
+            self.text_grep_cache,
+            self.index,
+            row.module,
+            hit,
+            defines=self.effective_defines(),
+            over_approximate_if=over_approx,
+            on_cache_miss=_on_grep_miss,
+        )
+        wc.scope_mod_idx[inst_path] = idx
+        return True
+
+    def prewarm_text_grep_paths(self, inst_paths: Sequence[str]) -> int:
+        """Prewarm text grep indexes for known hierarchy instance paths."""
+        warmed = 0
+        for path in inst_paths:
+            if path and self.prewarm_text_grep_inst(path):
+                warmed += 1
+        return warmed
+
+    def prewarm_text_grep_from_request(
+        self,
+        request: ConnectivityRequest,
+        *,
+        workers: int = 1,
+        checks_count: int = 0,
+    ) -> int:
+        """Prewarm text grep for hierarchy rows touched by *request* (when worthwhile)."""
+        if workers <= 1 and checks_count < 8:
+            return 0
+        from hierwalk.lazy_scope import endpoint_specs_from_request, hierarchy_prefixes
+
+        specs = endpoint_specs_from_request(request)
+        paths = sorted(
+            (
+                p
+                for p in hierarchy_prefixes(specs)
+                if p in self.rows_by_path
+            ),
+            key=lambda p: (p.count("."), p),
+        )
+        return self.prewarm_text_grep_paths(paths)
 
     def prewarm_inst(self, inst_path: str) -> bool:
         """Build ``ModuleConnectIndex`` for the module at *inst_path* (if known)."""

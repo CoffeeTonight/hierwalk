@@ -4072,6 +4072,22 @@ def design_parse_sources(index: object) -> List[str]:
     return []
 
 
+def design_sources_from_rows(rows: Sequence[object]) -> List[str]:
+    """RTL file paths referenced by elaborated rows (text-conn define scope)."""
+    seen: Set[str] = set()
+    out: List[str] = []
+    for row in rows:
+        fp = (getattr(row, "file", "") or "").strip()
+        if not fp:
+            continue
+        key = str(Path(fp).resolve()) if fp else fp
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(fp)
+    return out
+
+
 def collect_design_defines(
     index: object,
     *,
@@ -4763,15 +4779,18 @@ def _build_module_connect_index_uncached(
     ff_net_lines: Dict[str, int] = {}
     ff_d_raw: Set[str] = set()
     ff_q_raw: Set[str] = set()
-    ff_adj = scan_ff_adjacency(
-        text,
-        ff_barrier=ff_barrier,
-        param_map=full_pmap,
-        edge_prov=raw_edge_prov if not text_conn_lite else None,
-        ff_net_lines=ff_net_lines if not text_conn_lite else None,
-        ff_d_roots=ff_d_raw if not text_conn_lite else None,
-        ff_q_roots=ff_q_raw if not text_conn_lite else None,
-    )
+    if text_conn_lite:
+        ff_adj: Dict[str, Set[str]] = {}
+    else:
+        ff_adj = scan_ff_adjacency(
+            text,
+            ff_barrier=ff_barrier,
+            param_map=full_pmap,
+            edge_prov=raw_edge_prov,
+            ff_net_lines=ff_net_lines,
+            ff_d_roots=ff_d_raw,
+            ff_q_roots=ff_q_raw,
+        )
 
     expr_cache_seed: Dict[str, FrozenSet[str]] = {}
     _seed_adj_from_instance_ports(

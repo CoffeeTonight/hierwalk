@@ -334,6 +334,83 @@ def test_hierarchy_port_rtl_uses_longest_walked_inst_prefix(tmp_path: Path):
         assert row["module"] == "mid"
 
 
+def test_endpoint_match_strength_rejects_shared_tail_across_scopes():
+    from hierwalk.connect.pipeline.artifacts import (
+        _endpoint_match_strength,
+        _match_signal_tail_to_check,
+    )
+    from hierwalk.models import ConnectEndpoint, ConnectResult
+
+    top_clk = ConnectEndpoint(
+        "zz_torture_top.clk",
+        "zz_torture_top",
+        "clk",
+        "zz_torture_top",
+        port_found=True,
+    )
+    deep_clk = ConnectEndpoint(
+        "zz_torture_top.u_zigzag.u_deep.d1.d2.d3.d4.d5.clk",
+        "zz_torture_top.u_zigzag.u_deep.d1.d2.d3.d4.d5",
+        "clk",
+        "zz_deep_d5",
+        port_found=True,
+    )
+    deep_tail = "zz_torture_top.u_zigzag.u_deep.d1.d2.d3.d4.d5.clk"
+    assert _endpoint_match_strength(top_clk, deep_tail) == 0
+    assert _endpoint_match_strength(deep_clk, deep_tail) == 100
+    result = ConnectResult(
+        check_id="zz_clk_deep",
+        endpoint_a=top_clk,
+        endpoint_b=deep_clk,
+        connected=True,
+        mode="port-port",
+    )
+    assert _match_signal_tail_to_check(deep_tail, result) == ("b", 100)
+
+
+def test_collect_hierarchy_evidence_skips_unmatched_signal_tails():
+    from hierwalk.connect.pipeline.artifacts import (
+        SignalTailRecord,
+        collect_hierarchy_evidence,
+    )
+    from hierwalk.models import ConnectEndpoint, ConnectResult, FlatRow
+
+    rows_by_path = {
+        "top": FlatRow(
+            full_path="top",
+            inst_leaf="top",
+            module="TOP",
+            depth=0,
+            parent_path=None,
+            file="/rtl/top.v",
+        ),
+    }
+    result = ConnectResult(
+        check_id="c0",
+        endpoint_a=ConnectEndpoint("top.a", "top", "a", "TOP", port_found=True),
+        endpoint_b=ConnectEndpoint("top.b", "top", "b", "TOP", port_found=True),
+        connected=False,
+        mode="",
+    )
+    tails = [
+        SignalTailRecord(
+            target_path="top.unrelated",
+            parent_path="top",
+            tail="unrelated",
+            kind="port",
+            hit=True,
+            module="TOP",
+        )
+    ]
+    evidence = collect_hierarchy_evidence(
+        [result],
+        rows_by_path,
+        signal_tails=tails,
+    )
+    assert not any(row.check_id == "" for row in evidence)
+    assert not any(row.side == "-" for row in evidence)
+
+
 def test_hierarchy_evidence_for_check_dedup_shared_b_endpoint(tmp_path: Path):
     from hierwalk.connect.pipeline.artifacts import collect_hierarchy_evidence_for_check
     from hierwalk.connect.shared.request import ConnectivityCheck
@@ -376,7 +453,7 @@ def test_hierarchy_evidence_for_check_dedup_shared_b_endpoint(tmp_path: Path):
         for row in evidence
         if row.side == "b" and row.path.endswith(".wq")
     }
-    assert b_wq_ids == {"fan"}
+    assert b_wq_ids == {"fan->0", "fan->1", "fan->2"}
     b_wire_wq = [
         row
         for row in evidence
@@ -384,7 +461,7 @@ def test_hierarchy_evidence_for_check_dedup_shared_b_endpoint(tmp_path: Path):
         and row.kind == "wire"
         and row.path.endswith(".wq")
     ]
-    assert len(b_wire_wq) == 1
+    assert len(b_wire_wq) == 3
 
 
 def test_compact_hierarchy_final_tsv_keeps_deepest_hit_only(tmp_path: Path):

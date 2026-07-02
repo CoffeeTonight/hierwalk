@@ -323,8 +323,7 @@ def test_text_conn_lite_skips_comb_always_and_ff_metadata(tmp_path: Path):
                 ff_barrier=True,
             )
     assert comb_spy.call_count == 0
-    assert ff_spy.call_args.kwargs.get("ff_net_lines") is None
-    assert ff_spy.call_args.kwargs.get("ff_d_roots") is None
+    assert ff_spy.call_count == 0
 
 
 def test_tier0_worker_reuses_preprocessed_sidecar(tmp_path: Path):

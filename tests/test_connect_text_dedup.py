@@ -338,6 +338,33 @@ def test_text_walk_profiling_counters_increment(tmp_path):
     assert wc.rep_adj_capped >= 0
 
 
+def test_text_walk_verdict_cache_reuses_bfs(tmp_path):
+    """Rep-level walk verdict cache skips repeat BFS when trace=False."""
+    v = """
+    module top;
+      wire a, b, c;
+      assign b = a;
+    endmodule
+    """
+    rtl = tmp_path / "top.v"
+    rtl.write_text(v, encoding="utf-8")
+    index = DesignIndex.build({str(rtl): v})
+    _, rows = elaborate(index, "top")
+    session = ConnectivitySession(
+        rows=rows,
+        index=index,
+        top="top",
+        resolve_param_dims=False,
+    )
+    assert session.check_text("top.a", "top.c").connected is False
+    before_expand = session.text_walk_caches.expand_calls
+    assert len(session.text_walk_caches.walk_verdict_cache) >= 1
+    assert session.check_text("top.a", "top.c").connected is False
+    wc = session.text_walk_caches
+    assert wc.walk_verdict_hits >= 1
+    assert wc.expand_calls == before_expand
+
+
 def test_slice_meets_base_via_rep_index(tmp_path):
     """Slice vs base endpoint still connects (rep-index meet, not slice-slice)."""
     v = """

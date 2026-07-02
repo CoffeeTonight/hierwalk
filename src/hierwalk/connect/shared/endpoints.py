@@ -425,6 +425,28 @@ def _module_body_for_row(index: DesignIndex, row: FlatRow) -> str:
 
 DeclNetCacheKey = Tuple[str, Tuple[Tuple[str, str], ...]]
 DeclNetCache = Dict[DeclNetCacheKey, Set[str]]
+ModuleBodyCache = Dict[str, str]
+
+
+def _module_body_cache_key(row: FlatRow) -> str:
+    return str(row.file or row.module)
+
+
+def _cached_module_body_for_row(
+    index: DesignIndex,
+    row: FlatRow,
+    *,
+    cache: Optional[ModuleBodyCache] = None,
+) -> str:
+    if cache is None:
+        return _module_body_for_row(index, row)
+    key = _module_body_cache_key(row)
+    hit = cache.get(key)
+    if hit is not None:
+        return hit
+    body = _module_body_for_row(index, row)
+    cache[key] = body
+    return body
 
 
 def _decl_net_cache_key(row: FlatRow, ctx: Mapping[str, str]) -> DeclNetCacheKey:
@@ -726,6 +748,7 @@ def resolve_endpoint(
     require_port: bool = False,
     rows_by_path: Optional[Mapping[str, FlatRow]] = None,
     decl_net_cache: Optional[DeclNetCache] = None,
+    module_body_cache: Optional[ModuleBodyCache] = None,
 ) -> Tuple[ConnectEndpoint, List[str]]:
     if rows_by_path is not None:
         lookup = rows_by_path
@@ -778,7 +801,11 @@ def resolve_endpoint(
         top=top,
         cache=decl_net_cache,
         param_ctx=_row_param_ctx_optional(row),
-        body=_module_body_for_row(index, row),
+        body=_cached_module_body_for_row(
+            index,
+            row,
+            cache=module_body_cache,
+        ),
     ):
         ep.port_found = True
         return ep, errors
