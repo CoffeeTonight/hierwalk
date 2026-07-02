@@ -795,17 +795,44 @@ def _apply_define_ops(
             defines.pop(name, None)
 
 
-_INCLUDE_GUARD_RE = re.compile(
-    r"`ifndef\s+([A-Za-z_]\w*)\s*(?://[^\n]*)?\n"
-    r"(?:\s*(?://[^\n]*)?\n|\s*/\*.*?\*/\s*)*"
-    r"\s*`define\s+\1\b",
-    re.IGNORECASE | re.MULTILINE | re.DOTALL,
-)
+_IFNDEF_GUARD_LINE_RE = re.compile(r"^\s*`ifndef\s+([A-Za-z_]\w*)\b", re.IGNORECASE)
+_DEFINE_GUARD_LINE_RE = re.compile(r"^\s*`define\s+([A-Za-z_]\w*)\b", re.IGNORECASE)
 
 
 def include_guard_macro_names(text: str) -> Set[str]:
     """Macro names from `` `ifndef NAME `` / `` `define NAME `` include-guard pairs."""
-    return {m.group(1) for m in _INCLUDE_GUARD_RE.finditer(text)}
+    guards: Set[str] = set()
+    pending: Optional[str] = None
+    in_block_comment = False
+    for raw_line in _iter_text_lines(text):
+        line = raw_line
+        if in_block_comment:
+            if "*/" in line:
+                in_block_comment = False
+                line = line.split("*/", 1)[-1]
+            else:
+                continue
+        if "/*" in line:
+            before, _, after = line.partition("/*")
+            if "*/" in after:
+                line = before + after.split("*/", 1)[-1]
+            else:
+                in_block_comment = True
+                line = before
+        line = _LINE_COMMENT_RE.sub("", line).strip()
+        if not line:
+            continue
+        ifndef_hit = _IFNDEF_GUARD_LINE_RE.match(line)
+        if ifndef_hit:
+            pending = ifndef_hit.group(1)
+            continue
+        if pending is None:
+            continue
+        define_hit = _DEFINE_GUARD_LINE_RE.match(line)
+        if define_hit and define_hit.group(1) == pending:
+            guards.add(pending)
+        pending = None
+    return guards
 
 
 def _collect_define_undef_ops(

@@ -3248,6 +3248,10 @@ def create_path_walk_index(
     from hierwalk.filelist import filelist_provenance_maps
 
     via_map, _chain_map = filelist_provenance_maps(fl)
+    if on_progress:
+        on_progress(
+            f"path-walk: pw-db init ({len(sources)} sources, lazy defines)"
+        )
     mod_db = PathWalkModuleDb(
         sources,
         index,

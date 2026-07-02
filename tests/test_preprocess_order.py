@@ -398,6 +398,13 @@ def test_preprocess_sources_serial_honors_cross_file_undef(tmp_path: Path):
     assert "u_g" not in text
 
 
+def test_include_guard_linear_on_large_gap():
+    from hierwalk.preprocess import include_guard_macro_names
+
+    text = "`ifndef BIG_GUARD_\n" + "// filler\n" * 50_000 + "`define BIG_GUARD_\n"
+    assert "BIG_GUARD_" in include_guard_macro_names(text)
+
+
 def test_include_guard_with_block_comment_between(tmp_path: Path):
     rtl = tmp_path / "guard.v"
     rtl.write_text(

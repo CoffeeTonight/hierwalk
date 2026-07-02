@@ -9,7 +9,7 @@ import threading
 from functools import lru_cache
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, FrozenSet, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Dict, FrozenSet, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Set, Tuple
 
 from hierwalk.generate_fold import fold_generate_regions, prepare_body_for_instance_scan
 from hierwalk.params import (
@@ -4088,29 +4088,15 @@ def design_sources_from_rows(rows: Sequence[object]) -> List[str]:
     return out
 
 
-def collect_design_defines(
+def accumulate_design_defines_for_paths(
     index: object,
+    paths: Sequence[str],
+    out: MutableMapping[str, str],
     *,
-    sources: Optional[Sequence[str]] = None,
-    extra_defines: Optional[Mapping[str, str]] = None,
-) -> Dict[str, str]:
-    """
-    Active-branch `` `define `` / `` `undef `` across RTL (ifdef order, includes).
-
-    Filelist/extra defines seed the map; each RTL file may add or `` `undef `` names.
-    The result is final — callers must not re-merge filelist on top (undef would be lost).
-    """
+    seen: Optional[Set[str]] = None,
+) -> None:
+    """Apply filelist-order ``define``/``undef`` from *paths* into *out* (in place)."""
     from pathlib import Path
-
-    base = dict(getattr(index, "_preprocess_defines", {}) or {})
-    if extra_defines:
-        base.update(extra_defines)
-    if sources is not None:
-        paths = _dedupe_paths_preserve_order(sources)
-    else:
-        paths = design_parse_sources(index)
-    if not paths:
-        return dict(base)
 
     from hierwalk.preprocess import accumulate_defines_from_file, include_guard_macro_names
 
@@ -4120,12 +4106,11 @@ def collect_design_defines(
         or getattr(index, "_skip_path_patterns", ())
         or ()
     )
-    out: Dict[str, str] = dict(base)
-    seen: Set[str] = set()
+    visited = seen if seen is not None else set()
     for fpath in paths:
-        if fpath in seen:
+        if fpath in visited:
             continue
-        seen.add(fpath)
+        visited.add(fpath)
         path = Path(fpath)
         if not path.is_file():
             continue
@@ -4144,6 +4129,32 @@ def collect_design_defines(
         )
         for name in guards:
             out.pop(name, None)
+
+
+def collect_design_defines(
+    index: object,
+    *,
+    sources: Optional[Sequence[str]] = None,
+    extra_defines: Optional[Mapping[str, str]] = None,
+) -> Dict[str, str]:
+    """
+    Active-branch `` `define `` / `` `undef `` across RTL (ifdef order, includes).
+
+    Filelist/extra defines seed the map; each RTL file may add or `` `undef `` names.
+    The result is final — callers must not re-merge filelist on top (undef would be lost).
+    """
+    base = dict(getattr(index, "_preprocess_defines", {}) or {})
+    if extra_defines:
+        base.update(extra_defines)
+    if sources is not None:
+        paths = _dedupe_paths_preserve_order(sources)
+    else:
+        paths = design_parse_sources(index)
+    if not paths:
+        return dict(base)
+
+    out: Dict[str, str] = dict(base)
+    accumulate_design_defines_for_paths(index, paths, out)
     return dict(out)
 
 

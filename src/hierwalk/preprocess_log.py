@@ -19,6 +19,7 @@ PP_T0 = "pp-t0"
 PP_T0_HIT = "pp-t0-hit"
 PP_DUP = "pp-dup"
 PP_SLOW = "pp-slow"
+PP_DEFINES = "pp-defines"
 
 _LEVEL1_TAGS = frozenset(
     {
@@ -31,6 +32,7 @@ _LEVEL1_TAGS = frozenset(
         PP_T0_HIT,
         PP_DUP,
         PP_SLOW,
+        PP_DEFINES,
     }
 )
 _HIT_ONLY_TAGS = frozenset({PP_MEM})

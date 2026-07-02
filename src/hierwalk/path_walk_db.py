@@ -414,7 +414,11 @@ class PathWalkModuleDb:
         self._no_cache = no_cache
         self._tier1_defines_cache: Optional[Dict[str, str]] = None
         self._tier1_defines_stamp: Tuple[Any, ...] = ()
-        self._defines_digest = _defines_digest(self._tier1_defines())
+        self._define_sources_upto: int = 0
+        self._define_sources_seen: Set[str] = set()
+        self._tier1_defines_cache = dict(self._defines)
+        self._tier1_defines_stamp = self._compute_tier1_defines_stamp()
+        self._defines_digest = _defines_digest(self._tier1_defines_cache)
         self._on_trace = on_trace
         self._on_progress = on_progress
         self._file_via_filelist: Dict[str, str] = dict(file_via_filelist or {})
@@ -494,20 +498,56 @@ class PathWalkModuleDb:
     def _invalidate_tier1_defines_cache(self) -> None:
         self._tier1_defines_cache = None
         self._tier1_defines_stamp = ()
+        self._define_sources_upto = 0
+        self._define_sources_seen.clear()
         self._defines_digest = _defines_digest(self._defines)
 
     def _tier1_defines(self) -> Dict[str, str]:
-        """Filelist + RTL-collected defines (same basis as connect COI)."""
+        """Filelist seed defines; RTL ``define``/``undef`` merged on demand per touched file."""
         stamp = self._compute_tier1_defines_stamp()
         if self._tier1_defines_cache is not None and stamp == self._tier1_defines_stamp:
             return dict(self._tier1_defines_cache)
-        from hierwalk.connect.session import _effective_defines
-
-        merged = _effective_defines(self._index, self._defines, sources=self._sources)
+        merged = dict(self._defines)
         self._tier1_defines_cache = dict(merged)
         self._tier1_defines_stamp = stamp
+        self._define_sources_upto = 0
+        self._define_sources_seen.clear()
         self._defines_digest = _defines_digest(merged)
         return dict(merged)
+
+    def _ensure_defines_for_file(self, fpath: str) -> None:
+        """Accumulate filelist-order defines through *fpath* (path-walk lazy scope)."""
+        key = str(Path(fpath).resolve())
+        try:
+            end_idx = self._sources.index(key)
+        except ValueError:
+            return
+        if end_idx < self._define_sources_upto:
+            return
+        from hierwalk.connect.logical.scan.core import accumulate_design_defines_for_paths
+        from hierwalk.preprocess_log import PP_DEFINES, emit_pp_log
+
+        batch = self._sources[self._define_sources_upto : end_idx + 1]
+        if not batch:
+            return
+        t0 = time.perf_counter()
+        if self._tier1_defines_cache is None:
+            self._tier1_defines_cache = dict(self._defines)
+        accumulate_design_defines_for_paths(
+            self._index,
+            batch,
+            self._tier1_defines_cache,
+            seen=self._define_sources_seen,
+        )
+        self._define_sources_upto = end_idx + 1
+        self._defines_digest = _defines_digest(self._tier1_defines_cache)
+        ms = (time.perf_counter() - t0) * 1000.0
+        emit_pp_log(
+            PP_DEFINES,
+            key,
+            ms=ms,
+            detail=f"files={len(batch)} thru={end_idx + 1}/{len(self._sources)}",
+        )
 
     def _trace(self, message: str) -> None:
         if self._on_trace is not None and message:
@@ -2047,6 +2087,7 @@ class PathWalkModuleDb:
 
             self._set_phase("parsing", detail=Path(key).name)
             t0 = time.perf_counter()
+            self._ensure_defines_for_file(key)
 
             defs: Dict[str, str] = dict(self._tier1_defines())
             effective_digest = _defines_digest(defs)
@@ -2198,6 +2239,7 @@ class PathWalkModuleDb:
         from hierwalk.preprocess_log import PP_DISK, PP_MEM, PP_MISS, emit_pp_log
 
         key = str(Path(fpath).resolve())
+        self._ensure_defines_for_file(key)
         defines_digest = self._defines_digest
         include_digest = self._include_closure_digest(key)
         mem_key = (key, defines_digest, include_digest)
