@@ -1488,21 +1488,6 @@ class PathWalkModuleDb:
             key = str(Path(raw).resolve())
             if key in self._regex_scanned or key in self._tier0_inflight:
                 continue
-            from hierwalk.preprocess_log import PP_DUP, emit_pp_log
-
-            had_pp = any(mem_key[0] == key for mem_key in self._preprocessed_text_cache)
-            try:
-                t_dup = time.perf_counter()
-                self._preprocessed_text_for_file(key)
-                if had_pp:
-                    emit_pp_log(
-                        PP_DUP,
-                        key,
-                        ms=(time.perf_counter() - t_dup) * 1000.0,
-                        detail="tier0-submit",
-                    )
-            except OSError:
-                pass
             job = self._tier0_make_job(key)
             self._tier0_inflight[key] = executor.submit(_tier0_worker_scan, job)
             submitted += 1

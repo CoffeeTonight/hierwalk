@@ -326,6 +326,33 @@ def test_text_conn_lite_skips_comb_always_and_ff_metadata(tmp_path: Path):
     assert ff_spy.call_count == 0
 
 
+def test_tier0_submit_skips_preprocess(tmp_path: Path):
+    """Parallel tier0 must not eager-preprocess before regex workers run."""
+    from unittest.mock import patch
+
+    from hierwalk.index import DesignIndex
+    from hierwalk.path_walk_db import PathWalkModuleDb
+    from hierwalk.preprocess import preprocess_file_for_index
+
+    paths: list[str] = []
+    for i in range(4):
+        rtl = tmp_path / f"m{i}.v"
+        rtl.write_text(f"module m{i}(); endmodule\n", encoding="utf-8")
+        paths.append(str(rtl.resolve()))
+    index = DesignIndex.build_from_sources(paths, include_dirs=[], defines={})
+    db = PathWalkModuleDb(paths, index, defines={}, no_cache=True, jobs=4)
+    try:
+        with patch(
+            "hierwalk.preprocess.preprocess_file_for_index",
+            wraps=preprocess_file_for_index,
+        ) as spy:
+            db._tier0_scan_sources(paths, target_module="m3")
+        assert spy.call_count == 0
+        assert "m3" in db._module_to_files
+    finally:
+        db.shutdown_workers(wait=True)
+
+
 def test_tier0_worker_reuses_preprocessed_sidecar(tmp_path: Path):
     from unittest.mock import patch
 
