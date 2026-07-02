@@ -136,6 +136,7 @@
 | `HIERWALK_PW_FL_SHELL_MAX` | `12` | confident progressive shell cap |
 | `HIERWALK_PW_MODULE_FILE_CAP` | `32` | confident per-module file cap |
 | `HIERWALK_PW_TIER0_GLOBAL_SCAN_MAX` | (perf.py 참고) | recovery global scan 상한 |
+| `HIERWALK_PW_TIER1_INCLUDES` | `0` | tier1 preprocess `` `include `` 인라인 (기본 off; wrapper 309s 방지) |
 | `HIERWALK_PW_DEFINE_INCLUDES` | `0` | tier1 define accumulate include 추적 (기본 off) |
 | `HIERWALK_PW_DEFINE_ACCUM_MAX` | `128` | tier1 define batch cap (0=무제한) |
 | `HIERWALK_PW_INCLUDE_CLOSURE_MAX` | `200` (full 모드만) | transitive closure 상한 |
@@ -176,6 +177,7 @@ pytest tests/test_path_walk_db.py \
 | 2026-07 | tier1 `_include_closure_digest` 무제한 BFS → `pp-*` 전에 `_resolve_include` 강종 | direct closure + `_resolve_include` cache + `pp-closure start` 로그 |
 | 2026-07 | `_apply_file_modules` 가 define cache 무효화 → 매 preprocess 0..idx 재누적 | define cache 유지; tier0 는 `_tier1_defines()` 사용 |
 | 2026-07 | `top.a` 첫 hit cold preprocess + tier0 `NoneType` | seed 시 tier1 prewarm; `_tier0_make_job` 안전화 |
+| 2026-07 | `bla.v` tier1 `pp-t1` 309s / 2.3MiB (include 전개) | `HIERWALK_PW_TIER1_INCLUDES=0` 기본 — 단일 TU 만 preprocess |
 
 ---
 

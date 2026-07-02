@@ -1049,6 +1049,7 @@ def preprocess_file_for_index(
     *,
     skip_path_patterns: Sequence[str] = (),
     apply_ifdef: Optional[bool] = None,
+    follow_includes: bool = True,
 ) -> str:
     """
     Light preprocess for index/instance scan: includes, macro expand, optional ``ifdef``.
@@ -1064,7 +1065,8 @@ def preprocess_file_for_index(
 
     use_ifdef = lazy_index_ifdef() if apply_ifdef is None else apply_ifdef
     base_defines = dict(defines)
-    mode = "light-ifdef" if use_ifdef else "minimal"
+    inc_tag = "inc" if follow_includes else "no-inc"
+    mode = f"light-ifdef-{inc_tag}" if use_ifdef else f"minimal-{inc_tag}"
     cache_key = _source_preprocess_cache_key(
         path, base_defines, mode, skip_path_patterns
     )
@@ -1083,6 +1085,7 @@ def preprocess_file_for_index(
         include_dirs=include_dirs,
         visiting=visiting,
         skip_path_patterns=skip_path_patterns,
+        follow_includes=follow_includes,
     )
     if cache_key is not None:
         _SOURCE_PREPROCESS_CACHE[cache_key] = (

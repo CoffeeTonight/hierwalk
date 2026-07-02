@@ -73,6 +73,7 @@ class _FileValidatedCacheEntry:
     defines_digest: str
     modules: Tuple[Tuple[str, ModuleRecord], ...]
     include_closure_digest: str = ""
+    preprocess_tag: str = ""
 
 
 @dataclass(frozen=True)
@@ -81,6 +82,7 @@ class _FilePreprocessedCacheEntry:
     defines_digest: str
     include_closure_digest: str
     text: str
+    preprocess_tag: str = ""
 
 
 InstLeafIndexKey = Tuple[str, str]
@@ -463,7 +465,7 @@ class PathWalkModuleDb:
         self.cache_regex_hits: int = 0
         self.cache_validated_hits: int = 0
         self._folded_edges_cache: Dict[Tuple[str, str, str], List[InstanceEdge]] = {}
-        self._preprocessed_text_cache: Dict[Tuple[str, str, str], str] = {}
+        self._preprocessed_text_cache: Dict[Tuple[str, str, str, str], str] = {}
         self._include_closure_digest_cache: Dict[str, str] = {}
         self._inst_leaf_index: Dict[InstLeafIndexKey, Dict[str, InstanceEdge]] = {}
         self._tier1_warm_inflight: Set[str] = set()
@@ -485,6 +487,13 @@ class PathWalkModuleDb:
     @property
     def cache_root(self) -> Optional[Path]:
         return self._cache_root
+
+    def _tier1_preprocess_tag(self, *, follow_includes: Optional[bool] = None) -> str:
+        from hierwalk.perf import pw_tier1_follow_includes
+
+        if follow_includes is None:
+            follow_includes = pw_tier1_follow_includes()
+        return "inc" if follow_includes else "no-inc"
 
     def _compute_tier1_defines_stamp(self) -> Tuple[Any, ...]:
         from hierwalk.connect.logical.scan import sources_content_digest
@@ -753,13 +762,15 @@ class PathWalkModuleDb:
         path: str,
         *,
         defines_digest: str,
+        preprocess_tag: str = "",
     ) -> Optional[Path]:
         if self._cache_root is None:
             return None
+        suffix = f"_{preprocess_tag}" if preprocess_tag else ""
         return (
             self._cache_root
             / "validated"
-            / f"{_file_cache_token(path)}_{defines_digest}.pkl"
+            / f"{_file_cache_token(path)}_{defines_digest}{suffix}.pkl"
         )
 
     def _preprocessed_sidecar(
@@ -768,13 +779,15 @@ class PathWalkModuleDb:
         *,
         defines_digest: str,
         include_closure_digest: str,
+        preprocess_tag: str = "",
     ) -> Optional[Path]:
         if self._cache_root is None:
             return None
+        suffix = f"_{preprocess_tag}" if preprocess_tag else ""
         return (
             self._cache_root
             / "preprocessed"
-            / f"{_file_cache_token(path)}_{defines_digest}_{include_closure_digest}.pkl"
+            / f"{_file_cache_token(path)}_{defines_digest}_{include_closure_digest}{suffix}.pkl"
         )
 
     def _include_closure_digest(self, path: str) -> str:
@@ -854,8 +867,13 @@ class PathWalkModuleDb:
         *,
         defines_digest: str,
         include_closure_digest: str,
+        preprocess_tag: str = "",
     ) -> Optional[Dict[str, ModuleRecord]]:
-        sidecar = self._validated_sidecar(path, defines_digest=defines_digest)
+        sidecar = self._validated_sidecar(
+            path,
+            defines_digest=defines_digest,
+            preprocess_tag=preprocess_tag,
+        )
         if sidecar is None or not sidecar.is_file():
             return None
         try:
@@ -875,6 +893,9 @@ class PathWalkModuleDb:
             and obj.include_closure_digest != include_closure_digest
         ):
             return None
+        stored_tag = getattr(obj, "preprocess_tag", "") or "inc"
+        if preprocess_tag and stored_tag != preprocess_tag:
+            return None
         return {name: _record_lite(rec) for name, rec in obj.modules}
 
     def _save_validated_sidecar(
@@ -884,8 +905,13 @@ class PathWalkModuleDb:
         *,
         defines_digest: str,
         include_closure_digest: str,
+        preprocess_tag: str = "",
     ) -> None:
-        sidecar = self._validated_sidecar(path, defines_digest=defines_digest)
+        sidecar = self._validated_sidecar(
+            path,
+            defines_digest=defines_digest,
+            preprocess_tag=preprocess_tag,
+        )
         if sidecar is None:
             return
         digest = self._source_digest(path)
@@ -896,6 +922,7 @@ class PathWalkModuleDb:
             defines_digest,
             tuple((n, _record_lite(r)) for n, r in sorted(modules.items())),
             include_closure_digest,
+            preprocess_tag,
         )
         sidecar.parent.mkdir(parents=True, exist_ok=True)
         tmp = sidecar.with_suffix(sidecar.suffix + ".tmp")
@@ -909,11 +936,13 @@ class PathWalkModuleDb:
         *,
         defines_digest: str,
         include_closure_digest: str,
+        preprocess_tag: str = "",
     ) -> Optional[str]:
         sidecar = self._preprocessed_sidecar(
             path,
             defines_digest=defines_digest,
             include_closure_digest=include_closure_digest,
+            preprocess_tag=preprocess_tag,
         )
         if sidecar is None or not sidecar.is_file():
             return None
@@ -931,6 +960,9 @@ class PathWalkModuleDb:
             return None
         if obj.include_closure_digest != include_closure_digest:
             return None
+        stored_tag = getattr(obj, "preprocess_tag", "") or "inc"
+        if preprocess_tag and stored_tag != preprocess_tag:
+            return None
         return obj.text
 
     def _save_preprocessed_sidecar(
@@ -940,6 +972,7 @@ class PathWalkModuleDb:
         *,
         defines_digest: str,
         include_closure_digest: str,
+        preprocess_tag: str = "",
     ) -> None:
         if self._no_cache:
             return
@@ -947,6 +980,7 @@ class PathWalkModuleDb:
             path,
             defines_digest=defines_digest,
             include_closure_digest=include_closure_digest,
+            preprocess_tag=preprocess_tag,
         )
         if sidecar is None:
             return
@@ -958,6 +992,7 @@ class PathWalkModuleDb:
             defines_digest,
             include_closure_digest,
             text,
+            preprocess_tag,
         )
         sidecar.parent.mkdir(parents=True, exist_ok=True)
         tmp = sidecar.with_suffix(sidecar.suffix + ".tmp")
@@ -2347,11 +2382,13 @@ class PathWalkModuleDb:
             defs: Dict[str, str] = dict(self._tier1_defines())
             effective_digest = _defines_digest(defs)
             include_digest = self._include_closure_digest(key)
+            preprocess_tag = self._tier1_preprocess_tag()
 
             disk = self._load_validated_sidecar(
                 key,
                 defines_digest=effective_digest,
                 include_closure_digest=include_digest,
+                preprocess_tag=preprocess_tag,
             )
             if disk is not None:
                 self.cache_validated_hits += 1
@@ -2381,6 +2418,7 @@ class PathWalkModuleDb:
                 out,
                 defines_digest=effective_digest,
                 include_closure_digest=include_digest,
+                preprocess_tag=preprocess_tag,
             )
             self.files_validated += 1
             for name in out:
@@ -2388,7 +2426,10 @@ class PathWalkModuleDb:
             summary = ",".join(
                 f"{n}({len(r.instances)}inst)" for n, r in sorted(out.items())
             )
-            self._trace(f"pw-db tier1 scan {Path(key).name} -> {summary or '(none)'}")
+            self._trace(
+                f"pw-db tier1 scan {Path(key).name} "
+                f"preprocess={preprocess_tag} -> {summary or '(none)'}"
+            )
             inst = sum(len(r.instances) for r in out.values())
             emit_pp_log(
                 PP_T1,
@@ -2490,28 +2531,38 @@ class PathWalkModuleDb:
                 return edge
         return None
 
-    def _preprocessed_text_for_file(self, fpath: str) -> str:
+    def _preprocessed_text_for_file(
+        self,
+        fpath: str,
+        *,
+        follow_includes: Optional[bool] = None,
+    ) -> str:
+        from hierwalk.perf import pw_tier1_follow_includes
         from hierwalk.preprocess_log import PP_DISK, PP_MEM, PP_MISS, emit_pp_log
 
         key = str(Path(fpath).resolve())
+        if follow_includes is None:
+            follow_includes = pw_tier1_follow_includes()
+        preprocess_tag = self._tier1_preprocess_tag(follow_includes=follow_includes)
         self._ensure_defines_for_file(key)
         defines_digest = self._defines_digest
         include_digest = self._include_closure_digest(key)
-        mem_key = (key, defines_digest, include_digest)
+        mem_key = (key, defines_digest, include_digest, preprocess_tag)
         cached = self._preprocessed_text_cache.get(mem_key)
         if cached is not None:
-            emit_pp_log(PP_MEM, key)
+            emit_pp_log(PP_MEM, key, detail=preprocess_tag)
             self._publish_preprocessed_to_index(key, cached)
             return cached
         disk = self._load_preprocessed_sidecar(
             key,
             defines_digest=defines_digest,
             include_closure_digest=include_digest,
+            preprocess_tag=preprocess_tag,
         )
         if disk is not None:
             self._preprocessed_text_cache[mem_key] = disk
             self._trace(f"pw-db preprocess cache {Path(key).name}")
-            emit_pp_log(PP_DISK, key, out_mib=len(disk) / (1024 * 1024))
+            emit_pp_log(PP_DISK, key, out_mib=len(disk) / (1024 * 1024), detail=preprocess_tag)
             self._publish_preprocessed_to_index(key, disk)
             return disk
         from hierwalk.preprocess import preprocess_file_for_index
@@ -2525,6 +2576,7 @@ class PathWalkModuleDb:
             set(),
             skip_path_patterns=self._skip,
             apply_ifdef=True,
+            follow_includes=follow_includes,
         )
         ms = (time.perf_counter() - t0) * 1000.0
         emit_pp_log(
@@ -2532,6 +2584,7 @@ class PathWalkModuleDb:
             key,
             ms=ms,
             out_mib=len(text) / (1024 * 1024),
+            detail=preprocess_tag,
         )
         self._preprocessed_text_cache[mem_key] = text
         self._save_preprocessed_sidecar(
@@ -2539,6 +2592,7 @@ class PathWalkModuleDb:
             text,
             defines_digest=defines_digest,
             include_closure_digest=include_digest,
+            preprocess_tag=preprocess_tag,
         )
         self._publish_preprocessed_to_index(key, text)
         return text

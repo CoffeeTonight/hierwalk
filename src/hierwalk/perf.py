@@ -168,6 +168,17 @@ def pw_define_follow_includes() -> bool:
     return raw in ("1", "true", "yes", "on")
 
 
+def pw_tier1_follow_includes() -> bool:
+    """
+    Path-walk tier1 preprocess inlines `` `include `` (default off).
+
+    Wrapper RTL that only pulls the design via includes can opt in with
+    ``HIERWALK_PW_TIER1_INCLUDES=1`` (may be very slow on large trees).
+    """
+    raw = os.environ.get("HIERWALK_PW_TIER1_INCLUDES", "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
 def pw_define_accum_max_files() -> int:
     """Cap RTL files per path-walk define-accumulate step (0 = no cap)."""
     raw = os.environ.get("HIERWALK_PW_DEFINE_ACCUM_MAX", "").strip()
