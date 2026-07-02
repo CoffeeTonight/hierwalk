@@ -11,6 +11,7 @@ from hierwalk.perf import (
     pw_inst_resolve_tier1_max,
     pw_module_file_cap,
     pw_tier0_global_scan_max,
+    text_grep_prewarm_enabled,
 )
 
 
@@ -41,6 +42,13 @@ def test_pw_tier0_caps_env(monkeypatch):
     assert pw_inst_resolve_tier1_max("recovery") == 24
     monkeypatch.setenv("HIERWALK_PW_MODULE_FILE_CAP", "8")
     assert pw_module_file_cap() == 8
+
+
+def test_text_grep_prewarm_opt_in(monkeypatch):
+    monkeypatch.delenv("HIERWALK_TEXT_GREP_PREWARM", raising=False)
+    assert text_grep_prewarm_enabled() is False
+    monkeypatch.setenv("HIERWALK_TEXT_GREP_PREWARM", "1")
+    assert text_grep_prewarm_enabled() is True
 
 
 def test_body_param_scan_max_env(monkeypatch):

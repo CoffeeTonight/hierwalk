@@ -326,6 +326,61 @@ def test_text_conn_lite_skips_comb_always_and_ff_metadata(tmp_path: Path):
     assert ff_spy.call_count == 0
 
 
+def test_pw_db_publishes_preprocess_to_index(tmp_path: Path, monkeypatch):
+    """path-walk tier1 preprocess must seed DesignIndex for text-conn reuse."""
+    from unittest.mock import patch
+
+    from hierwalk.index import DesignIndex
+    from hierwalk.path_walk_db import PathWalkModuleDb
+
+    rtl = tmp_path / "m.v"
+    rtl.write_text("module m(); assign z = a; endmodule\n", encoding="utf-8")
+    path = str(rtl.resolve())
+    index = DesignIndex.build_from_sources([path], include_dirs=[], defines={})
+    db = PathWalkModuleDb([path], index, defines={}, no_cache=True)
+    preprocessed = "module m(); wire a,z; assign z = a; endmodule\n"
+    try:
+        with patch(
+            "hierwalk.preprocess.preprocess_file_for_index",
+            return_value=preprocessed,
+        ):
+            text = db._preprocessed_text_for_file(path)
+        assert text == preprocessed
+        assert index._preprocessed_sources[str(Path(path).resolve())] == preprocessed
+        with patch(
+            "hierwalk.preprocess.preprocess_file_for_index",
+        ) as spy:
+            body = index.module_body("m")
+        assert spy.call_count == 0
+        assert "assign z = a" in body
+    finally:
+        db.shutdown_workers(wait=True)
+
+
+def test_text_grep_prewarm_lazy_by_default(tmp_path: Path, monkeypatch):
+    from hierwalk.connect.session import ConnectivitySession
+    from hierwalk.connect.shared.request import ConnectivityRequest, ConnectivityCheck
+    from hierwalk.elab import elaborate
+    from hierwalk.index import DesignIndex
+
+    monkeypatch.delenv("HIERWALK_TEXT_GREP_PREWARM", raising=False)
+    rtl = tmp_path / "m.v"
+    rtl.write_text(
+        "module m(input logic a, output logic z); assign z = a; endmodule\n",
+        encoding="utf-8",
+    )
+    path = str(rtl.resolve())
+    index = DesignIndex.build_from_sources([path], include_dirs=[], defines={})
+    _, rows = elaborate(index, "m")
+    session = ConnectivitySession(rows=rows, index=index, top="m", resolve_param_dims=False)
+    req = ConnectivityRequest(
+        checks=[ConnectivityCheck("m.a", "m.z", check_id="c0")],
+    )
+    with monkeypatch.context() as m:
+        m.setattr(session, "prewarm_text_grep_paths", lambda _paths: 99)
+        assert session.prewarm_text_grep_from_request(req, workers=8, checks_count=100) == 0
+
+
 def test_tier0_submit_skips_preprocess(tmp_path: Path):
     """Parallel tier0 must not eager-preprocess before regex workers run."""
     from unittest.mock import patch

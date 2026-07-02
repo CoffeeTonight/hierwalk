@@ -1062,6 +1062,7 @@ class ConnectivitySession:
             hit,
             defines=self.effective_defines(),
             over_approximate_if=over_approx,
+            module_body_cache=self.module_body_cache,
             on_cache_miss=_on_grep_miss,
         )
         wc.scope_mod_idx[inst_path] = idx
@@ -1082,7 +1083,11 @@ class ConnectivitySession:
         workers: int = 1,
         checks_count: int = 0,
     ) -> int:
-        """Prewarm text grep for hierarchy rows touched by *request* (when worthwhile)."""
+        """Prewarm text grep for hierarchy rows touched by *request* (opt-in only)."""
+        from hierwalk.perf import text_grep_prewarm_enabled
+
+        if not text_grep_prewarm_enabled():
+            return 0
         if workers <= 1 and checks_count < 8:
             return 0
         from hierwalk.lazy_scope import endpoint_specs_from_request, hierarchy_prefixes

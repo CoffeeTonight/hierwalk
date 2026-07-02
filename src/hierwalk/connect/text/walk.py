@@ -24,6 +24,7 @@ from hierwalk.connect.shared.endpoints import (
     _port_param_ctx,
 )
 from hierwalk.connect.text.index import (
+    ModuleBodyCache,
     TextGrepCache,
     TextGrepIndex,
     build_text_grep_index,
@@ -276,6 +277,7 @@ class _SearchCtx:
     ] = field(default_factory=dict)
     scope_mod_idx: Dict[str, TextGrepIndex] = field(default_factory=dict)
     walk_caches: Optional[TextWalkSessionCaches] = None
+    module_body_cache: Optional[ModuleBodyCache] = None
 
 
 _FRONTIER_SORT_THRESHOLD = 12
@@ -385,6 +387,7 @@ def _build_search_ctx(
     over_approximate_if: bool = True,
     elab_index: Optional[ElabIndex] = None,
     walk_caches: Optional[TextWalkSessionCaches] = None,
+    module_body_cache: Optional[ModuleBodyCache] = None,
 ) -> _SearchCtx:
     if elab_index is not None:
         rows_by_path = elab_index.rows_by_path
@@ -425,6 +428,7 @@ def _build_search_ctx(
             gctx,
             defines=defines,
             over_approximate_if=over_approximate_if,
+            module_body_cache=module_body_cache,
             on_cache_miss=_on_goal_grep_miss if wc_goal is not None else None,
         )
         goal_rep = text_net_representative(gidx, goal_net)
@@ -455,6 +459,7 @@ def _build_search_ctx(
         parent_up_cache=wc.parent_up_cache if wc is not None else {},
         scope_mod_idx=wc.scope_mod_idx if wc is not None else {},
         walk_caches=wc,
+        module_body_cache=module_body_cache,
     )
 
 
@@ -592,6 +597,7 @@ def _mod_idx_for_scope(ctx: _SearchCtx, scope: str) -> Optional[TextGrepIndex]:
         mod_ctx,
         defines=ctx.defines,
         over_approximate_if=ctx.over_approximate_if,
+        module_body_cache=ctx.module_body_cache,
         on_cache_miss=_on_grep_miss if wc is not None else None,
     )
     ctx.scope_mod_idx[scope] = built
@@ -1002,6 +1008,7 @@ def _net_rep_at_scope(
     defines: Mapping[str, str],
     over_approximate_if: bool,
     param_ctx_cache: Dict[str, Mapping[str, str]],
+    module_body_cache: Optional[ModuleBodyCache] = None,
 ) -> str:
     if not net:
         return ""
@@ -1025,6 +1032,7 @@ def _net_rep_at_scope(
             pmap,
             defines=defines,
             over_approximate_if=over_approximate_if,
+            module_body_cache=module_body_cache,
             on_cache_miss=_on_grep_miss,
         )
         walk_caches.scope_mod_idx[scope] = mod_idx
@@ -1045,6 +1053,7 @@ def text_walk_verdict_key(
     defines: Mapping[str, str],
     over_approximate_if: bool,
     param_ctx_cache: Dict[str, Mapping[str, str]],
+    module_body_cache: Optional[ModuleBodyCache] = None,
 ) -> Optional[Tuple[str, ...]]:
     """Rep-level BFS verdict key (finer than coarse dedup when ``trace=False``)."""
     if mode == "hierarchy-hierarchy":
@@ -1062,6 +1071,7 @@ def text_walk_verdict_key(
         defines=defines,
         over_approximate_if=over_approximate_if,
         param_ctx_cache=param_ctx_cache,
+        module_body_cache=module_body_cache,
     )
     if mode == "port-hierarchy":
         return ("ph", lca, start_scope, start_rep, goal_scope)
@@ -1076,6 +1086,7 @@ def text_walk_verdict_key(
         defines=defines,
         over_approximate_if=over_approximate_if,
         param_ctx_cache=param_ctx_cache,
+        module_body_cache=module_body_cache,
     )
     return ("pp", lca, start_scope, start_rep, goal_scope, goal_rep)
 
@@ -1305,6 +1316,7 @@ def bidirectional_text_grep(
     param_ctx_cache: Optional[Dict[str, Mapping[str, str]]] = None,
     elab_index: Optional[ElabIndex] = None,
     walk_caches: Optional[TextWalkSessionCaches] = None,
+    module_body_cache: Optional[ModuleBodyCache] = None,
 ) -> Tuple[bool, List[ConnectHop], int, Optional[CoiWalkDiagnostic]]:
     over_approx = _resolve_over_approximate_if(strict_generate, over_approximate_if)
     cache = grep_cache if grep_cache is not None else {}
@@ -1320,6 +1332,7 @@ def bidirectional_text_grep(
         over_approximate_if=over_approx,
         elab_index=elab_index,
         walk_caches=walk_caches,
+        module_body_cache=module_body_cache,
     )
 
     start_row = ctx.rows_by_path.get(start[0])
@@ -1578,6 +1591,7 @@ def forward_text_grep_to_scope(
     param_ctx_cache: Optional[Dict[str, Mapping[str, str]]] = None,
     elab_index: Optional[ElabIndex] = None,
     walk_caches: Optional[TextWalkSessionCaches] = None,
+    module_body_cache: Optional[ModuleBodyCache] = None,
 ) -> Tuple[bool, List[ConnectHop], int, Optional[CoiWalkDiagnostic]]:
     over_approx = _resolve_over_approximate_if(strict_generate, over_approximate_if)
     cache = grep_cache if grep_cache is not None else {}
@@ -1593,6 +1607,7 @@ def forward_text_grep_to_scope(
         over_approximate_if=over_approx,
         elab_index=elab_index,
         walk_caches=walk_caches,
+        module_body_cache=module_body_cache,
     )
     start_row = ctx.rows_by_path.get(start[0])
     if start_row is None:

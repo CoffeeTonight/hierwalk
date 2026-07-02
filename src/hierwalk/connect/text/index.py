@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable, Dict, FrozenSet, List, Mapping, Optional, Sequence, Set, Tuple
 
 from hierwalk.connect.layer import assign_adj_from_text_grep
@@ -20,6 +21,34 @@ from hierwalk.connect.shared.endpoints import (
 from hierwalk.index import DesignIndex
 
 TextGrepCache = Dict[TextGrepIndexCacheKey, "TextGrepIndex"]
+ModuleBodyCache = Dict[str, str]
+
+
+def module_body_for_text_grep(
+    index: DesignIndex,
+    mod_name: str,
+    *,
+    module_body_cache: Optional[ModuleBodyCache] = None,
+) -> str:
+    """Module body for L2 grep index; prefers session cache, then pw-db-seeded TU text."""
+    rec = index.get_module(mod_name)
+    if not rec:
+        return ""
+    if rec.body:
+        return rec.body
+    if module_body_cache:
+        file_path = rec.file_path or ""
+        for key in (
+            mod_name,
+            file_path,
+            str(Path(file_path)) if file_path else "",
+            str(Path(file_path).resolve()) if file_path else "",
+        ):
+            if key:
+                hit = module_body_cache.get(key)
+                if hit:
+                    return hit
+    return index.module_body(mod_name)
 
 
 @dataclass
@@ -119,6 +148,7 @@ def text_grep_index(
     defines: Mapping[str, str] | None = None,
     over_approximate_if: bool = True,
     *,
+    module_body_cache: Optional[ModuleBodyCache] = None,
     on_cache_miss: Optional[Callable[[], None]] = None,
 ) -> TextGrepIndex:
     """Cached text grep index (separate from logical ``mod_cache``)."""
@@ -138,8 +168,11 @@ def text_grep_index(
         hit = cache.get(key)
         if hit is not None:
             return hit
-        rec = index.get_module(mod_name)
-        body = index.module_body(mod_name) if rec else ""
+        body = module_body_for_text_grep(
+            index,
+            mod_name,
+            module_body_cache=module_body_cache,
+        )
         built = build_text_grep_index(
             body,
             param_map=param_ctx,

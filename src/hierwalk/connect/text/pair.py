@@ -138,6 +138,7 @@ def connect_pair_text(
             defines=effective_defines,
             over_approximate_if=over_approx,
             param_ctx_cache=param_ctx_cache,
+            module_body_cache=module_body_cache,
         )
         if vkey is None:
             return None
@@ -176,6 +177,7 @@ def connect_pair_text(
             defines=effective_defines,
             over_approximate_if=over_approx,
             param_ctx_cache=param_ctx_cache,
+            module_body_cache=module_body_cache,
         )
         if vkey is None:
             return
@@ -226,6 +228,7 @@ def connect_pair_text(
             param_ctx_cache=param_ctx_cache,
             elab_index=elab_index,
             walk_caches=walk_caches,
+            module_body_cache=module_body_cache,
         )
         _store_walk_verdict(start, goal, ok, mod_n, diag)
         walk_notes: List[str] = []
@@ -291,6 +294,7 @@ def connect_pair_text(
             param_ctx_cache=param_ctx_cache,
             elab_index=elab_index,
             walk_caches=walk_caches,
+            module_body_cache=module_body_cache,
         )
         _store_walk_verdict(start, goal, ok, mod_n, diag)
         walk_notes: List[str] = []

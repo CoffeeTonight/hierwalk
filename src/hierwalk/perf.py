@@ -151,6 +151,12 @@ def pw_inst_resolve_tier1_max(policy: str) -> int:
     return 12
 
 
+def text_grep_prewarm_enabled() -> bool:
+    """Opt-in eager text-grep index prewarm (``HIERWALK_TEXT_GREP_PREWARM=1``)."""
+    raw = os.environ.get("HIERWALK_TEXT_GREP_PREWARM", "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
 def pw_trace_verbose() -> bool:
     """Emit tier0/tier1/resolve/miss pw-db trace lines (``HIERWALK_PW_TRACE_VERBOSE=1``)."""
     raw = os.environ.get("HIERWALK_PW_TRACE_VERBOSE", "").strip().lower()

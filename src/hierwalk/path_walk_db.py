@@ -455,6 +455,11 @@ class PathWalkModuleDb:
             detail=f"files={len(batch)} thru={end_idx + 1}/{len(self._sources)}",
         )
 
+    def _publish_preprocessed_to_index(self, path: str, text: str) -> None:
+        if not text:
+            return
+        self._index.register_preprocessed_source(path, text)
+
     def _trace(self, message: str) -> None:
         if self._on_trace is not None and message:
             self._on_trace(message)
@@ -2112,6 +2117,7 @@ class PathWalkModuleDb:
         cached = self._preprocessed_text_cache.get(mem_key)
         if cached is not None:
             emit_pp_log(PP_MEM, key)
+            self._publish_preprocessed_to_index(key, cached)
             return cached
         disk = self._load_preprocessed_sidecar(
             key,
@@ -2122,6 +2128,7 @@ class PathWalkModuleDb:
             self._preprocessed_text_cache[mem_key] = disk
             self._trace(f"pw-db preprocess cache {Path(key).name}")
             emit_pp_log(PP_DISK, key, out_mib=len(disk) / (1024 * 1024))
+            self._publish_preprocessed_to_index(key, disk)
             return disk
         from hierwalk.preprocess import preprocess_file_for_index
 
@@ -2149,6 +2156,7 @@ class PathWalkModuleDb:
             defines_digest=defines_digest,
             include_closure_digest=include_digest,
         )
+        self._publish_preprocessed_to_index(key, text)
         return text
 
     def hint_edges_for_type_miss(

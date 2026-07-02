@@ -788,6 +788,18 @@ class DesignIndex:
             return best
         return ""
 
+    def register_preprocessed_source(self, path: str, text: str) -> None:
+        """Publish preprocessed translation-unit text (e.g. from path-walk pw-db)."""
+        if not path or not text:
+            return
+        resolved = str(Path(path).resolve())
+        for key in (path, str(Path(path)), resolved):
+            self._preprocessed_sources[key] = text
+        for mod_name in self.file_modules.get(resolved, ()):
+            rec = self.modules.get(mod_name)
+            if rec is not None and rec.body:
+                rec.body = ""
+
     def strip_bodies_for_cache(self) -> None:
         """Explicit live-memory purge (not used on the pickle save path)."""
         for rec in self.modules.values():
