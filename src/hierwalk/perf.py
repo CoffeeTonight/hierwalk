@@ -116,6 +116,17 @@ def path_walk_recovery_pass_cap() -> int:
     return 32
 
 
+def pw_fl_shell_max() -> int:
+    """Max filelist-tree shells (BFS depth) for confident tier-0 decl resolve."""
+    raw = os.environ.get("HIERWALK_PW_FL_SHELL_MAX", "").strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    return 12
+
+
 def pw_module_file_cap() -> int:
     """Max tier-0 module files scanned per path-walk resolve step."""
     raw = os.environ.get("HIERWALK_PW_MODULE_FILE_CAP", "").strip()

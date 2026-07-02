@@ -406,7 +406,7 @@ def test_tier0_parallel_finds_module_without_waiting_for_all(tmp_path: Path):
     assert str(target.resolve()) in candidates
     assert "target_parent" in db.module_to_files_snapshot()
     db.drain_background_workers(wait_all=True)
-    assert db.files_regex_scanned >= len(files)
+    assert db.files_regex_scanned < len(files)
     assert elapsed < 5.0
 
 

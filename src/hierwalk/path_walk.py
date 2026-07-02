@@ -3295,6 +3295,9 @@ def create_path_walk_index(
         on_progress(
             f"path-walk: pw-db init ({len(sources)} sources, lazy defines)"
         )
+    root_fl = ""
+    if fl.raw is not None:
+        root_fl = str(fl.raw.top_path.resolve())
     mod_db = PathWalkModuleDb(
         sources,
         index,
@@ -3311,6 +3314,7 @@ def create_path_walk_index(
         filelist_children={
             str(k): list(v) for k, v in (fl.filelist_children or {}).items()
         },
+        root_filelist=root_fl,
         path_digests=path_digests,
         jobs=jobs,
     )

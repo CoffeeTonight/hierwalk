@@ -9,6 +9,7 @@ from hierwalk.perf import (
     effective_low_memory,
     low_memory_auto_threshold,
     pw_inst_resolve_tier1_max,
+    pw_fl_shell_max,
     pw_module_file_cap,
     pw_tier0_global_scan_max,
     text_grep_prewarm_enabled,
@@ -36,6 +37,7 @@ def test_pw_tier0_caps_env(monkeypatch):
     monkeypatch.delenv("HIERWALK_PW_MODULE_FILE_CAP", raising=False)
     monkeypatch.delenv("HIERWALK_PW_TIER0_GLOBAL_MAX", raising=False)
     monkeypatch.delenv("HIERWALK_PW_TIER1_MAX", raising=False)
+    assert pw_fl_shell_max() == 12
     assert pw_module_file_cap() == 32
     assert pw_tier0_global_scan_max() == 128
     assert pw_inst_resolve_tier1_max("confident") == 12
