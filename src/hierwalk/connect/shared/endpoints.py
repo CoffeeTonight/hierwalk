@@ -1059,6 +1059,7 @@ def _module_index(
     over_approximate_if: bool = True,
     ff_barrier: bool = False,
     resolve_param_dims: bool = True,
+    text_grep_cache: Optional[Dict[ModuleIndexCacheKey, object]] = None,
 ) -> ModuleConnectIndex:
     key, binds = _resolve_module_index_key(
         index,
@@ -1087,6 +1088,7 @@ def _module_index(
             over_approximate_if=over_approximate_if,
             ff_barrier=ff_barrier,
             resolve_param_dims=resolve_param_dims,
+            text_grep_cache=text_grep_cache,
         )
         return built
 
@@ -1103,7 +1105,11 @@ def _build_module_index_entry(
     over_approximate_if: bool = True,
     ff_barrier: bool = False,
     resolve_param_dims: bool = True,
+    text_grep_cache: Optional[Dict[ModuleIndexCacheKey, object]] = None,
 ) -> ModuleConnectIndex:
+    from hierwalk.connect.layer import find_text_grep_seed
+    from hierwalk.connect.text.index import enrich_text_grep_to_logical_index
+
     rec = index.get_module(mod_name)
     body = index.module_body(mod_name) if rec else ""
     ctx_key = key[1]
@@ -1150,27 +1156,48 @@ def _build_module_index_entry(
     else:
         source_file = rec.file_path if rec else None
         include_dirs = list(getattr(index, "_preprocess_include_dirs", ()) or ())
-        base = build_module_connect_index(
-            body,
-            param_map=param_ctx,
-            defines=defines,
-            fold_generate=True,
-            over_approximate_if=over_approximate_if,
-            ff_barrier=ff_barrier,
-            resolve_param_dims=resolve_param_dims,
-            port_decl_widths=(
-                _port_decl_bit_indices(index, mod_name, param_ctx, defines=defines)
-                if resolve_param_dims
-                else None
-            ),
-            port_decl_md_suffixes=(
-                _port_decl_md_suffixes(index, mod_name, param_ctx, defines=defines)
-                if resolve_param_dims
-                else None
-            ),
-            source_file=source_file,
-            include_dirs=include_dirs,
+        text_seed = (
+            find_text_grep_seed(text_grep_cache, key)
+            if resolve_param_dims and text_grep_cache
+            else None
         )
+        port_widths = (
+            _port_decl_bit_indices(index, mod_name, param_ctx, defines=defines)
+            if resolve_param_dims
+            else None
+        )
+        port_md = (
+            _port_decl_md_suffixes(index, mod_name, param_ctx, defines=defines)
+            if resolve_param_dims
+            else None
+        )
+        if text_seed is not None:
+            base = enrich_text_grep_to_logical_index(
+                text_seed,
+                body,
+                param_map=param_ctx,
+                defines=defines,
+                over_approximate_if=over_approximate_if,
+                ff_barrier=ff_barrier,
+                source_file=source_file,
+                include_dirs=include_dirs,
+                port_decl_widths=port_widths,
+                port_decl_md_suffixes=port_md,
+            )
+        else:
+            base = build_module_connect_index(
+                body,
+                param_map=param_ctx,
+                defines=defines,
+                fold_generate=True,
+                over_approximate_if=over_approximate_if,
+                ff_barrier=ff_barrier,
+                resolve_param_dims=resolve_param_dims,
+                port_decl_widths=port_widths,
+                port_decl_md_suffixes=port_md,
+                source_file=source_file,
+                include_dirs=include_dirs,
+            )
         if bind_list:
             built = base.copy()
             apply_bind_connectivity(

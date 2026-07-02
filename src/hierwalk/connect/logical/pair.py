@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 from hierwalk.connect.logical.scan import ModuleConnectIndex
+from hierwalk.connect.text.index import TextGrepCache
 from hierwalk.connect.logical.search import (
     _bidirectional_coi,
     _connect_note,
@@ -39,6 +40,7 @@ def connect_pair(
     elab_index: Optional[ElabIndex] = None,
     rows_by_path: Optional[Mapping[str, FlatRow]] = None,
     resolve_param_dims: bool = True,
+    text_grep_cache: Optional[TextGrepCache] = None,
     endpoint_cache: Optional[EndpointResolveCache] = None,
     endpoint_cache_lock: Optional[object] = None,
 ) -> ConnectResult:
@@ -108,6 +110,7 @@ def connect_pair(
             param_ctx_cache=param_ctx_cache,
             elab_index=elab_index,
             resolve_param_dims=resolve_param_dims,
+            text_grep_cache=text_grep_cache,
         )
         walk_notes: List[str] = []
         if not ok and diag is not None:
@@ -149,6 +152,7 @@ def connect_pair(
             param_ctx_cache=param_ctx_cache,
             elab_index=elab_index,
             resolve_param_dims=resolve_param_dims,
+            text_grep_cache=text_grep_cache,
         )
         walk_notes: List[str] = []
         if not ok and diag is not None:

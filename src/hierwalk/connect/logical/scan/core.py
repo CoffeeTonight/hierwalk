@@ -3347,6 +3347,7 @@ def scan_assign_adjacency(
     braced_concat_bases: Optional[Set[str]] = None,
     skip_comb_always: bool = False,
     grep_only: bool = False,
+    seed_adj: Optional[Mapping[str, Set[str]]] = None,
 ) -> Dict[str, Set[str]]:
     consts, pmap = _collect_const_assigns_fixed(body, param_map=param_map)
     zero_nets = {
@@ -3355,6 +3356,12 @@ def scan_assign_adjacency(
         if val == 0
     }
     adj: Dict[str, Set[str]] = {}
+    if seed_adj:
+        for left, neighbors in seed_adj.items():
+            bucket = adj.setdefault(left, set())
+            for right in neighbors:
+                bucket.add(right)
+                adj.setdefault(right, set()).add(left)
     if decl_widths is not None and decl_md_suffixes is not None:
         widths = {name: list(bits) for name, bits in decl_widths.items()}
         md_suffixes = {name: list(sfx) for name, sfx in decl_md_suffixes.items()}
@@ -4591,8 +4598,9 @@ def build_module_connect_index(
     prepared_body: Optional[str] = None,
     source_file: str | None = None,
     include_dirs: Sequence[str] | None = None,
+    text_seed_adj: Optional[Mapping[str, Set[str]]] = None,
 ) -> ModuleConnectIndex:
-    if os.environ.get("HIERWALK_CONNECT_INDEX_MEMO", "").lower() in (
+    if text_seed_adj or os.environ.get("HIERWALK_CONNECT_INDEX_MEMO", "").lower() in (
         "0",
         "off",
         "false",
@@ -4610,6 +4618,7 @@ def build_module_connect_index(
             prepared_body=prepared_body,
             source_file=source_file,
             include_dirs=include_dirs,
+            text_seed_adj=text_seed_adj,
         )
     key = _build_index_cache_key(
         body,
@@ -4643,6 +4652,7 @@ def build_module_connect_index(
             prepared_body=prepared_body,
             source_file=source_file,
             include_dirs=include_dirs,
+            text_seed_adj=None,
         )
         _build_index_mem_cache[key] = built
         return built
@@ -4662,6 +4672,7 @@ def _build_module_connect_index_uncached(
     prepared_body: Optional[str] = None,
     source_file: str | None = None,
     include_dirs: Sequence[str] | None = None,
+    text_seed_adj: Optional[Mapping[str, Set[str]]] = None,
 ) -> ModuleConnectIndex:
     global _build_index_uncached_calls
     _build_index_uncached_calls += 1
@@ -4712,6 +4723,7 @@ def _build_module_connect_index_uncached(
         cell_types=cell_types,
     )
     text_conn_lite = not resolve_param_dims
+    assign_seed = text_seed_adj if (text_seed_adj and resolve_param_dims) else None
     assign_adj = scan_assign_adjacency(
         text,
         hier_links=hier_links,
@@ -4725,6 +4737,7 @@ def _build_module_connect_index_uncached(
         braced_concat_bases=braced_concat_bases,
         skip_comb_always=text_conn_lite,
         grep_only=text_conn_lite,
+        seed_adj=assign_seed,
     )
     bit_precise_bases: FrozenSet[str] = frozenset()
     if not resolve_param_dims:

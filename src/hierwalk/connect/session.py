@@ -600,6 +600,9 @@ class ConnectivitySession:
                 elab_index=self.elab_index,
                 rows_by_path=self.rows_by_path,
                 resolve_param_dims=self.resolve_param_dims,
+                text_grep_cache=(
+                    self.text_grep_cache if self.resolve_param_dims else None
+                ),
                 endpoint_cache=self.endpoint_resolve_cache,
                 endpoint_cache_lock=self._endpoint_resolve_lock,
             )
@@ -626,6 +629,9 @@ class ConnectivitySession:
                         elab_index=self.elab_index,
                         rows_by_path=self.rows_by_path,
                         resolve_param_dims=self.resolve_param_dims,
+                        text_grep_cache=(
+                            self.text_grep_cache if self.resolve_param_dims else None
+                        ),
                         endpoint_cache=self.endpoint_resolve_cache,
                         endpoint_cache_lock=self._endpoint_resolve_lock,
                     )
@@ -1125,6 +1131,10 @@ class ConnectivitySession:
             defines=self.effective_defines(),
             over_approximate_if=over_approx,
             ff_barrier=self.ff_barrier,
+            resolve_param_dims=self.resolve_param_dims,
+            text_grep_cache=(
+                self.text_grep_cache if self.resolve_param_dims else None
+            ),
         )
         return True
 

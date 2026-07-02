@@ -6,6 +6,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Callable, Dict, FrozenSet, List, Mapping, Optional, Sequence, Set, Tuple
 
+from hierwalk.connect.layer import assign_adj_from_text_grep
 from hierwalk.connect.logical.scan import (
     ModuleConnectIndex,
     build_module_connect_index,
@@ -58,6 +59,36 @@ def text_net_representative(idx: TextGrepIndex, net: str) -> str:
         resolve_param_dims=False,
     )
     return net_representative(proxy, net)
+
+
+def enrich_text_grep_to_logical_index(
+    text_idx: TextGrepIndex,
+    body: str,
+    *,
+    param_map: Optional[Mapping[str, str]] = None,
+    defines: Optional[Mapping[str, str]] = None,
+    over_approximate_if: bool = True,
+    ff_barrier: bool = False,
+    source_file: str | None = None,
+    include_dirs: Optional[Sequence[str]] = None,
+    port_decl_widths: Optional[Mapping[str, List[int]]] = None,
+    port_decl_md_suffixes: Optional[Mapping[str, List[str]]] = None,
+) -> ModuleConnectIndex:
+    """L3 logical COI: reuse L2 grep adjacency, add FF/param-dim enrichment."""
+    return build_module_connect_index(
+        body,
+        param_map=param_map,
+        defines=defines,
+        over_approximate_if=over_approximate_if,
+        fold_generate=True,
+        ff_barrier=ff_barrier,
+        resolve_param_dims=True,
+        source_file=source_file,
+        include_dirs=include_dirs,
+        port_decl_widths=port_decl_widths,
+        port_decl_md_suffixes=port_decl_md_suffixes,
+        text_seed_adj=assign_adj_from_text_grep(text_idx),
+    )
 
 
 def build_text_grep_index(

@@ -353,6 +353,87 @@ def test_tier0_submit_skips_preprocess(tmp_path: Path):
         db.shutdown_workers(wait=True)
 
 
+def test_logical_enriches_from_text_grep_seed():
+    from unittest.mock import patch
+
+    from hierwalk.connect.logical.scan.core import scan_ff_adjacency
+    from hierwalk.connect.text.index import (
+        build_text_grep_index,
+        enrich_text_grep_to_logical_index,
+    )
+
+    body = """
+    module m(input logic a, output logic z);
+      logic q, d;
+      always_ff @(posedge clk) q <= d;
+      assign d = a;
+      assign z = q;
+    endmodule
+    """
+    text_idx = build_text_grep_index(body)
+    with patch(
+        "hierwalk.connect.logical.scan.core.scan_ff_adjacency",
+        wraps=scan_ff_adjacency,
+    ) as ff_spy:
+        logical = enrich_text_grep_to_logical_index(
+            text_idx,
+            body,
+            ff_barrier=True,
+        )
+    assert ff_spy.call_count == 1
+    assert logical.net_rep
+    assert logical.resolve_param_dims is True
+
+
+def test_module_index_reuses_text_grep_cache(tmp_path: Path):
+    from hierwalk.connect.shared.endpoints import _module_index
+    from hierwalk.connect.text.index import text_grep_index
+    from hierwalk.elab import elaborate
+    from hierwalk.index import DesignIndex
+
+    rtl = tmp_path / "m.v"
+    rtl.write_text(
+        """
+        module m(input logic a, output logic z);
+          assign z = a;
+        endmodule
+        """,
+        encoding="utf-8",
+    )
+    path = str(rtl.resolve())
+    index = DesignIndex.build_from_sources([path], include_dirs=[], defines={})
+    _, rows = elaborate(index, "m")
+    row = rows[0]
+    text_cache = {}
+    text_grep_index(
+        text_cache,
+        index,
+        "m",
+        row.param_ctx,
+        defines={},
+    )
+    mod_cache = {}
+    from hierwalk.connect.text.index import enrich_text_grep_to_logical_index
+
+    with patch(
+        "hierwalk.connect.text.index.enrich_text_grep_to_logical_index",
+        wraps=enrich_text_grep_to_logical_index,
+    ) as enrich_spy:
+        logical = _module_index(
+            mod_cache,
+            index,
+            "m",
+            row.param_ctx,
+            defines={},
+            ff_barrier=True,
+            resolve_param_dims=True,
+            text_grep_cache=text_cache,
+        )
+    assert enrich_spy.call_count == 1
+    assert logical.net_rep
+    assert len(mod_cache) == 1
+
+
 def test_tier0_worker_reuses_preprocessed_sidecar(tmp_path: Path):
     from unittest.mock import patch
 

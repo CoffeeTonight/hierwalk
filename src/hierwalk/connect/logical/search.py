@@ -19,6 +19,7 @@ from hierwalk.connect.logical.scan import (
 )
 from hierwalk.connect.logical.walk_log import CoiWalkDiagnostic
 from hierwalk.connect.shared.endpoints import ModuleIndexCacheKey, _module_index, _port_param_ctx
+from hierwalk.connect.text.index import TextGrepCache
 from hierwalk.index import DesignIndex
 from hierwalk.models import ConnectHop, ElabIndex, FlatRow
 from hierwalk.params import resolve_param_expr
@@ -197,6 +198,7 @@ class _SearchCtx:
     over_approximate_if: bool = True
     ff_barrier: bool = False
     resolve_param_dims: bool = True
+    text_grep_cache: Optional[TextGrepCache] = None
     port_rep_cache: Dict[Tuple[int, str], str] = field(default_factory=dict)
     net_rep_cache: Dict[Tuple[int, str], str] = field(default_factory=dict)
 
@@ -305,6 +307,7 @@ def _build_search_ctx(
     ff_barrier: bool = False,
     resolve_param_dims: bool = True,
     elab_index: Optional[ElabIndex] = None,
+    text_grep_cache: Optional[TextGrepCache] = None,
 ) -> _SearchCtx:
     if elab_index is not None:
         rows_by_path = elab_index.rows_by_path
@@ -341,6 +344,7 @@ def _build_search_ctx(
             over_approximate_if=over_approximate_if,
             ff_barrier=ff_barrier,
             resolve_param_dims=resolve_param_dims,
+            text_grep_cache=text_grep_cache,
         )
         goal_rep = net_representative(gidx, goal_net)
     return _SearchCtx(
@@ -363,6 +367,7 @@ def _build_search_ctx(
         over_approximate_if=over_approximate_if,
         ff_barrier=ff_barrier,
         resolve_param_dims=resolve_param_dims,
+        text_grep_cache=text_grep_cache,
     )
 
 
@@ -420,6 +425,7 @@ def _expand_state(
         over_approximate_if=ctx.over_approximate_if,
         ff_barrier=ctx.ff_barrier,
         resolve_param_dims=ctx.resolve_param_dims,
+        text_grep_cache=ctx.text_grep_cache,
     )
     rep = _cached_net_rep(mod_idx, net, ctx.net_rep_cache)
 
@@ -471,6 +477,7 @@ def _expand_state(
             over_approximate_if=ctx.over_approximate_if,
             ff_barrier=ctx.ff_barrier,
             resolve_param_dims=ctx.resolve_param_dims,
+            text_grep_cache=ctx.text_grep_cache,
         )
         push(
             child_path,
@@ -503,6 +510,7 @@ def _expand_state(
             over_approximate_if=ctx.over_approximate_if,
             ff_barrier=ctx.ff_barrier,
             resolve_param_dims=ctx.resolve_param_dims,
+            text_grep_cache=ctx.text_grep_cache,
         )
         push(
             child_path,
@@ -529,6 +537,7 @@ def _expand_state(
                 over_approximate_if=ctx.over_approximate_if,
                 ff_barrier=ctx.ff_barrier,
                 resolve_param_dims=ctx.resolve_param_dims,
+                text_grep_cache=ctx.text_grep_cache,
             )
             for port_name, expr in parent_idx.inst_ports.get(row.inst_leaf, ()):
                 if not _child_port_rep_matches(
@@ -661,6 +670,7 @@ def _bidirectional_coi(
     param_ctx_cache: Optional[Dict[str, Mapping[str, str]]] = None,
     elab_index: Optional[ElabIndex] = None,
     resolve_param_dims: bool = True,
+    text_grep_cache: Optional[TextGrepCache] = None,
 ) -> Tuple[bool, List[ConnectHop], int, Optional[CoiWalkDiagnostic]]:
     over_approx = _resolve_over_approximate_if(strict_generate, over_approximate_if)
     cache = mod_cache if mod_cache is not None else {}
@@ -677,6 +687,7 @@ def _bidirectional_coi(
         ff_barrier=ff_barrier,
         resolve_param_dims=resolve_param_dims,
         elab_index=elab_index,
+        text_grep_cache=text_grep_cache,
     )
 
     start_row = ctx.rows_by_path.get(start[0])
@@ -692,6 +703,7 @@ def _bidirectional_coi(
         over_approximate_if=over_approx,
         ff_barrier=ff_barrier,
         resolve_param_dims=resolve_param_dims,
+        text_grep_cache=text_grep_cache,
     )
     start_key = _state_key(
         start[0],
@@ -719,6 +731,7 @@ def _bidirectional_coi(
             over_approximate_if=over_approx,
             ff_barrier=ff_barrier,
             resolve_param_dims=resolve_param_dims,
+            text_grep_cache=text_grep_cache,
         )
         goal_key = _state_key(
             goal[0],
@@ -849,6 +862,7 @@ def _forward_coi_to_scope(
     param_ctx_cache: Optional[Dict[str, Mapping[str, str]]] = None,
     elab_index: Optional[ElabIndex] = None,
     resolve_param_dims: bool = True,
+    text_grep_cache: Optional[TextGrepCache] = None,
 ) -> Tuple[bool, List[ConnectHop], int, Optional[CoiWalkDiagnostic]]:
     over_approx = _resolve_over_approximate_if(strict_generate, over_approximate_if)
     cache = mod_cache if mod_cache is not None else {}
@@ -865,6 +879,7 @@ def _forward_coi_to_scope(
         ff_barrier=ff_barrier,
         resolve_param_dims=resolve_param_dims,
         elab_index=elab_index,
+        text_grep_cache=text_grep_cache,
     )
     start_row = ctx.rows_by_path.get(start[0])
     if start_row is None:
@@ -879,6 +894,7 @@ def _forward_coi_to_scope(
         over_approximate_if=over_approx,
         ff_barrier=ff_barrier,
         resolve_param_dims=resolve_param_dims,
+        text_grep_cache=text_grep_cache,
     )
     start_key = _state_key(
         start[0],
