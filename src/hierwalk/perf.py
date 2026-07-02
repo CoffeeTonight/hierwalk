@@ -185,6 +185,36 @@ def connect_jobs_from_env() -> int:
         return 0
 
 
+def preprocess_log_level() -> int:
+    """
+    Preprocessing tag verbosity for path-walk (``HIERWALK_PP_LOG``).
+
+    0=off, 1=brief (default), 2=all (includes memory-cache hits).
+    """
+    raw = os.environ.get("HIERWALK_PP_LOG", "").strip().lower()
+    if raw in ("0", "off", "false", "no", "disable", "disabled"):
+        return 0
+    if raw in ("", "1", "brief", "true", "yes", "on"):
+        return 1
+    if raw in ("2", "all", "verbose"):
+        return 2
+    try:
+        return max(0, min(2, int(raw)))
+    except ValueError:
+        return 1
+
+
+def preprocess_log_slow_ms() -> float:
+    """Min milliseconds to log ``pp-closure`` at brief level (``HIERWALK_PP_LOG_SLOW_MS``)."""
+    raw = os.environ.get("HIERWALK_PP_LOG_SLOW_MS", "").strip()
+    if raw:
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            pass
+    return 1000.0
+
+
 def slow_file_log_threshold_sec() -> Optional[float]:
     """
     Log per-file preprocess/scan timing when a source exceeds this many seconds.

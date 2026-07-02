@@ -460,6 +460,7 @@ class PathWalkModuleDb:
         self.cache_validated_hits: int = 0
         self._folded_edges_cache: Dict[Tuple[str, str, str], List[InstanceEdge]] = {}
         self._preprocessed_text_cache: Dict[Tuple[str, str, str], str] = {}
+        self._include_closure_digest_cache: Dict[str, str] = {}
         self._inst_leaf_index: Dict[InstLeafIndexKey, Dict[str, InstanceEdge]] = {}
         self._tier1_warm_inflight: Set[str] = set()
         self._snapshot_dirty: bool = False
@@ -706,7 +707,14 @@ class PathWalkModuleDb:
 
     def _include_closure_digest(self, path: str) -> str:
         from hierwalk.preprocess import _collect_include_closure
+        from hierwalk.preprocess_log import PP_CLOSURE, emit_pp_log
 
+        key = str(Path(path).resolve())
+        cached = self._include_closure_digest_cache.get(key)
+        if cached is not None:
+            return cached
+
+        t0 = time.perf_counter()
         closure, _ = _collect_include_closure(
             [path],
             self._include_dirs,
@@ -720,7 +728,11 @@ class PathWalkModuleDb:
             if digest is not None:
                 hasher.update(digest.encode())
             hasher.update(b"\0")
-        return hasher.hexdigest()[:16]
+        ms = (time.perf_counter() - t0) * 1000.0
+        emit_pp_log(PP_CLOSURE, path, ms=ms, incl=len(closure))
+        digest = hasher.hexdigest()[:16]
+        self._include_closure_digest_cache[key] = digest
+        return digest
 
     def _load_regex_sidecar(self, path: str) -> Optional[_FileRegexCacheEntry]:
         sidecar = self._regex_sidecar(path)
@@ -1477,15 +1489,19 @@ class PathWalkModuleDb:
             self._trace(f"pw-db tier0 read-fail {Path(key).name}")
             return
         names = list(result.names)
+        from hierwalk.preprocess_log import PP_T0, PP_T0_HIT, emit_pp_log
+
         if result.from_cache:
             self.cache_regex_hits += 1
             self._trace(
                 f"pw-db tier0 cache {Path(key).name} -> {','.join(names) or '(none)'}"
             )
+            emit_pp_log(PP_T0_HIT, key, names=len(names), detail="worker")
         else:
             self._trace(
                 f"pw-db tier0 scan {Path(key).name} -> {','.join(names) or '(none)'}"
             )
+            emit_pp_log(PP_T0, key, names=len(names), detail="worker")
         self._note_regex_modules(key, names)
         if not result.from_cache and self._cache_root is not None:
             digest = self._tier0_scan_digest(key)
@@ -1551,8 +1567,19 @@ class PathWalkModuleDb:
             key = str(Path(raw).resolve())
             if key in self._regex_scanned or key in self._tier0_inflight:
                 continue
+            from hierwalk.preprocess_log import PP_DUP, emit_pp_log
+
+            had_pp = any(mem_key[0] == key for mem_key in self._preprocessed_text_cache)
             try:
+                t_dup = time.perf_counter()
                 self._preprocessed_text_for_file(key)
+                if had_pp:
+                    emit_pp_log(
+                        PP_DUP,
+                        key,
+                        ms=(time.perf_counter() - t_dup) * 1000.0,
+                        detail="tier0-submit",
+                    )
             except OSError:
                 pass
             job = self._tier0_make_job(key)
@@ -1690,6 +1717,8 @@ class PathWalkModuleDb:
         self._set_phase("mapping", detail=Path(key).name)
         self._regex_scanned.add(key)
 
+        from hierwalk.preprocess_log import PP_T0, PP_T0_HIT, emit_pp_log
+
         hit = self._load_regex_sidecar(key)
         if hit is not None:
             self.cache_regex_hits += 1
@@ -1699,8 +1728,10 @@ class PathWalkModuleDb:
             self._trace(
                 f"pw-db tier0 cache {Path(key).name} -> {','.join(names) or '(none)'}"
             )
+            emit_pp_log(PP_T0_HIT, key, names=len(names), detail="disk")
             return names
 
+        t0 = time.perf_counter()
         try:
             text = self._tier0_preprocessed_text(key)
         except OSError:
@@ -1713,6 +1744,13 @@ class PathWalkModuleDb:
         self.files_regex_scanned += 1
         self._trace(
             f"pw-db tier0 scan {Path(key).name} -> {','.join(names) or '(none)'}"
+        )
+        emit_pp_log(
+            PP_T0,
+            key,
+            ms=(time.perf_counter() - t0) * 1000.0,
+            names=len(names),
+            detail="sync",
         )
         return names
 
@@ -1997,13 +2035,18 @@ class PathWalkModuleDb:
 
     def tier1_scan_file(self, path: str) -> Dict[str, ModuleRecord]:
         """Light preprocess + instance scan for one translation unit."""
+        from hierwalk.preprocess_log import PP_T1, PP_T1_HIT, emit_pp_log
+
         key = str(Path(path).resolve())
         with self._tier1_scan_lock:
             mem = self._validated_memory.get(key)
             if mem is not None:
+                inst = sum(len(r.instances) for r in mem.values())
+                emit_pp_log(PP_T1_HIT, key, mods=len(mem), inst=inst, detail="mem")
                 return mem
 
             self._set_phase("parsing", detail=Path(key).name)
+            t0 = time.perf_counter()
 
             defs: Dict[str, str] = dict(self._tier1_defines())
             effective_digest = _defines_digest(defs)
@@ -2022,6 +2065,15 @@ class PathWalkModuleDb:
                     f"{n}({len(r.instances)}inst)" for n, r in sorted(disk.items())
                 )
                 self._trace(f"pw-db tier1 cache {Path(key).name} -> {summary or '(none)'}")
+                inst = sum(len(r.instances) for r in disk.values())
+                emit_pp_log(
+                    PP_T1_HIT,
+                    key,
+                    ms=(time.perf_counter() - t0) * 1000.0,
+                    mods=len(disk),
+                    inst=inst,
+                    detail="disk",
+                )
                 return disk
 
             text = self._preprocessed_text_for_file(key)
@@ -2041,6 +2093,14 @@ class PathWalkModuleDb:
                 f"{n}({len(r.instances)}inst)" for n, r in sorted(out.items())
             )
             self._trace(f"pw-db tier1 scan {Path(key).name} -> {summary or '(none)'}")
+            inst = sum(len(r.instances) for r in out.values())
+            emit_pp_log(
+                PP_T1,
+                key,
+                ms=(time.perf_counter() - t0) * 1000.0,
+                mods=len(out),
+                inst=inst,
+            )
             return out
 
     def _invalidate_folded_edges_cache(
@@ -2135,12 +2195,15 @@ class PathWalkModuleDb:
         return None
 
     def _preprocessed_text_for_file(self, fpath: str) -> str:
+        from hierwalk.preprocess_log import PP_DISK, PP_MEM, PP_MISS, emit_pp_log
+
         key = str(Path(fpath).resolve())
         defines_digest = self._defines_digest
         include_digest = self._include_closure_digest(key)
         mem_key = (key, defines_digest, include_digest)
         cached = self._preprocessed_text_cache.get(mem_key)
         if cached is not None:
+            emit_pp_log(PP_MEM, key)
             return cached
         disk = self._load_preprocessed_sidecar(
             key,
@@ -2150,10 +2213,12 @@ class PathWalkModuleDb:
         if disk is not None:
             self._preprocessed_text_cache[mem_key] = disk
             self._trace(f"pw-db preprocess cache {Path(key).name}")
+            emit_pp_log(PP_DISK, key, out_mib=len(disk) / (1024 * 1024))
             return disk
         from hierwalk.preprocess import preprocess_file_for_index
 
         defs = dict(self._tier1_defines())
+        t0 = time.perf_counter()
         text = preprocess_file_for_index(
             Path(key),
             self._include_dirs,
@@ -2161,6 +2226,13 @@ class PathWalkModuleDb:
             set(),
             skip_path_patterns=self._skip,
             apply_ifdef=True,
+        )
+        ms = (time.perf_counter() - t0) * 1000.0
+        emit_pp_log(
+            PP_MISS,
+            key,
+            ms=ms,
+            out_mib=len(text) / (1024 * 1024),
         )
         self._preprocessed_text_cache[mem_key] = text
         self._save_preprocessed_sidecar(

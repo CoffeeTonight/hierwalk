@@ -53,6 +53,8 @@ environment:
   HIERWALK_PW_TRACE_VERBOSE  show tier0/tier1 pw-db search steps on stderr (1=on)
   HIERWALK_PW_HEARTBEAT      periodic pw-db / connect-coi progress (1=30s)
   HIERWALK_CONNECT_JOBS      path-walk text/logical COI worker count (0=auto)
+  HIERWALK_PP_LOG            preprocessing tags on stderr: 0=off 1=brief (default) 2=all
+  HIERWALK_PP_LOG_SLOW_MS    min ms for pp-closure at brief level (default 1000)
   HIERWALK_LOG_SLOW_FILES    log per-file preprocess/scan timing (1=10s, or seconds)
   HIERWALK_LOW_MEMORY_AUTO   auto fused index above N sources (default 1500; 0=off)
   HCH_INDEX_CWD               default --index-cwd for -F filelists"""
@@ -370,7 +372,7 @@ Ignore rules
 Environment (optional)
 ----------------------
   env (object)                Process env for hier-walk tuning (see HELP epilog).
-                              Keys like HIERWALK_INCLUDE_WARM, HIERWALK_LOG_SLOW_FILES.
+                              Keys like HIERWALK_PP_LOG, HIERWALK_LOG_SLOW_FILES.
                               Aliases: environment, hier-walk-env.
                               JSON env wins over shell export for the same key.
 

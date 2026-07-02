@@ -1009,6 +1009,7 @@ def preprocess_file_for_index(
         hit = _SOURCE_PREPROCESS_CACHE.get(cache_key)
         if hit is not None:
             return _restore_source_preprocess_cache_hit(defines, hit)
+    t0 = time.perf_counter()
     visiting = visiting or set()
     raw = _read_raw_source_file(path, skip_path_patterns)
     text = _preprocess_conditional_pass(
@@ -1024,6 +1025,19 @@ def preprocess_file_for_index(
         _SOURCE_PREPROCESS_CACHE[cache_key] = (
             text,
             _defines_delta(base_defines, defines),
+        )
+    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+    from hierwalk.perf import slow_file_log_threshold_sec
+    from hierwalk.preprocess_log import PP_SLOW, emit_pp_log
+
+    slow_sec = slow_file_log_threshold_sec()
+    if slow_sec is not None and elapsed_ms >= slow_sec * 1000.0:
+        emit_pp_log(
+            PP_SLOW,
+            path,
+            ms=elapsed_ms,
+            out_mib=len(text) / (1024 * 1024),
+            detail="for-index",
         )
     return text
 

@@ -12,6 +12,8 @@ from hierwalk.perf import (
     include_warm_enabled,
     log_large_module_skips,
     low_memory_auto_threshold,
+    preprocess_log_level,
+    preprocess_log_slow_ms,
     pw_db_prefetch_enabled,
     pw_db_prefetch_max_files,
     pw_db_prefetch_wait_on_exit,
@@ -108,6 +110,16 @@ _BEHAVIOR_ENV_VARS: Sequence[tuple[str, str, str]] = (
         "HIERWALK_CONNECT_JOBS",
         "(unset)",
         "path-walk connect-COI worker count (0=auto)",
+    ),
+    (
+        "HIERWALK_PP_LOG",
+        "1",
+        "preprocessing stderr tags: 0=off 1=brief 2=all (grep: [hier-walk pp])",
+    ),
+    (
+        "HIERWALK_PP_LOG_SLOW_MS",
+        "1000",
+        "min ms to log pp-closure at brief level",
     ),
     (
         "HIERWALK_LOG_SLOW_FILES",
@@ -248,6 +260,8 @@ def format_config_env_audit_lines(
         f"body_param_scan_max={body_param_scan_max()} "
         f"log_large_modules={int(log_large_module_skips())} "
         f"slow_file_log_sec={slow if slow is not None else 'off'} "
+        f"pp_log_level={preprocess_log_level()} "
+        f"pp_log_slow_ms={preprocess_log_slow_ms():.0f} "
         f"pw_trace_verbose={int(pw_trace_verbose())} "
         f"pw_heartbeat_sec={pw_heartbeat_interval_sec() or 'off'} "
         f"connect_jobs_env={connect_jobs_from_env()}"
