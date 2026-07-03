@@ -553,6 +553,134 @@ def _write_top_a_b_stub_parent_scoped_design(tmp_path: Path) -> tuple[Path, str]
     return root, "top.a.b"
 
 
+def _write_deep_nested_child_fl_design(tmp_path: Path) -> tuple[Path, str]:
+    """Four filelist levels before RTL; real ``A`` co-listed on ``root.f``."""
+    (tmp_path / "top.v").write_text("module top; A a (); endmodule\n", encoding="utf-8")
+    (tmp_path / "top_a.v").write_text("module A; B b (); endmodule\n", encoding="utf-8")
+    (tmp_path / "b_stub.v").write_text("module B; endmodule\n", encoding="utf-8")
+    lists = tmp_path / "lists"
+    lists.mkdir()
+    (lists / "grandchild.f").write_text(
+        str((tmp_path / "b_stub.v").resolve()) + "\n",
+        encoding="utf-8",
+    )
+    (lists / "child.f").write_text(
+        f"-f {(lists / 'grandchild.f').resolve()}\n",
+        encoding="utf-8",
+    )
+    (lists / "parent.f").write_text(
+        f"-f {(lists / 'child.f').resolve()}\n",
+        encoding="utf-8",
+    )
+    root = tmp_path / "root.f"
+    root.write_text(
+        "\n".join(
+            [
+                str((tmp_path / "top.v").resolve()),
+                f"-f {(lists / 'parent.f').resolve()}",
+                str((tmp_path / "top_a.v").resolve()),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return root, "top.a.b"
+
+
+def test_deep_nested_child_fl_resolves_top_a_b_without_recovery(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """Grandchild ``.f`` RTL must appear in confident scoped pool (BFS child FLs)."""
+    fl_path, target = _write_deep_nested_child_fl_design(tmp_path)
+    fl = parse_filelist(str(fl_path), index_cwd=str(tmp_path))
+
+    def _no_recovery(self, spec_targets=None, **kwargs):
+        return 0, 0, []
+
+    monkeypatch.setattr(
+        "hierwalk.path_walk.PathWalkState.run_recovery_pass",
+        _no_recovery,
+    )
+    req = ConnectivityRequest(
+        checks=(ConnectivityCheck(target, target, check_id="1"),),
+        top="top",
+    )
+    batch, _index, state = run_path_walk_connect(
+        req,
+        fl,
+        top="top",
+        no_cache=True,
+        connect_phase="text",
+    )
+    row = state.rows_by_path.get(target)
+    row_a = state.rows_by_path.get("top.a")
+    assert row is not None
+    assert row.module == "B"
+    assert row_a is not None
+    assert row_a.file.endswith("top_a.v")
+    assert batch.results[0].connected is True
+    assert state.mod_db.defer_count() == 0
+
+
+def _write_stub_parent_top_v_before_top_a(tmp_path: Path) -> tuple[Path, str]:
+    """``top.v`` listed before ``top_a.v`` on ``root.f`` (decoy ranks first)."""
+    (tmp_path / "top.v").write_text("module top; A a (); endmodule\n", encoding="utf-8")
+    (tmp_path / "top_a.v").write_text("module A; B b (); endmodule\n", encoding="utf-8")
+    (tmp_path / "b_stub.v").write_text("module A; endmodule\nmodule B; endmodule\n", encoding="utf-8")
+    lists = tmp_path / "lists"
+    lists.mkdir()
+    (lists / "child.f").write_text(str((tmp_path / "b_stub.v").resolve()) + "\n", encoding="utf-8")
+    (lists / "parent.f").write_text(f"-f {(lists / 'child.f').resolve()}\n", encoding="utf-8")
+    root = tmp_path / "root.f"
+    root.write_text(
+        "\n".join(
+            [
+                str((tmp_path / "top.v").resolve()),
+                str((tmp_path / "top_a.v").resolve()),
+                f"-f {(lists / 'parent.f').resolve()}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return root, "top.a.b"
+
+
+def test_confident_ancestor_registers_all_colist_dup_decls(tmp_path: Path, monkeypatch):
+    """Child-FL stub must not block tier0 from registering co-listed dup decls."""
+    fl_path, target = _write_stub_parent_top_v_before_top_a(tmp_path)
+    fl = parse_filelist(str(fl_path), index_cwd=str(tmp_path))
+
+    def _no_recovery(self, spec_targets=None, **kwargs):
+        return 0, 0, []
+
+    monkeypatch.setattr(
+        "hierwalk.path_walk.PathWalkState.run_recovery_pass",
+        _no_recovery,
+    )
+    req = ConnectivityRequest(
+        checks=(ConnectivityCheck(target, target, check_id="1"),),
+        top="top",
+    )
+    batch, _index, state = run_path_walk_connect(
+        req,
+        fl,
+        top="top",
+        no_cache=True,
+        connect_phase="text",
+    )
+    row_a = state.rows_by_path.get("top.a")
+    row = state.rows_by_path.get(target)
+    assert row is not None, batch.results[0].errors
+    assert row_a is not None and row_a.file.endswith("top_a.v")
+    assert row.module == "B"
+    assert batch.results[0].connected is True
+    files = state.mod_db._module_to_files.get("A", ())
+    assert any(str(f).endswith("top_a.v") for f in files)
+    assert any(str(f).endswith("b_stub.v") for f in files)
+
+
 def test_confident_ancestor_resolves_edge_b_without_recovery(tmp_path: Path, monkeypatch):
     """``top.a.b`` must resolve ``b`` via ancestor RTL when child FL only has stub ``A``."""
     fl_path, target = _write_top_a_b_stub_parent_scoped_design(tmp_path)

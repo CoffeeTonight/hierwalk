@@ -1579,6 +1579,21 @@ class PathWalkModuleDb:
 
         return sorted(listings, key=rank)
 
+    def _listing_sibling_rtl_sources(self, listing: str) -> List[str]:
+        """RTL from filelists that share the same parent ``-f`` include as *listing*."""
+        if not listing:
+            return []
+        listing_key = str(Path(listing).resolve())
+        seen: Set[str] = set()
+        out: List[str] = []
+        for sib in self._listing_siblings.get(listing_key, ()):
+            for src in self._sources_for_listing(sib):
+                key = str(Path(src).resolve())
+                if key not in seen:
+                    seen.add(key)
+                    out.append(key)
+        return out
+
     def _ancestor_direct_rtl_sources(self, listing: str) -> List[str]:
         """RTL listed directly on ancestor filelists (exclude parallel sibling branches)."""
         listing_key = str(Path(listing).resolve())
@@ -1614,6 +1629,7 @@ class PathWalkModuleDb:
             candidates: List[str] = []
             if listing and self.should_retry_deferred_recovery(scope_anchor):
                 candidates.extend(self._ancestor_direct_rtl_sources(listing))
+                candidates.extend(self._listing_sibling_rtl_sources(listing))
             else:
                 rec_pool = set(
                     self._scoped_pool_for_policy(scope_anchor, policy=RESOLVE_RECOVERY)
@@ -1881,8 +1897,8 @@ class PathWalkModuleDb:
 
         Recovery can differ from confident on the same scoped pool (subtree vs child
         filelist, tier0 ordering). Also true when extra RTL is co-listed on an
-        ancestor filelist on the anchor's include chain — not parallel sibling
-        filelists (unrelated branches).
+        ancestor filelist or a sibling filelist of the anchor's listing — not for
+        unrelated parallel branches deeper in the hierarchy.
         """
         if not scope_anchor:
             return False
@@ -1914,6 +1930,10 @@ class PathWalkModuleDb:
             if self._sources_for_listing(anc) & extra:
                 self._should_retry_cache[anchor_key] = True
                 return True
+        for sibling_key in self._listing_siblings.get(listing_key, ()):
+            if self._sources_for_listing(sibling_key) & extra:
+                self._should_retry_cache[anchor_key] = True
+                return True
         self._should_retry_cache[anchor_key] = False
         return False
 
@@ -1942,6 +1962,10 @@ class PathWalkModuleDb:
             if key not in conf and key not in seen:
                 seen.add(key)
                 out.append(key)
+        for src in self._listing_sibling_rtl_sources(listing):
+            if src not in conf and src not in seen:
+                seen.add(src)
+                out.append(src)
         return out
 
     def _needs_confident_ancestor_tier0_expand(
@@ -1986,6 +2010,7 @@ class PathWalkModuleDb:
             return
         saved_scope = self._tier0_pp_scope
         self._tier0_pp_scope = f"scoped:confident-ancestor:{scope_anchor}"
+        # Scan every dup decl file; do not stop after child-FL stub already mapped.
         self._tier0_scan_sources(
             self._sort_files_by_resolve_rank(
                 extra,
@@ -1993,7 +2018,7 @@ class PathWalkModuleDb:
                 module_name=module_name,
                 inst_leaf=inst_leaf,
             ),
-            target_module=module_name,
+            target_module="",
         )
         self._tier0_pp_scope = saved_scope
 
