@@ -872,7 +872,7 @@ class PathWalkState:
         signal_name: str,
         row: FlatRow,
     ) -> Tuple[Optional[str], float]:
-        """Return (kind, check_ms) where kind is port|wire|reg or None."""
+        """Return (kind, check_ms) where kind is port|wire|logic|reg or None."""
         from hierwalk.connect.shared.endpoints import classify_signal_tail_kind
 
         t0 = time.perf_counter()

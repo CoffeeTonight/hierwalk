@@ -86,6 +86,21 @@ def test_collect_hierarchy_evidence_includes_inst_port_wire_reg(tmp_path: Path):
     row = session.rows_by_path["top"]
     assert classify_signal_tail_kind(session.index, row, "clk", top="top") == "port"
     assert classify_signal_tail_kind(session.index, row, "c", top="top") == "wire"
+    logic_rtl = tmp_path / "top_logic.v"
+    logic_rtl.write_text(
+        "module top(input logic clk);\n"
+        "  logic sig;\n"
+        "  assign sig = clk;\n"
+        "endmodule\n",
+        encoding="utf-8",
+    )
+    logic_text = logic_rtl.read_text(encoding="utf-8")
+    logic_index = DesignIndex.build({str(logic_rtl): logic_text})
+    _, logic_rows = elaborate(logic_index, "top")
+    logic_row = logic_rows[0]
+    assert (
+        classify_signal_tail_kind(logic_index, logic_row, "sig", top="top") == "logic"
+    )
     rtl = tmp_path / "top_reg.v"
     rtl.write_text(
         "module top(input logic clk);\n"
@@ -121,6 +136,8 @@ def test_collect_hierarchy_evidence_includes_inst_port_wire_reg(tmp_path: Path):
     assert "port" in kinds
     assert "wire" in kinds
     assert normalize_hierarchy_kind("wire-prefix") == "wire"
+    assert normalize_hierarchy_kind("logic") == "logic"
+    assert normalize_hierarchy_kind("logic-signal") == "logic"
     report = format_connect_results_report(
         results,
         phase="text",

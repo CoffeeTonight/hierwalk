@@ -517,6 +517,76 @@ def _write_top_a_b_cd_scoped_design(tmp_path: Path) -> tuple[Path, str]:
     return root, "top.a.b.c.d"
 
 
+def _write_top_a_b_stub_parent_scoped_design(tmp_path: Path) -> tuple[Path, str]:
+    """Real ``A``/``b`` on ancestor FL; child FL holds stub ``A`` without instances."""
+    (tmp_path / "top.v").write_text("module top; A a (); endmodule\n", encoding="utf-8")
+    (tmp_path / "top_a.v").write_text(
+        "module A;\n`ifndef NO_B\n B b ();\n`endif\nendmodule\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "b_stub.v").write_text(
+        "module A; endmodule\nmodule B; endmodule\n",
+        encoding="utf-8",
+    )
+    lists = tmp_path / "lists"
+    lists.mkdir()
+    (lists / "child.f").write_text(
+        str((tmp_path / "b_stub.v").resolve()) + "\n",
+        encoding="utf-8",
+    )
+    (lists / "parent.f").write_text(
+        f"-f {(lists / 'child.f').resolve()}\n",
+        encoding="utf-8",
+    )
+    root = tmp_path / "root.f"
+    root.write_text(
+        "\n".join(
+            [
+                str((tmp_path / "top.v").resolve()),
+                f"-f {(lists / 'parent.f').resolve()}",
+                str((tmp_path / "top_a.v").resolve()),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return root, "top.a.b"
+
+
+def test_confident_ancestor_resolves_edge_b_without_recovery(tmp_path: Path, monkeypatch):
+    """``top.a.b`` must resolve ``b`` via ancestor RTL when child FL only has stub ``A``."""
+    fl_path, target = _write_top_a_b_stub_parent_scoped_design(tmp_path)
+    fl = parse_filelist(str(fl_path), index_cwd=str(tmp_path))
+
+    def _no_recovery(self, spec_targets=None, **kwargs):
+        return 0, 0, []
+
+    monkeypatch.setattr(
+        "hierwalk.path_walk.PathWalkState.run_recovery_pass",
+        _no_recovery,
+    )
+
+    req = ConnectivityRequest(
+        checks=(ConnectivityCheck(target, target, check_id="1"),),
+        top="top",
+    )
+    batch, _index, state = run_path_walk_connect(
+        req,
+        fl,
+        top="top",
+        no_cache=True,
+        connect_phase="text",
+    )
+    row = state.rows_by_path.get(target)
+    row_a = state.rows_by_path.get("top.a")
+    assert row is not None, batch.results[0].errors
+    assert row.module == "B"
+    assert row_a is not None
+    assert row_a.file.endswith("top_a.v")
+    assert batch.results[0].connected is True
+    assert state.mod_db.defer_count() == 0
+
+
 def test_confident_ancestor_tier0_finds_dup_module_without_recovery(tmp_path: Path):
     """Module co-listed on ancestor FL must resolve under confident child scope."""
     fl_path, target = _write_top_a_b_cd_scoped_design(tmp_path)
@@ -559,7 +629,8 @@ def test_text_phase_resolves_top_a_b_c_d_with_scoped_filelist(tmp_path: Path):
     assert batch.results[0].connected is True
 
 
-def test_confident_defers_then_recovery_walks_full_chain(tmp_path: Path):
+def test_confident_resolves_stub_child_chain_without_recovery_defer(tmp_path: Path):
+    """Ancestor/colist tier0 must finish stub-child chains in the confident pass."""
     fl_path, leaf = _write_stub_child_recovery_design(tmp_path)
     fl = parse_filelist(str(fl_path), index_cwd=str(tmp_path))
     buf = io.StringIO()
@@ -575,10 +646,11 @@ def test_confident_defers_then_recovery_walks_full_chain(tmp_path: Path):
         trace_stream=buf,
     )
     text = buf.getvalue()
-    assert "confident-miss defer" in text
-    assert "recovery-pass start" in text
+    assert "confident-miss defer" not in text
+    assert "recovery-pass start" not in text
     assert leaf in state.rows_by_path
     assert batch.results[0].connected is True
+    assert state.mod_db.defer_count() == 0
 
 
 def test_recovery_skips_duplicate_ensure_for_rewalk_targets(tmp_path: Path):

@@ -1118,7 +1118,16 @@ class PathWalkModuleDb:
         ]
         if not child_listings:
             return self._scoped_sources_for_listings([listing], include_anchor_rtl=rtl_file)
-        return self._scoped_sources_for_listings(child_listings)
+        reachable: Set[str] = set(child_listings)
+        queue = list(child_listings)
+        while queue:
+            fl = queue.pop()
+            for child in self._filelist_children.get(fl, ()):
+                child_key = str(Path(child).resolve())
+                if child_key not in reachable:
+                    reachable.add(child_key)
+                    queue.append(child_key)
+        return self._scoped_sources_for_listings(sorted(reachable))
 
     def _scoped_pool_for_policy(
         self,
@@ -1908,6 +1917,86 @@ class PathWalkModuleDb:
         self._should_retry_cache[anchor_key] = False
         return False
 
+    def _confident_tier0_extra_sources(
+        self,
+        scope_anchor: str,
+        scoped_pool: Sequence[str],
+    ) -> List[str]:
+        """
+        RTL outside the confident child pool: ancestor FL co-lists plus siblings on
+        the anchor listing (e.g. ``top_a.v`` on ``root.f`` while child FL has stub).
+        """
+        listing = self._listing_for_rtl(scope_anchor)
+        if not listing:
+            return []
+        conf = {str(Path(s).resolve()) for s in scoped_pool}
+        seen: Set[str] = set()
+        out: List[str] = []
+        for src in self._ancestor_direct_rtl_sources(listing):
+            key = str(Path(src).resolve())
+            if key not in conf and key not in seen:
+                seen.add(key)
+                out.append(key)
+        for src in self._sources_for_listing(listing):
+            key = str(Path(src).resolve())
+            if key not in conf and key not in seen:
+                seen.add(key)
+                out.append(key)
+        return out
+
+    def _needs_confident_ancestor_tier0_expand(
+        self,
+        module_name: str,
+        *,
+        scope_anchor: str,
+        scoped_pool: Sequence[str],
+        inst_leaf: str = "",
+    ) -> bool:
+        """True when extra co-listed RTL may hold a better *module_name* decl."""
+        if not module_name or not scope_anchor:
+            return False
+        mapped = {str(Path(f).resolve()) for f in self._module_to_files.get(module_name, ())}
+        conf = {str(Path(s).resolve()) for s in scoped_pool}
+        if mapped and not mapped <= conf:
+            return False
+        return bool(self._confident_tier0_extra_sources(scope_anchor, scoped_pool))
+
+    def _confident_ancestor_tier0_expand(
+        self,
+        module_name: str,
+        *,
+        scope_anchor: str,
+        scoped_pool: Sequence[str],
+        inst_leaf: str = "",
+    ) -> None:
+        """Tier0 scan co-listed RTL outside child FL (dup decl / edge miss)."""
+        if not self._needs_confident_ancestor_tier0_expand(
+            module_name,
+            scope_anchor=scope_anchor,
+            scoped_pool=scoped_pool,
+            inst_leaf=inst_leaf,
+        ):
+            return
+        extra = [
+            s
+            for s in self._confident_tier0_extra_sources(scope_anchor, scoped_pool)
+            if s not in self._regex_scanned and s not in self._tier0_inflight
+        ]
+        if not extra:
+            return
+        saved_scope = self._tier0_pp_scope
+        self._tier0_pp_scope = f"scoped:confident-ancestor:{scope_anchor}"
+        self._tier0_scan_sources(
+            self._sort_files_by_resolve_rank(
+                extra,
+                scope_anchor=scope_anchor,
+                module_name=module_name,
+                inst_leaf=inst_leaf,
+            ),
+            target_module=module_name,
+        )
+        self._tier0_pp_scope = saved_scope
+
     def defer_count(self) -> int:
         return len(self._defer_queue)
 
@@ -2371,7 +2460,20 @@ class PathWalkModuleDb:
                 module_name=module_name,
                 inst_leaf=inst_leaf,
             )
-            ordered = in_scope + out_scope if policy == RESOLVE_RECOVERY else in_scope
+            if policy == RESOLVE_RECOVERY:
+                ordered = in_scope + out_scope
+            else:
+                extra = {
+                    str(Path(s).resolve())
+                    for s in self._confident_tier0_extra_sources(
+                        scope_anchor,
+                        scope_pool or (),
+                    )
+                }
+                if extra & set(out_scope):
+                    ordered = [f for f in out_scope if f in extra] + in_scope
+                else:
+                    ordered = in_scope
         elif module_name or inst_leaf:
             ordered = self._sort_files_by_resolve_rank(
                 ordered,
@@ -2409,61 +2511,27 @@ class PathWalkModuleDb:
                         inst_leaf=inst_leaf,
                     ),
                 )
-                if module_name in self._module_to_files and policy == RESOLVE_CONFIDENT:
+            if policy == RESOLVE_CONFIDENT and module_name:
+                self._confident_ancestor_tier0_expand(
+                    module_name,
+                    scope_anchor=scope_anchor,
+                    scoped_pool=scoped_pool or (),
+                    inst_leaf=inst_leaf,
+                )
+                if module_name in self._module_to_files:
+                    scope_pool = self._scoped_pool_for_policy(
+                        scope_anchor,
+                        policy=policy,
+                    )
                     files = list(self._module_to_files.get(module_name, []))
                     return self._sort_module_files(
                         module_name,
                         files,
                         scope_anchor=scope_anchor,
                         policy=policy,
-                        scope_pool=scoped_pool,
+                        scope_pool=scope_pool,
                         inst_leaf=inst_leaf,
                     )
-            if policy == RESOLVE_CONFIDENT:
-                if (
-                    module_name
-                    and module_name not in self._module_to_files
-                    and not inst_leaf
-                ):
-                    listing = self._listing_for_rtl(scope_anchor)
-                    if listing and self.should_retry_deferred_recovery(scope_anchor):
-                        extra = [
-                            s
-                            for s in self._ancestor_direct_rtl_sources(listing)
-                            if s not in self._regex_scanned
-                            and s not in self._tier0_inflight
-                        ]
-                        if extra:
-                            saved_scope = self._tier0_pp_scope
-                            self._tier0_pp_scope = (
-                                f"scoped:confident-ancestor:{scope_anchor}"
-                            )
-                            self._tier0_scan_sources(
-                                self._sort_files_by_resolve_rank(
-                                    extra,
-                                    scope_anchor=scope_anchor,
-                                    module_name=module_name,
-                                    inst_leaf=inst_leaf,
-                                ),
-                                target_module=module_name,
-                            )
-                            self._tier0_pp_scope = saved_scope
-                            if module_name in self._module_to_files:
-                                scope_pool = self._scoped_pool_for_policy(
-                                    scope_anchor,
-                                    policy=policy,
-                                )
-                                files = list(
-                                    self._module_to_files.get(module_name, [])
-                                )
-                                return self._sort_module_files(
-                                    module_name,
-                                    files,
-                                    scope_anchor=scope_anchor,
-                                    policy=policy,
-                                    scope_pool=scope_pool,
-                                    inst_leaf=inst_leaf,
-                                )
                 return []
 
         center_listing = self._infer_root_filelist()

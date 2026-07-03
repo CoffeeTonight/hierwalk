@@ -28,7 +28,7 @@ from hierwalk.index import DesignIndex
 from hierwalk.models import ConnectEndpoint, ConnectResult, FlatRow
 from hierwalk.run_request import RunConfig
 
-HIERARCHY_KINDS = frozenset({"inst", "port", "wire", "reg"})
+HIERARCHY_KINDS = frozenset({"inst", "port", "wire", "logic", "reg"})
 
 
 @dataclass(frozen=True)
@@ -1028,12 +1028,14 @@ def _resolve_endpoint_for_spec(
 
 
 def normalize_hierarchy_kind(kind: str) -> str:
-    """Map probe/trace labels to inst|port|wire|reg."""
+    """Map probe/trace labels to inst|port|wire|logic|reg."""
     raw = str(kind or "").strip().lower()
     if raw.startswith("port"):
         return "port"
     if raw.startswith("reg"):
         return "reg"
+    if raw.startswith("logic"):
+        return "logic"
     if raw.startswith("wire"):
         return "wire"
     if raw in HIERARCHY_KINDS:

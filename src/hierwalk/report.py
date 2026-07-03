@@ -200,7 +200,7 @@ class RunReport:
             out.append("Connectivity (hierarchy analysis)")
             if phase in ("text", "logical"):
                 out.append(f"  Phase:         {phase}")
-            out.append("  Elements:      inst / port / wire / reg (hit or miss)")
+            out.append("  Elements:      inst / port / wire / logic / reg (hit or miss)")
             tops = list(self.elab_tops)
             top_label = self.connect_top or (tops[0] if tops else "")
             out.extend(
