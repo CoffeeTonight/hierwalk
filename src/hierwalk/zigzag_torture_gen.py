@@ -31,8 +31,16 @@ D1_SHADOW = f"{DEEP_ARM}.d1.d1_shadow"
 D1_NEXT_DECOY = f"{DEEP_ARM}.d1.u_next_decoy"
 R3_ALT = f"{SHALLOW_ARM}.r1.r2.r3.r3_alt"
 COLLISION = f"{TOP}.u_collision"
+SCOPE_ARM = f"{TOP}.u_scope"
+SCOPE_B = f"{SCOPE_ARM}.u_b"
 BLACKBOX = f"{HUB}.u_bb"
 ZZ_COMMON_RTL = "zz_common.v"
+ZZ_SCOPE_DECOY_RTL = "zz_scope_decoy.v"
+ZZ_SCOPE_A_RTL = "zz_scope_a.v"
+ZZ_SCOPE_STUB_RTL = "zz_scope_stub.v"
+ZZ_SCOPE_FL_RTL = frozenset(
+    {ZZ_SCOPE_DECOY_RTL, ZZ_SCOPE_A_RTL, ZZ_SCOPE_STUB_RTL}
+)
 ZZ_FAKE_DEEP_RTL = "zz_fake_deep.v"
 DW_VENDOR_RTL = "DW_zz_vendor.v"
 DW_VENDOR_CELL = "DW_zz_vendor_cell"
@@ -367,8 +375,12 @@ def _deep_level_body(lvl: int) -> str:
               .din(shallow_return),
               .dout(zig_decoy)
             );
+            logic [2:0][3:0] bridge_expr_din;
+            logic [2:0][3:0] bridge_expr_xor;
+            assign bridge_expr_xor = chain_in ^ shallow_return;
+            assign bridge_expr_din = chain_in | shallow_return;
             zz_bridge_ping u_bridge_expr (
-              .din(chain_in ^ shallow_return),
+              .din(bridge_expr_xor),
               .dout(expr_mapped)
             );
             zz_bridge_narrow u_bridge_concat (
@@ -412,7 +424,9 @@ def _deep_level_body(lvl: int) -> str:
         casex_block = textwrap.dedent(
             """
             logic route_casex;
+            logic route_casex_conn;
             logic [3:0] key_casex;
+            assign route_casex_conn = chain_in[0][0];
             assign key_casex = 4'b?1??;
             always_comb begin
               casex (key_casex)
@@ -422,12 +436,14 @@ def _deep_level_body(lvl: int) -> str:
             end
             """
         ).strip()
-        route_wire = "route_casex"
+        route_wire = "route_casex_conn"
     elif lvl == 3:
         casex_block = textwrap.dedent(
             """
             logic route_casez;
+            logic route_casez_conn;
             logic [3:0] key_casez;
+            assign route_casez_conn = chain_in[2][1];
             assign key_casez = 4'b1010;
             always_comb begin
               casez (key_casez)
@@ -437,7 +453,7 @@ def _deep_level_body(lvl: int) -> str:
             end
             """
         ).strip()
-        route_wire = "route_casez"
+        route_wire = "route_casez_conn"
     else:
         route_wire = f"{chain_src}[0][0]"
 
@@ -458,6 +474,8 @@ def _deep_level_body(lvl: int) -> str:
         ff_barrier = textwrap.dedent(
             """
             logic ff_barrier_tap;
+            logic ff_barrier_conn;
+            assign ff_barrier_conn = chain_in[0][0];
             always_ff @(posedge clk) begin
               if (!rst_n)
                 ff_barrier_tap <= 1'b0;
@@ -577,7 +595,7 @@ def _deep_level_body(lvl: int) -> str:
         child = textwrap.dedent(
             f"""
             {child_mod} d{nxt} (
-              .clk(clk_ff),
+              .clk(clk),
               .rst_n(rst_n),
               .chain_in(bus2d),
               .chain_out(chain_out),
@@ -871,6 +889,48 @@ def _dw_vendor_module() -> str:
     ).strip()
 
 
+def _scope_decoy_module() -> str:
+    """Co-list dup decl stub; must precede ``zz_scope_a.v`` on root filelist."""
+    return textwrap.dedent(
+        """
+        module zz_scope_A;
+        endmodule
+        """
+    ).strip()
+
+
+def _scope_real_modules() -> str:
+    return textwrap.dedent(
+        """
+        module zz_scope_A (
+          input logic clk
+        );
+          zz_scope_B u_b (.clk(clk), .scope_probe());
+        endmodule
+
+        module zz_scope_B (
+          input  logic clk,
+          output logic scope_probe
+        );
+          assign scope_probe = clk;
+        endmodule
+        """
+    ).strip()
+
+
+def _scope_child_fl_stub() -> str:
+    """Child/grandchild FL only: empty dup decls without ``u_b`` inst."""
+    return textwrap.dedent(
+        """
+        module zz_scope_A;
+        endmodule
+
+        module zz_scope_B;
+        endmodule
+        """
+    ).strip()
+
+
 def _top_module() -> str:
     return textwrap.dedent(
         f"""
@@ -912,6 +972,7 @@ def _top_module() -> str:
             .leaf_echo(leaf_echo)
           );
           zz_collision_d u_collision ();
+          zz_scope_A u_scope (.clk(clk));
           {DW_VENDOR_CELL} u_dw_vendor (.in(clk));
         endmodule
         """
@@ -932,6 +993,8 @@ def _hierarchy_specs() -> Tuple[str, ...]:
         f"{DEEP_ARM}.d1.d1_shadow",
         f"{DEEP_ARM}.d1.u_next_decoy",
         f"{SHALLOW_ARM}.r1.r2.r3.r3_alt",
+        SCOPE_ARM,
+        SCOPE_B,
     )
 
 
@@ -1011,12 +1074,12 @@ def _round18_design_checks() -> Tuple[ConnectivityCheck, ...]:
     return (
         ConnectivityCheck(
             f"{DEEP_D1}.chain_in[0][0]",
-            f"{DEEP_D1}.route_casex",
+            f"{DEEP_D1}.route_casex_conn",
             check_id="zz_casex_route",
         ),
         ConnectivityCheck(
             f"{DEEP_D3}.chain_in[2][1]",
-            f"{DEEP_D3}.route_casez",
+            f"{DEEP_D3}.route_casez_conn",
             check_id="zz_casez_route",
         ),
         ConnectivityCheck(
@@ -1156,6 +1219,34 @@ def _round20_design_checks() -> Tuple[ConnectivityCheck, ...]:
     )
 
 
+def _round21_design_checks() -> Tuple[ConnectivityCheck, ...]:
+    """Round21: scoped child FL + co-list dup decl order (``top.a.b`` regression anchor)."""
+    return (
+        ConnectivityCheck(
+            f"{SCOPE_B}.scope_probe",
+            f"{TOP}.clk",
+            check_id="zz_scope_confident_b",
+        ),
+    )
+
+
+def _scope_expect_hierarchy() -> List[Dict[str, Any]]:
+    return [
+        {
+            "side": "a",
+            "path": SCOPE_ARM,
+            "module": "zz_scope_A",
+            "rtl_file": ZZ_SCOPE_A_RTL,
+        },
+        {
+            "side": "a",
+            "path": SCOPE_B,
+            "module": "zz_scope_B",
+            "rtl_file": ZZ_SCOPE_A_RTL,
+        },
+    ]
+
+
 def _round19_design_checks() -> Tuple[ConnectivityCheck, ...]:
     """Round19: vuln-plan gaps + round18 cone/io blind spots (회차19)."""
     return (
@@ -1171,7 +1262,7 @@ def _round19_design_checks() -> Tuple[ConnectivityCheck, ...]:
         ),
         ConnectivityCheck(
             f"{DEEP_D1}.chain_in[0][0]",
-            f"{DEEP_D1}.ff_barrier_tap",
+            f"{DEEP_D1}.ff_barrier_conn",
             check_id="zz_ff_barrier_tap",
         ),
         ConnectivityCheck(
@@ -1215,7 +1306,6 @@ def _apply_suite_conn_defaults(specs: List[Dict[str, Any]]) -> List[Dict[str, An
 def _fanin_merge_check() -> ConnectivityCheck:
     """Fan-in via fanout expand: list sources in a, scalar sink in b."""
     ep_a = (
-        f"{DEEP_D4}.chain_in[1][2]",
         f"{DEEP_D4}.shallow_return[1][2]",
         f"{DEEP_D4}.fork_main[1][2]",
     )
@@ -1238,7 +1328,7 @@ def _port_expr_xor_check() -> ConnectivityCheck:
         f"{DEEP_D2}.chain_in[1][2]",
         f"{DEEP_D2}.shallow_return[1][2]",
     )
-    ep_b = f"{DEEP_D2}.u_bridge_expr.din[1][2]"
+    ep_b = f"{DEEP_D2}.bridge_expr_din[1][2]"
     expand = build_expand_meta(ep_a, ep_b)
     display_a = f"[{ep_a[0]}, {ep_a[1]}]"
     return ConnectivityCheck(display_a, ep_b, check_id="zz_port_expr_xor", expand=expand)
@@ -1307,6 +1397,7 @@ def _build_checks() -> Tuple[ConnectivityCheck, ...]:
         *_round18_design_checks(),
         *_round19_design_checks(),
         *_round20_design_checks(),
+        *_round21_design_checks(),
     ]
     return tuple(checks)
 
@@ -1331,6 +1422,9 @@ def generate_zigzag_torture_design() -> ZigzagTortureDesign:
         "zz_shallow_arm.v": _shallow_arm(),
         "zz_zigzag.v": _zigzag_hub(),
         "zz_torture_top.v": _top_module(),
+        ZZ_SCOPE_DECOY_RTL: _scope_decoy_module(),
+        ZZ_SCOPE_A_RTL: _scope_real_modules(),
+        ZZ_SCOPE_STUB_RTL: _scope_child_fl_stub(),
     }
     for lvl in range(1, DEEP_DEPTH + 1):
         files[f"zz_deep_d{lvl}.v"] = _deep_level_body(lvl)
@@ -1421,7 +1515,6 @@ def _suite_conn_checks() -> List[Dict[str, Any]]:
         {
             "id": "zz_fanin_merge",
             "a": [
-                f"{DEEP_D4}.chain_in[1][2]",
                 f"{DEEP_D4}.shallow_return[1][2]",
                 f"{DEEP_D4}.fork_main[1][2]",
             ],
@@ -1440,7 +1533,7 @@ def _suite_conn_checks() -> List[Dict[str, Any]]:
                 f"{DEEP_D2}.chain_in[1][2]",
                 f"{DEEP_D2}.shallow_return[1][2]",
             ],
-            "b": f"{DEEP_D2}.u_bridge_expr.din[1][2]",
+            "b": f"{DEEP_D2}.bridge_expr_din[1][2]",
             "expect_connected": True,
         },
         {"id": "zz_list_expand", "a": list_a, "b": list_b},
@@ -1556,6 +1649,13 @@ def _suite_conn_checks() -> List[Dict[str, Any]]:
             "id": "zz_dw_vendor_ignored",
             "a": f"{TOP}.clk",
             "b": f"{TOP}.clk",
+        },
+        {
+            "id": "zz_scope_confident_b",
+            "a": f"{SCOPE_B}.scope_probe",
+            "b": f"{TOP}.clk",
+            "expect_connected": True,
+            "expect_hierarchy": _scope_expect_hierarchy(),
         },
         *_gap_suite_specs(_round18_design_checks()),
         *_gap_suite_specs(_round19_design_checks()),
@@ -1977,6 +2077,37 @@ def write_flat_suite_artifacts(root: Path) -> Tuple[Path, Path, ZigzagTortureDes
     return fl, suite_path, design
 
 
+def _write_scope_nested_filelists(root: Path) -> Path:
+    """parent → child → grandchild chain; grandchild lists stub RTL only."""
+    fl_dir = root / "zz_scope_fl"
+    fl_dir.mkdir(parents=True, exist_ok=True)
+    stub = (root / ZZ_SCOPE_STUB_RTL).resolve()
+    grandchild = fl_dir / "grandchild.f"
+    child = fl_dir / "child.f"
+    parent = fl_dir / "parent.f"
+    grandchild.write_text(f"{stub}\n", encoding="utf-8")
+    child.write_text(f"-f {grandchild.resolve()}\n", encoding="utf-8")
+    parent.write_text(f"-f {child.resolve()}\n", encoding="utf-8")
+    return parent
+
+
+def _build_adversarial_filelist_lines(
+    root: Path, design: ZigzagTortureDesign
+) -> List[str]:
+    """Co-list decoy before real RTL; nested child FL before flat corpus."""
+    parent_fl = _write_scope_nested_filelists(root)
+    lines = [
+        str((root / ZZ_SCOPE_DECOY_RTL).resolve()),
+        str((root / ZZ_SCOPE_A_RTL).resolve()),
+        f"-f {parent_fl.resolve()}",
+    ]
+    for name in sorted(design.files):
+        if name in ZZ_SCOPE_FL_RTL:
+            continue
+        lines.append(str((root / name).resolve()))
+    return lines
+
+
 def write_stress_artifacts(root: Path) -> Tuple[Path, Path, ZigzagTortureDesign]:
     design = generate_zigzag_torture_design()
     root.mkdir(parents=True, exist_ok=True)
@@ -1984,7 +2115,7 @@ def write_stress_artifacts(root: Path) -> Tuple[Path, Path, ZigzagTortureDesign]
         (root / name).write_text(text + "\n", encoding="utf-8")
     fl = root / "filelist.f"
     fl.write_text(
-        "\n".join(str((root / n).resolve()) for n in sorted(design.files)) + "\n",
+        "\n".join(_build_adversarial_filelist_lines(root, design)) + "\n",
         encoding="utf-8",
     )
     req_path = root / "zz_torture.connect.json"

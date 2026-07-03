@@ -83,6 +83,27 @@ ROUND20_NEW_CHECK_IDS = (
     "zz_ifndef_define_mix",
 )
 
+ROUND21_NEW_CHECK_IDS = (
+    "zz_scope_confident_b",
+)
+
+# Must pass in isolated path-walk connect (regression anchors + fixed probes).
+ZIGZAG_MUST_PASS_CONNECT_IDS = frozenset(
+    {
+        "zz_src_deep_a00",
+        "zz_scope_confident_b",
+        "zz_ifdef_pass",
+        "zz_gen_pass",
+        "zz_gen_for_unroll",
+        "zz_gen_tap1",
+        "zz_mid_ifdef_child",
+        "zz_fanin_merge",
+        "zz_casex_route",
+        "zz_casez_route",
+        "zz_ff_barrier_tap",
+    }
+)
+
 ROUND18_NEW_CHECK_IDS = (
     "zz_casex_route",
     "zz_casez_route",
@@ -106,6 +127,7 @@ ROUND18_NEW_CHECK_IDS = (
     "zz_mid_ifdef_child",
     *ROUND19_NEW_CHECK_IDS,
     *ROUND20_NEW_CHECK_IDS,
+    *ROUND21_NEW_CHECK_IDS,
 )
 
 
@@ -120,7 +142,7 @@ def test_torture_design_shape():
     assert design.top == TOP
     assert design.deep_path == DEEP_D5
     assert design.shallow_path == SHALLOW_R4
-    assert len(design.checks) == 47
+    assert len(design.checks) == 48
     check_ids = {c.check_id for c in design.checks}
     assert "zz_fanin_merge" in check_ids
     assert "zz_fanin_merge_decoy" in check_ids
@@ -227,6 +249,45 @@ def test_path_walk_index_all_hierarchy_specs(torture_bundle, tmp_path: Path):
     assert f"{DEEP_ARM}.d1.u_next_decoy" in state.rows_by_path
     assert f"{SHALLOW_ARM}.r1.r2.r3.r3_alt" in state.rows_by_path
     assert index is not None
+
+
+def test_path_walk_connect_must_pass_checks(torture_bundle, tmp_path: Path):
+    """Regression anchors that must connect in isolated path-walk runs."""
+    fl_path, design = torture_bundle
+    fl = parse_filelist(str(fl_path), index_cwd=str(fl_path.parent))
+    base = build_connect_request(design)
+    failures: list[str] = []
+
+    for chk in base.checks:
+        if chk.check_id not in ZIGZAG_MUST_PASS_CONNECT_IDS:
+            continue
+        req = ConnectivityRequest(
+            checks=(chk,),
+            top=design.top,
+            defines=base.defines,
+            include_ff=True,
+        )
+        batch, _index, _state = run_path_walk_connect(
+            req,
+            fl,
+            top=design.top,
+            no_cache=True,
+        )
+        result = batch.results[0]
+        if chk.check_id in ROUND18_EXPAND_CHECK_IDS:
+            if not result.sub_results or not all(
+                sr.connected for sr in result.sub_results
+            ):
+                failures.append(f"{chk.check_id}: expand sub-check failed")
+            continue
+        if not result.connected:
+            failures.append(
+                f"{chk.check_id}: {result.endpoint_a.spec} -> "
+                f"{result.endpoint_b.spec} errors={result.errors} note={result.note}"
+            )
+
+    if failures:
+        pytest.fail("zigzag must-pass connect failures:\n" + "\n".join(failures))
 
 
 def test_path_walk_connect_all_checks(torture_bundle, tmp_path: Path):

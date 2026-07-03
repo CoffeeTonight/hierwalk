@@ -9,7 +9,7 @@ import threading
 from functools import lru_cache
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, FrozenSet, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Set, Tuple
+from typing import AbstractSet, Dict, FrozenSet, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Set, Tuple
 
 from hierwalk.generate_fold import fold_generate_regions, prepare_body_for_instance_scan
 from hierwalk.params import (
@@ -4102,6 +4102,7 @@ def accumulate_design_defines_for_paths(
     *,
     seen: Optional[Set[str]] = None,
     follow_includes: bool = True,
+    preserve_define_names: Optional[AbstractSet[str]] = None,
 ) -> None:
     """Apply filelist-order ``define``/``undef`` from *paths* into *out* (in place)."""
     from pathlib import Path
@@ -4137,6 +4138,8 @@ def accumulate_design_defines_for_paths(
             follow_includes=follow_includes,
         )
         for name in guards:
+            if preserve_define_names and name in preserve_define_names:
+                continue
             out.pop(name, None)
 
 
@@ -4163,7 +4166,12 @@ def collect_design_defines(
         return dict(base)
 
     out: Dict[str, str] = dict(base)
-    accumulate_design_defines_for_paths(index, paths, out)
+    accumulate_design_defines_for_paths(
+        index,
+        paths,
+        out,
+        preserve_define_names=frozenset(base),
+    )
     return dict(out)
 
 

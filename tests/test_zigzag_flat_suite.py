@@ -36,9 +36,14 @@ from hierwalk.zigzag_torture_gen import (
     DEEP_D5,
     DW_VENDOR_RTL,
     R3_ALT,
+    SCOPE_ARM,
+    SCOPE_B,
     SHALLOW_R4,
     TOP,
     ZZ_COMMON_RTL,
+    ZZ_SCOPE_A_RTL,
+    ZZ_SCOPE_DECOY_RTL,
+    ZZ_SCOPE_STUB_RTL,
     build_flat_suite_document,
     write_flat_suite_artifacts,
 )
@@ -86,10 +91,14 @@ def test_flat_suite_document_has_text_and_logical_conn(suite_bundle):
     assert "zz_ff_barrier_tap" in ids
     assert "zz_multi_g3_empty" in ids
     assert "zz_ifndef_define_mix" in ids
+    assert "zz_scope_confident_b" in ids
     assert "zz_dw_vendor_inst" not in ids
     multi_g3 = next(c for c in checks if c["id"] == "zz_multi_g3_empty")
     assert multi_g3.get("expect_connected") is False
-    assert len(checks) == 59
+    scope_chk = next(c for c in checks if c["id"] == "zz_scope_confident_b")
+    assert scope_chk.get("expect_connected") is True
+    assert len(scope_chk["expect_hierarchy"]) == 2
+    assert len(checks) == 60
     assert sum(1 for c in checks if c.get("expect_connected") is True) >= 45
     for step in conn_steps:
         assert step["ignore-path"] == ["DW_*"]
@@ -125,9 +134,25 @@ def test_round17_conn_check_shapes(suite_bundle):
         f"{DEEP_D2}.chain_in[1][2]",
         f"{DEEP_D2}.shallow_return[1][2]",
     )
-    assert xor_chk["b"] == f"{DEEP_D2}.u_bridge_expr.din[1][2]"
+    assert xor_chk["b"] == f"{DEEP_D2}.bridge_expr_din[1][2]"
     assert build_expand_meta(tuple(xor_chk["a"]), xor_chk["b"]).map_kind == "fanout"
     assert f"{DEEP_D4}.chain_in[1][2]" in fanin["a"]
+
+
+def test_round21_scope_rtl_and_filelist_order(suite_bundle):
+    suite_path, design, root = suite_bundle
+    assert "u_scope" in design.files["zz_torture_top.v"]
+    assert "module zz_scope_A" in design.files[ZZ_SCOPE_DECOY_RTL]
+    assert "zz_scope_B u_b" in design.files[ZZ_SCOPE_A_RTL]
+    assert "module zz_scope_B;" in design.files[ZZ_SCOPE_STUB_RTL]
+    fl_lines = (root / "filelist.f").read_text(encoding="utf-8").splitlines()
+    decoy = str((root / ZZ_SCOPE_DECOY_RTL).resolve())
+    real_a = str((root / ZZ_SCOPE_A_RTL).resolve())
+    assert fl_lines.index(decoy) < fl_lines.index(real_a)
+    parent_fl = str((root / "zz_scope_fl" / "parent.f").resolve())
+    assert any(line.strip() == f"-f {parent_fl}" for line in fl_lines)
+    grandchild = root / "zz_scope_fl" / "grandchild.f"
+    assert ZZ_SCOPE_STUB_RTL in grandchild.read_text(encoding="utf-8")
 
 
 def test_round18_rtl_probes_in_generated_files(suite_bundle):
@@ -316,6 +341,52 @@ def test_list_display_hierarchy_paths_not_bracket_blob(suite_bundle):
         specs = hierarchy_endpoint_specs(ep)
         assert specs == (ep,)
         assert not ep.startswith("[")
+
+
+def test_scope_confident_b_resolves_without_recovery(suite_bundle, monkeypatch):
+    """Regression anchor: nested child FL + co-list order must resolve ``u_scope.u_b``."""
+    suite_path, design, root = suite_bundle
+    from hierwalk.connect.shared.request import ConnectivityCheck, ConnectivityRequest
+    from hierwalk.filelist import parse_filelist
+    from hierwalk.path_walk import run_path_walk_connect
+
+    def _no_recovery(self, spec_targets=None, **kwargs):
+        return 0, 0, []
+
+    monkeypatch.setattr(
+        "hierwalk.path_walk.PathWalkState.run_recovery_pass",
+        _no_recovery,
+    )
+    fl = parse_filelist(str(root / "filelist.f"), index_cwd=str(root))
+    req = ConnectivityRequest(
+        checks=(
+            ConnectivityCheck(
+                f"{SCOPE_B}.scope_probe",
+                f"{TOP}.clk",
+                check_id="zz_scope_confident_b",
+            ),
+        ),
+        top=design.top,
+        defines={},
+    )
+    batch, _index, state = run_path_walk_connect(
+        req,
+        fl,
+        top=design.top,
+        no_cache=True,
+        connect_phase="text",
+    )
+    row_b = state.rows_by_path.get(SCOPE_B)
+    row_a = state.rows_by_path.get(SCOPE_ARM)
+    assert row_b is not None, batch.results[0].errors
+    assert row_b.module == "zz_scope_B"
+    assert row_a is not None
+    assert row_a.file.endswith(ZZ_SCOPE_A_RTL)
+    assert batch.results[0].connected is True
+    assert state.mod_db.defer_count() == 0
+    files_a = state.mod_db._module_to_files.get("zz_scope_A", ())
+    assert any(str(f).endswith(ZZ_SCOPE_A_RTL) for f in files_a)
+    assert any(str(f).endswith(ZZ_SCOPE_STUB_RTL) for f in files_a)
 
 
 def test_hierarchy_rtl_on_hit_nodes(suite_bundle):

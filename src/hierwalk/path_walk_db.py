@@ -608,6 +608,7 @@ class PathWalkModuleDb:
             self._tier1_defines_cache,
             seen=self._define_sources_seen,
             follow_includes=pw_define_follow_includes(),
+            preserve_define_names=frozenset(self._defines),
         )
         self._defines_digest = _defines_digest(self._tier1_defines_cache)
         ms = (time.perf_counter() - t0) * 1000.0

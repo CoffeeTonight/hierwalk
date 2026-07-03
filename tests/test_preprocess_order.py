@@ -209,6 +209,38 @@ def test_collect_design_defines_seeds_filelist_macros(tmp_path: Path):
     assert defs.get("INTERNAL") == "1"
 
 
+def test_collect_design_defines_preserves_seeded_names_against_include_guards(
+    tmp_path: Path,
+):
+    """Filelist/request defines must survive guard pop from shared preamble RTL."""
+    common = tmp_path / "zz_common.v"
+    common.write_text(
+        "`ifndef ZZ_TORTURE\n"
+        "`define ZZ_TORTURE 1\n"
+        "`endif\n"
+        "`ifndef ZZ_REAL_IFDEF\n"
+        "`define ZZ_REAL_IFDEF 1\n"
+        "`endif\n"
+        "module zz_leaf; endmodule\n",
+        encoding="utf-8",
+    )
+    top = tmp_path / "top.v"
+    top.write_text("module top; zz_leaf u (); endmodule\n", encoding="utf-8")
+    sources = [str(common.resolve()), str(top.resolve())]
+    seed = {"ZZ_TORTURE": "1", "ZZ_REAL_IFDEF": "1"}
+    index = DesignIndex._assemble(
+        {},
+        path_patterns=[],
+        module_patterns=[],
+        preprocess_include_dirs=[str(tmp_path)],
+        preprocess_defines=dict(seed),
+        parse_sources=sources,
+    )
+    defs = collect_design_defines(index, sources=sources)
+    assert defs.get("ZZ_TORTURE") == "1"
+    assert defs.get("ZZ_REAL_IFDEF") == "1"
+
+
 def test_collect_design_defines_drops_ifndef_define_include_guards(tmp_path: Path):
     rtl = tmp_path / "guard.v"
     rtl.write_text(
