@@ -566,6 +566,10 @@ def test_tier0_confident_skips_unrelated_filelist_rtl(tmp_path: Path, monkeypatc
         encoding="utf-8",
     )
     path_rtls.append(tmp_path / "top.v")
+    for i in range(7):
+        stub = tmp_path / f"path_stub_{i}.v"
+        stub.write_text(f"module path_stub_{i}; endmodule\n", encoding="utf-8")
+        path_rtls.append(stub)
     noise: list[Path] = []
     for i in range(24):
         p = tmp_path / f"noise_{i}.v"
@@ -584,15 +588,25 @@ def test_tier0_confident_skips_unrelated_filelist_rtl(tmp_path: Path, monkeypatc
     mega_f = tmp_path / "mega.f"
     mega_f.write_text(f"-f {path_f.name}\n-f {noise_f.name}\n", encoding="utf-8")
 
-    tier0_scans: list[str] = []
-    orig_scan = PathWalkModuleDb._tier0_scan_file
-
-    def traced_scan(self, path, *args, **kwargs):
-        tier0_scans.append(Path(path).name)
-        return orig_scan(self, path, *args, **kwargs)
-
-    monkeypatch.setattr(PathWalkModuleDb, "_tier0_scan_file", traced_scan)
+    monkeypatch.setenv("HIERWALK_PP_LOG", "1")
     monkeypatch.delenv("HIERWALK_PW_TIER0_GLOBAL", raising=False)
+
+    pp_t0_files: list[str] = []
+    pp_t0_lines: list[str] = []
+    pp_t0_hit_lines: list[str] = []
+    from hierwalk.preprocess_log import register_pp_log_sink
+
+    def _capture_pp(line: str) -> None:
+        if "[hier-walk pp] pp-t0-hit" in line:
+            pp_t0_hit_lines.append(line)
+            return
+        if "[hier-walk pp] pp-t0" in line:
+            pp_t0_lines.append(line)
+            parts = line.split()
+            if len(parts) >= 4:
+                pp_t0_files.append(parts[3])
+
+    register_pp_log_sink(_capture_pp)
 
     fl = parse_filelist(str(mega_f), index_cwd=str(tmp_path))
     from hierwalk.connect.shared.request import ConnectivityCheck, ConnectivityRequest
@@ -601,17 +615,36 @@ def test_tier0_confident_skips_unrelated_filelist_rtl(tmp_path: Path, monkeypatc
         checks=(ConnectivityCheck("top.u_mid.u_leaf.in", "top.u_mid.u_leaf.in"),),
         top="top",
     )
+    cache_dir = tmp_path / "pw-scope-cache"
     batch, _index, state = run_path_walk_connect(
         request,
         fl,
         top="top",
         no_cache=True,
+        jobs=4,
+        cache_dir=cache_dir,
+    )
+    run_path_walk_connect(
+        request,
+        fl,
+        top="top",
+        no_cache=False,
+        jobs=1,
+        cache_dir=cache_dir,
     )
     assert batch.results[0].connected is True
     assert "top.u_mid.u_leaf" in state.rows_by_path
-    assert "top.v" in tier0_scans
+    assert state.mod_db.defer_count() == 0
+    assert "top.v" in pp_t0_files
     for i in range(24):
-        assert f"noise_{i}.v" not in tier0_scans
+        assert f"noise_{i}.v" not in pp_t0_files
+    assert pp_t0_lines
+    assert any(" worker " in ln for ln in pp_t0_lines)
+    assert any(" disk " in ln for ln in pp_t0_hit_lines) or any(
+        " sync " in ln for ln in pp_t0_lines
+    )
+    assert all("ms" in ln for ln in pp_t0_lines + pp_t0_hit_lines)
+    assert all("root:confident" in ln or "scoped:confident" in ln for ln in pp_t0_lines)
 
 
 def test_tier0_hides_ifdef_gated_module(tmp_path: Path):

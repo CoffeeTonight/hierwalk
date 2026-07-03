@@ -217,6 +217,7 @@ pytest tests/test_path_walk_db.py \
 | 2026-07 | `top.a` 첫 hit cold preprocess + tier0 `NoneType` | seed 시 tier1 prewarm; `_tier0_make_job` 안전화 |
 | 2026-07 | `bla.v` tier1 `pp-t1` 309s / 2.3MiB (include 전개) | `HIERWALK_PW_TIER1_INCLUDES=0` 기본 — 단일 TU 만 preprocess |
 | 2026-07 | tier0 `_regex_queue ← _sources` + scoped fallback → `pp-t0` 8866건 | 성능 튜닝 전 pp-t0 건수·파일명으로 scope 먼저; `_tier0_queue_seed_sources` |
+| 2026-07 | port tail `leaf.in` 을 instance defer → recovery 가 noise.f 전체 tier0 | `ensure_path` terminal tail 은 `_resolve_signal_tail` hit 시만 return |
 
 ---
 
