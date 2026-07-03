@@ -1471,13 +1471,13 @@ class PathWalkModuleDb:
                 and not anchor_rtl
                 and len(listings) > 1
             ):
-                listing_groups = [
-                    {fl} for fl in self._ranked_listings_in_shell(
-                        listings,
-                        module_name=module_name,
-                        fl_center=center,
-                    )
-                ]
+                ranked = self._ranked_listings_in_shell(
+                    listings,
+                    module_name=module_name,
+                    fl_center=center,
+                )
+                # Confident root resolve: one best sibling branch per shell, not every FL.
+                listing_groups = [{ranked[0]}] if ranked else [listings]
             else:
                 listing_groups = [listings]
 
@@ -1546,24 +1546,27 @@ class PathWalkModuleDb:
         if len(listings) <= 1:
             return listings
 
+        hints = self._name_hints(module_name, "")
+
+        center_key = str(Path(fl_center).resolve()) if fl_center else ""
+
         def rank(fl: str) -> Tuple[int, int, str]:
-            sources = self._scoped_sources_for_listings([fl])
+            fl_key = str(Path(fl).resolve())
+            subtree = self._descendant_listings(fl)
+            sources = self._scoped_sources_for_listings(subtree)
             if not sources:
-                return (1000, 0, fl)
-            ranked = self._sort_files_by_resolve_rank(
-                sources,
-                scope_anchor=scope_anchor,
-                module_name=module_name,
-                fl_center=fl_center,
-            )
-            best = ranked[0]
-            hints = self._name_hints(module_name, "")
+                return (1000, 0, fl_key)
+            best_sim = 0
+            for src in sources:
+                sim = self._rtl_name_similarity(src, hints) if hints else 0
+                if sim > best_sim:
+                    best_sim = sim
             prox = (
-                self._filelist_proximity_from_center_listing(fl_center, best)
-                if fl_center
+                self._listing_proximity(center_key, fl_key)
+                if center_key
                 else 500
             )
-            return (prox, -self._rtl_name_similarity(best, hints), fl)
+            return (prox, -best_sim, fl_key)
 
         return sorted(listings, key=rank)
 

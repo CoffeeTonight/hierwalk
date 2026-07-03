@@ -634,6 +634,62 @@ def test_tier0_confident_skips_unrelated_filelist_rtl(tmp_path: Path, monkeypatc
     assert all("root:confident" in ln or "scoped:confident" in ln for ln in pp_t0_lines)
 
 
+def test_confident_root_progressive_skips_noise_sibling_filelist(
+    tmp_path: Path, monkeypatch
+):
+    """Root progressive tier0 must not open parallel sibling filelists (noise.f)."""
+    from tests.test_path_walk_resolve_policy import _write_stub_child_recovery_design
+
+    fl_path, leaf = _write_stub_child_recovery_design(tmp_path)
+    for i in range(16):
+        (tmp_path / f"noise_{i}.v").write_text(
+            f"module noise_{i}; endmodule\n",
+            encoding="utf-8",
+        )
+    noise_f = tmp_path / "noise.f"
+    noise_f.write_text(
+        "\n".join(str((tmp_path / f"noise_{i}.v").resolve()) for i in range(16))
+        + "\n",
+        encoding="utf-8",
+    )
+    mega_f = tmp_path / "mega.f"
+    mega_f.write_text(f"-f {fl_path.name}\n-f {noise_f.name}\n", encoding="utf-8")
+
+    monkeypatch.setenv("HIERWALK_PP_LOG", "1")
+    monkeypatch.delenv("HIERWALK_PW_TIER0_GLOBAL", raising=False)
+
+    pp_t0_files: list[str] = []
+    from hierwalk.preprocess_log import register_pp_log_sink
+
+    def _capture_pp(line: str) -> None:
+        if "[hier-walk pp] pp-t0" in line and "pp-t0-hit" not in line:
+            parts = line.split()
+            if len(parts) >= 4:
+                pp_t0_files.append(parts[3])
+
+    register_pp_log_sink(_capture_pp)
+
+    fl = parse_filelist(str(mega_f), index_cwd=str(tmp_path))
+    from hierwalk.connect.shared.request import ConnectivityCheck, ConnectivityRequest
+
+    request = ConnectivityRequest(
+        checks=(ConnectivityCheck(leaf, leaf),),
+        top="SOC_TOP",
+    )
+    batch, _index, state = run_path_walk_connect(
+        request,
+        fl,
+        top="SOC_TOP",
+        no_cache=True,
+        jobs=4,
+    )
+    assert batch.results[0].connected is True
+    assert leaf in state.rows_by_path
+    for i in range(16):
+        assert f"noise_{i}.v" not in pp_t0_files
+    assert "recovery-expand" not in " ".join(pp_t0_files)
+
+
 def test_tier0_hides_ifdef_gated_module(tmp_path: Path):
     rtl = tmp_path / "gated.v"
     rtl.write_text(
