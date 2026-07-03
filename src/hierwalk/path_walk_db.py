@@ -151,30 +151,14 @@ class _Tier0ScanResult:
     read_failed: bool
 
 
-def _tier0_regex_sidecar_path(cache_root: str, path: str) -> Path:
-    return Path(cache_root) / "regex" / f"{_file_cache_token(path)}.pkl"
-
-
 def _tier0_load_sidecar_worker(
     cache_root: str,
     path: str,
     content_digest: str,
 ) -> Optional[Tuple[str, ...]]:
-    if not cache_root:
-        return None
-    sidecar = _tier0_regex_sidecar_path(cache_root, path)
-    if not sidecar.is_file():
-        return None
-    try:
-        with sidecar.open("rb") as fh:
-            obj = pickle.load(fh)
-    except (OSError, pickle.PickleError, EOFError, ValueError):
-        return None
-    if not isinstance(obj, _FileRegexCacheEntry):
-        return None
-    if not content_digest or content_digest != obj.content_digest:
-        return None
-    return tuple(obj.module_names)
+    from hierwalk.pw_cache_store import tier0_load_regex_worker
+
+    return tier0_load_regex_worker(cache_root, path, content_digest)
 
 
 def _tier0_save_sidecar_worker(
@@ -183,15 +167,9 @@ def _tier0_save_sidecar_worker(
     content_digest: str,
     names: Sequence[str],
 ) -> None:
-    if not cache_root or not content_digest:
-        return
-    sidecar = _tier0_regex_sidecar_path(cache_root, path)
-    entry = _FileRegexCacheEntry(content_digest, tuple(names))
-    sidecar.parent.mkdir(parents=True, exist_ok=True)
-    tmp = sidecar.with_suffix(sidecar.suffix + ".tmp")
-    with tmp.open("wb") as fh:
-        pickle.dump(entry, fh, protocol=pickle.HIGHEST_PROTOCOL)
-    tmp.replace(sidecar)
+    from hierwalk.pw_cache_store import tier0_save_regex_worker
+
+    tier0_save_regex_worker(cache_root, path, content_digest, names)
 
 
 def _tier0_worker_scan(job: _Tier0ScanJob) -> _Tier0ScanResult:
@@ -288,6 +266,14 @@ def tier0_regex_module_names_from_path(
     defines: Optional[Mapping[str, str]] = None,
 ) -> List[str]:
     """Line-at-a-time module decl harvest with light ``ifdef`` / in-file ``define``."""
+    from hierwalk.perf import pw_rust_scanner_enabled
+
+    if pw_rust_scanner_enabled():
+        from hierwalk.rust_scanner import module_names_from_scan, scan_file_rust
+
+        scan = scan_file_rust(path)
+        if scan is not None and scan.modules:
+            return module_names_from_scan(scan)
     key = str(Path(path).resolve())
     names: List[str] = []
     seen: Set[str] = set()
@@ -454,6 +440,13 @@ class PathWalkModuleDb:
         if base is not None and cache_key and not no_cache:
             self._cache_root = Path(base) / "path-walk-db" / cache_key
 
+        self._cache_store = None
+        if self._cache_root is not None:
+            from hierwalk.perf import pw_cache_backend
+            from hierwalk.pw_cache_store import open_cache_store
+
+            self._cache_store = open_cache_store(self._cache_root, pw_cache_backend())
+
         self._module_to_files: Dict[str, List[str]] = {}
         self._file_to_modules: Dict[str, List[str]] = {}
         self._prefer_file: Dict[str, str] = {}
@@ -483,6 +476,7 @@ class PathWalkModuleDb:
         self._tier1_scan_lock = threading.Lock()
         self._defer_queue: List[DeferredResolve] = []
         self._defer_seen: Set[Tuple[str, str, str, str, Optional[Tuple[str, str]]]] = set()
+        self._tier0_pp_scope: str = ""
 
     @property
     def cache_root(self) -> Optional[Path]:
@@ -832,34 +826,23 @@ class PathWalkModuleDb:
         return digest
 
     def _load_regex_sidecar(self, path: str) -> Optional[_FileRegexCacheEntry]:
-        sidecar = self._regex_sidecar(path)
-        if sidecar is None or not sidecar.is_file():
+        if self._cache_store is None:
             return None
-        try:
-            with sidecar.open("rb") as fh:
-                obj = pickle.load(fh)
-        except (OSError, pickle.PickleError, EOFError, ValueError):
+        digest = self._source_digest(path)
+        if digest is None:
             return None
-        if not isinstance(obj, _FileRegexCacheEntry):
+        hit = self._cache_store.load_regex(path, content_digest=digest)
+        if hit is None:
             return None
-        live = self._source_digest(path)
-        if live is None or live != obj.content_digest:
-            return None
-        return obj
+        return _FileRegexCacheEntry(hit.content_digest, hit.module_names)
 
     def _save_regex_sidecar(self, path: str, names: Sequence[str]) -> None:
-        sidecar = self._regex_sidecar(path)
-        if sidecar is None:
+        if self._cache_store is None:
             return
         digest = self._source_digest(path)
         if digest is None:
             return
-        entry = _FileRegexCacheEntry(digest, tuple(names))
-        sidecar.parent.mkdir(parents=True, exist_ok=True)
-        tmp = sidecar.with_suffix(sidecar.suffix + ".tmp")
-        with tmp.open("wb") as fh:
-            pickle.dump(entry, fh, protocol=pickle.HIGHEST_PROTOCOL)
-        tmp.replace(sidecar)
+        self._cache_store.save_regex(path, content_digest=digest, names=names)
 
     def _load_validated_sidecar(
         self,
@@ -869,34 +852,21 @@ class PathWalkModuleDb:
         include_closure_digest: str,
         preprocess_tag: str = "",
     ) -> Optional[Dict[str, ModuleRecord]]:
-        sidecar = self._validated_sidecar(
+        if self._cache_store is None:
+            return None
+        digest = self._source_digest(path)
+        if digest is None:
+            return None
+        hit = self._cache_store.load_validated(
             path,
+            content_digest=digest,
             defines_digest=defines_digest,
+            include_closure_digest=include_closure_digest,
             preprocess_tag=preprocess_tag,
         )
-        if sidecar is None or not sidecar.is_file():
+        if hit is None:
             return None
-        try:
-            with sidecar.open("rb") as fh:
-                obj = pickle.load(fh)
-        except (OSError, pickle.PickleError, EOFError, ValueError):
-            return None
-        if not isinstance(obj, _FileValidatedCacheEntry):
-            return None
-        live = self._source_digest(path)
-        if live is None or live != obj.content_digest:
-            return None
-        if obj.defines_digest != defines_digest:
-            return None
-        if (
-            include_closure_digest
-            and obj.include_closure_digest != include_closure_digest
-        ):
-            return None
-        stored_tag = getattr(obj, "preprocess_tag", "") or "inc"
-        if preprocess_tag and stored_tag != preprocess_tag:
-            return None
-        return {name: _record_lite(rec) for name, rec in obj.modules}
+        return {name: _record_lite(rec) for name, rec in hit.items()}
 
     def _save_validated_sidecar(
         self,
@@ -907,28 +877,20 @@ class PathWalkModuleDb:
         include_closure_digest: str,
         preprocess_tag: str = "",
     ) -> None:
-        sidecar = self._validated_sidecar(
-            path,
-            defines_digest=defines_digest,
-            preprocess_tag=preprocess_tag,
-        )
-        if sidecar is None:
+        if self._cache_store is None:
             return
         digest = self._source_digest(path)
         if digest is None:
             return
-        entry = _FileValidatedCacheEntry(
-            digest,
-            defines_digest,
-            tuple((n, _record_lite(r)) for n, r in sorted(modules.items())),
-            include_closure_digest,
-            preprocess_tag,
+        lite = {name: _record_lite(rec) for name, rec in modules.items()}
+        self._cache_store.save_validated(
+            path,
+            lite,
+            content_digest=digest,
+            defines_digest=defines_digest,
+            include_closure_digest=include_closure_digest,
+            preprocess_tag=preprocess_tag,
         )
-        sidecar.parent.mkdir(parents=True, exist_ok=True)
-        tmp = sidecar.with_suffix(sidecar.suffix + ".tmp")
-        with tmp.open("wb") as fh:
-            pickle.dump(entry, fh, protocol=pickle.HIGHEST_PROTOCOL)
-        tmp.replace(sidecar)
 
     def _load_preprocessed_sidecar(
         self,
@@ -938,32 +900,18 @@ class PathWalkModuleDb:
         include_closure_digest: str,
         preprocess_tag: str = "",
     ) -> Optional[str]:
-        sidecar = self._preprocessed_sidecar(
+        if self._cache_store is None:
+            return None
+        digest = self._source_digest(path)
+        if digest is None:
+            return None
+        return self._cache_store.load_preprocessed(
             path,
+            content_digest=digest,
             defines_digest=defines_digest,
             include_closure_digest=include_closure_digest,
             preprocess_tag=preprocess_tag,
         )
-        if sidecar is None or not sidecar.is_file():
-            return None
-        try:
-            with sidecar.open("rb") as fh:
-                obj = pickle.load(fh)
-        except (OSError, pickle.PickleError, EOFError, ValueError):
-            return None
-        if not isinstance(obj, _FilePreprocessedCacheEntry):
-            return None
-        live = self._source_digest(path)
-        if live is None or live != obj.content_digest:
-            return None
-        if obj.defines_digest != defines_digest:
-            return None
-        if obj.include_closure_digest != include_closure_digest:
-            return None
-        stored_tag = getattr(obj, "preprocess_tag", "") or "inc"
-        if preprocess_tag and stored_tag != preprocess_tag:
-            return None
-        return obj.text
 
     def _save_preprocessed_sidecar(
         self,
@@ -974,31 +922,19 @@ class PathWalkModuleDb:
         include_closure_digest: str,
         preprocess_tag: str = "",
     ) -> None:
-        if self._no_cache:
-            return
-        sidecar = self._preprocessed_sidecar(
-            path,
-            defines_digest=defines_digest,
-            include_closure_digest=include_closure_digest,
-            preprocess_tag=preprocess_tag,
-        )
-        if sidecar is None:
+        if self._no_cache or self._cache_store is None:
             return
         digest = self._source_digest(path)
         if digest is None:
             return
-        entry = _FilePreprocessedCacheEntry(
-            digest,
-            defines_digest,
-            include_closure_digest,
+        self._cache_store.save_preprocessed(
+            path,
             text,
-            preprocess_tag,
+            content_digest=digest,
+            defines_digest=defines_digest,
+            include_closure_digest=include_closure_digest,
+            preprocess_tag=preprocess_tag,
         )
-        sidecar.parent.mkdir(parents=True, exist_ok=True)
-        tmp = sidecar.with_suffix(sidecar.suffix + ".tmp")
-        with tmp.open("wb") as fh:
-            pickle.dump(entry, fh, protocol=pickle.HIGHEST_PROTOCOL)
-        tmp.replace(sidecar)
 
     def _inst_index_key(
         self,
@@ -1161,7 +1097,7 @@ class PathWalkModuleDb:
         policy: ResolvePolicy,
     ) -> Tuple[str, ...]:
         if not rtl_file:
-            return tuple(self._sources)
+            return ()
         anchor_key = str(Path(rtl_file).resolve())
         cache_key = (anchor_key, policy)
         cached = self._scoped_pool_cache.get(cache_key)
@@ -1183,11 +1119,11 @@ class PathWalkModuleDb:
         unrelated filelists are not preferred over the parent's listing chain.
         """
         if not rtl_file:
-            return list(self._sources)
+            return []
         listing = self._listing_for_rtl(rtl_file)
+        anchor = str(Path(rtl_file).resolve())
         if not listing:
-            anchor = str(Path(rtl_file).resolve())
-            return [anchor] if anchor in self._sources else list(self._sources)
+            return [anchor] if anchor in self._sources else []
 
         reachable: Set[str] = {listing}
         queue = [listing]
@@ -1199,7 +1135,9 @@ class PathWalkModuleDb:
                     queue.append(child)
 
         scoped = self._scoped_sources_for_listings(reachable, include_anchor_rtl=rtl_file)
-        return scoped or list(self._sources)
+        if scoped:
+            return scoped
+        return [anchor] if anchor in self._sources else []
 
     @staticmethod
     def _defer_item_key(
@@ -1545,6 +1483,35 @@ class PathWalkModuleDb:
         """True when progressive shell scan can use real filelist tree metadata."""
         return bool(self._root_filelist or self._filelist_children)
 
+    def _tier0_queue_seed_sources(
+        self,
+        *,
+        scope_anchor: str = "",
+        policy: ResolvePolicy = RESOLVE_CONFIDENT,
+        fl_center: str = "",
+    ) -> List[str]:
+        """RTL pool for tier-0 regex queue seeding (never the whole design by default)."""
+        from hierwalk.perf import pw_tier0_global_enabled
+
+        if scope_anchor:
+            pool = list(self._scoped_pool_for_policy(scope_anchor, policy=policy))
+            if pool:
+                return pool
+            anchor = str(Path(scope_anchor).resolve())
+            if anchor in self._sources:
+                return [anchor]
+            return []
+
+        center = fl_center or self._infer_root_filelist()
+        if center:
+            scoped = self._scoped_sources_for_listings([center])
+            if scoped:
+                return scoped
+
+        if policy == RESOLVE_RECOVERY and pw_tier0_global_enabled():
+            return list(self._sources)
+        return []
+
     def _tier0_regex_queue_scan(
         self,
         module_name: str,
@@ -1554,23 +1521,29 @@ class PathWalkModuleDb:
         inst_leaf: str = "",
         fl_center: str = "",
     ) -> None:
-        """Proven tier-0 path: ranked global queue, batched parallel, early exit on hit."""
+        """Proven tier-0 path: ranked scoped queue, batched parallel, early exit on hit."""
         from hierwalk.perf import pw_module_file_cap, pw_tier0_global_scan_max
 
-        if not self._regex_queue:
-            pending = [
-                s
-                for s in self._sources
-                if s not in self._regex_scanned and s not in self._tier0_inflight
-            ]
-            pending = self._sort_files_by_resolve_rank(
-                pending,
+        self._regex_queue = []
+        pending = [
+            s
+            for s in self._tier0_queue_seed_sources(
                 scope_anchor=scope_anchor,
-                module_name=module_name,
-                inst_leaf=inst_leaf,
+                policy=policy,
                 fl_center=fl_center,
             )
-            self._regex_queue = pending
+            if s not in self._regex_scanned and s not in self._tier0_inflight
+        ]
+        if not pending:
+            return
+        pending = self._sort_files_by_resolve_rank(
+            pending,
+            scope_anchor=scope_anchor,
+            module_name=module_name,
+            inst_leaf=inst_leaf,
+            fl_center=fl_center,
+        )
+        self._regex_queue = pending
 
         workers = _resolve_pw_db_jobs(self._jobs, len(self._sources))
         batch_size = max(workers * 4, _PARALLEL_MIN_TIER0)
@@ -1855,12 +1828,22 @@ class PathWalkModuleDb:
             self._trace(
                 f"pw-db tier0 cache {Path(key).name} -> {','.join(names) or '(none)'}"
             )
-            emit_pp_log(PP_T0_HIT, key, names=len(names), detail="worker")
+            emit_pp_log(
+                PP_T0_HIT,
+                key,
+                names=len(names),
+                detail=f"worker {self._tier0_pp_scope}".strip(),
+            )
         else:
             self._trace(
                 f"pw-db tier0 scan {Path(key).name} -> {','.join(names) or '(none)'}"
             )
-            emit_pp_log(PP_T0, key, names=len(names), detail="worker")
+            emit_pp_log(
+                PP_T0,
+                key,
+                names=len(names),
+                detail=f"worker {self._tier0_pp_scope}".strip(),
+            )
         self._note_regex_modules(key, names)
         if not result.from_cache and self._cache_root is not None:
             digest = self._source_digest(key)
@@ -2080,7 +2063,12 @@ class PathWalkModuleDb:
             self._trace(
                 f"pw-db tier0 cache {Path(key).name} -> {','.join(names) or '(none)'}"
             )
-            emit_pp_log(PP_T0_HIT, key, names=len(names), detail="disk")
+            emit_pp_log(
+                PP_T0_HIT,
+                key,
+                names=len(names),
+                detail=f"disk {self._tier0_pp_scope}".strip(),
+            )
             return names
 
         t0 = time.perf_counter()
@@ -2100,7 +2088,7 @@ class PathWalkModuleDb:
             key,
             ms=(time.perf_counter() - t0) * 1000.0,
             names=len(names),
-            detail="sync",
+            detail=f"sync {self._tier0_pp_scope}".strip(),
         )
         return names
 
@@ -2192,6 +2180,11 @@ class PathWalkModuleDb:
 
         if self._is_ignored_module(module_name):
             return []
+
+        self._regex_queue.clear()
+        self._tier0_pp_scope = (
+            f"scoped:{policy}" if scope_anchor else f"root:{policy}"
+        )
 
         if scope_anchor:
             scoped_pool = self._scoped_pool_for_policy(scope_anchor, policy=policy)

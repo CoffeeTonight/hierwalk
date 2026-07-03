@@ -377,12 +377,16 @@ def test_tier0_parallel_finds_module_without_waiting_for_all(tmp_path: Path):
     fl = tmp_path / "filelist.f"
     fl.write_text("\n".join(str(p.resolve()) for p in files) + "\n", encoding="utf-8")
     flr = parse_filelist(str(fl), index_cwd=str(tmp_path))
+    from hierwalk.filelist import filelist_provenance_maps
+
+    via_map, _chain_map = filelist_provenance_maps(flr)
     index = DesignIndex._assemble(
         {},
         path_patterns=[],
         module_patterns=[],
         preprocess_include_dirs=[str(p) for p in flr.include_dirs],
         preprocess_defines=dict(flr.defines),
+        file_via_filelist=via_map,
     )
     cache_dir = tmp_path / "pw-par"
     cache_key = path_walk_db_cache_key(
@@ -398,6 +402,8 @@ def test_tier0_parallel_finds_module_without_waiting_for_all(tmp_path: Path):
         cache_dir=cache_dir,
         cache_key=cache_key,
         jobs=4,
+        file_via_filelist=via_map,
+        root_filelist=str(fl.resolve()),
     )
     t0 = time.perf_counter()
     candidates = db._ensure_regex_candidates("target_parent")
@@ -544,6 +550,68 @@ def test_ignore_module_skips_pw_db_tier0_resolve(tmp_path: Path, monkeypatch):
     assert "bb_mod" not in mod_db._module_to_files
     assert "bb.v" not in tier0_scans
     assert "top.v" in tier0_scans
+
+
+def test_tier0_confident_skips_unrelated_filelist_rtl(tmp_path: Path, monkeypatch):
+    """Confident child resolve must not tier0-scan RTL from parallel filelist branches."""
+    path_rtls: list[Path] = []
+    (tmp_path / "top.v").write_text(
+        "module leaf(input in); endmodule\n"
+        "module mid;\n"
+        "  leaf u_leaf (.in(1'b0));\n"
+        "endmodule\n"
+        "module top;\n"
+        "  mid u_mid ();\n"
+        "endmodule\n",
+        encoding="utf-8",
+    )
+    path_rtls.append(tmp_path / "top.v")
+    noise: list[Path] = []
+    for i in range(24):
+        p = tmp_path / f"noise_{i}.v"
+        p.write_text(f"module noise_{i}; endmodule\n", encoding="utf-8")
+        noise.append(p)
+    path_f = tmp_path / "path.f"
+    path_f.write_text(
+        "\n".join(str(p.resolve()) for p in path_rtls) + "\n",
+        encoding="utf-8",
+    )
+    noise_f = tmp_path / "noise.f"
+    noise_f.write_text(
+        "\n".join(str(p.resolve()) for p in noise) + "\n",
+        encoding="utf-8",
+    )
+    mega_f = tmp_path / "mega.f"
+    mega_f.write_text(f"-f {path_f.name}\n-f {noise_f.name}\n", encoding="utf-8")
+
+    tier0_scans: list[str] = []
+    orig_scan = PathWalkModuleDb._tier0_scan_file
+
+    def traced_scan(self, path, *args, **kwargs):
+        tier0_scans.append(Path(path).name)
+        return orig_scan(self, path, *args, **kwargs)
+
+    monkeypatch.setattr(PathWalkModuleDb, "_tier0_scan_file", traced_scan)
+    monkeypatch.delenv("HIERWALK_PW_TIER0_GLOBAL", raising=False)
+
+    fl = parse_filelist(str(mega_f), index_cwd=str(tmp_path))
+    from hierwalk.connect.shared.request import ConnectivityCheck, ConnectivityRequest
+
+    request = ConnectivityRequest(
+        checks=(ConnectivityCheck("top.u_mid.u_leaf.in", "top.u_mid.u_leaf.in"),),
+        top="top",
+    )
+    batch, _index, state = run_path_walk_connect(
+        request,
+        fl,
+        top="top",
+        no_cache=True,
+    )
+    assert batch.results[0].connected is True
+    assert "top.u_mid.u_leaf" in state.rows_by_path
+    assert "top.v" in tier0_scans
+    for i in range(24):
+        assert f"noise_{i}.v" not in tier0_scans
 
 
 def test_tier0_hides_ifdef_gated_module(tmp_path: Path):

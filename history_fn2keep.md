@@ -4,7 +4,7 @@
 
 변경 시 이 파일도 함께 갱신한다.
 
-마지막 갱신: 2026-07-02 (tier1 define accumulate)
+마지막 갱신: 2026-07-03 (tier0 scoped seed + pp-t0 진단)
 
 ---
 
@@ -14,6 +14,39 @@
 2. **REPLACE 금지** — 성능 개선은 별도 fast path 추가 후, 메타데이터 없으면 KEEP으로 fall through.
 3. **회귀 시** — 먼저 KEEP 경로가 살아 있는지 확인하고, fast path만 롤백한다.
 4. **문서 갱신** — KEEP 함수 시그니처·분기 조건·가드 테스트를 바꾸면 이 파일의 해당 항목을 수정한다.
+5. **성능 튜닝 전 pp-t0 먼저** — 아래 「진단 체크리스트」로 scope 계약 위반부터 제거한다.
+
+---
+
+## 진단 체크리스트 (path-walk / pp-t0) — 성능·scanner 논의 전 필수
+
+**대전제**: text-conn path-walk 는 **걸린 path / scoped filelist** 의 RTL 만 tier0/tier1 로 연다. 전체 `_sources` 일괄 open 은 버그다.
+
+`HIERWALK_PP_LOG=1` 로그에서 아래 **하나라도** 보이면 scope 버그를 먼저 의심 (cache·Rust·re2 튜닝 금지):
+
+| 신호 | 의미 |
+|------|------|
+| `pp-t0` 가 path 밖 RTL 이름으로 **수백~수천 건** | 전역 `_sources` scan 또는 `_regex_queue` 누수 |
+| heartbeat `thru=X/Y` 에서 **Y ≈ 전체 source 수** | design-wide queue drain |
+| confident child resolve 인데 **noise/unrelated `.f` RTL** 에 `pp-t0` | `_scoped_sources_for_rtl` fallback 또는 queue seed 버그 |
+| `pp-t0` detail 에 scope 태그 없음 (구버전) | `scoped:confident` / `root:recovery` 등 없으면 빌드·패치 확인 |
+
+**즉시 grep:**
+
+```bash
+grep -c '\[hier-walk pp\] pp-t0' run.log
+grep 'pp-t0' run.log | sed 's/.*pp-t0 //' | cut -d' ' -f1 | sort | uniq -c | sort -rn | head
+```
+
+**코드 3곳 (회귀 시 재확인):**
+
+1. `_tier0_regex_queue_scan` — queue seed 가 `_sources` 전체가 **아니어야** 함 → `_tier0_queue_seed_sources`
+2. `_scoped_pool_for_policy("")` — `()` 반환 (전체 design 아님)
+3. `_scoped_sources_for_rtl` — fallback `list(self._sources)` **금지** → anchor 단일 또는 `[]`
+
+**가드 테스트:** `test_tier0_confident_skips_unrelated_filelist_rtl`
+
+**에이전트 스킬:** `.grok/skills/path-walk-pp-log/SKILL.md` (자동 로드)
 
 ---
 
@@ -38,7 +71,9 @@
    → CONFIDENT + hit/miss 처리 후 return 또는 fall through 금지 (confident miss → [])
 
 3. progressive 미사용
-   → _tier0_regex_queue_scan (DEFAULT KEEP PATH)
+   → _tier0_regex_queue_scan (scoped queue seed; resolve 마다 queue reset)
+   → seed: _tier0_queue_seed_sources (scoped pool / root listing / anchor)
+   → 전체 _sources seed 는 HIERWALK_PW_TIER0_GLOBAL=1 일 때만 (기본 off)
 
 4. policy == RECOVERY
    → 남은 소스 global tier0 (stub만 map에 있어도 반드시 실행)
@@ -49,7 +84,8 @@
 | 함수 | 역할 | 대체 금지 이유 |
 |------|------|----------------|
 | `_scoped_pool_for_policy` | anchor/filelist 기준 scoped RTL pool | child resolve 정확도 |
-| `_tier0_regex_queue_scan` | ranked `_regex_queue` + 배치 병렬 + hit 조기 종료 | flat filelist·메타 없음 환경 기본 |
+| `_tier0_queue_seed_sources` | tier0 queue seed (scoped / root fl / anchor; global opt-in) | 전역 8866 open 방지 |
+| `_tier0_regex_queue_scan` | ranked scoped `_regex_queue` + 배치 병렬 + hit 조기 종료 | resolve 마다 reseed; stale queue 금지 |
 | `_progressive_tier0_decl_scan` | filelist shell별 tier0 (전역 13k queue 없음) | **opt-in fast path** — hierarchy 메타 있을 때만 |
 | `_has_filelist_hierarchy` | progressive 게이트 (`root_filelist` 또는 `filelist_children`) | flat `.f` 를 progressive로 보내지 않기 위함 |
 | `_tier0_target_module` | recovery·dup decl 시 첫 hit 후에도 scan 계속 | recovery 회귀 방지 |
@@ -135,7 +171,8 @@
 | `HIERWALK_TEXT_GREP_PREWARM` | `0` | lazy prewarm |
 | `HIERWALK_PW_FL_SHELL_MAX` | `12` | confident progressive shell cap |
 | `HIERWALK_PW_MODULE_FILE_CAP` | `32` | confident per-module file cap |
-| `HIERWALK_PW_TIER0_GLOBAL_SCAN_MAX` | (perf.py 참고) | recovery global scan 상한 |
+| `HIERWALK_PW_TIER0_GLOBAL` | `0` | tier0 queue 가 전체 design seed (기본 off) |
+| `HIERWALK_PW_TIER0_GLOBAL_SCAN_MAX` | `128` | recovery global expand 상한 |
 | `HIERWALK_PW_TIER1_INCLUDES` | `0` | tier1 preprocess `` `include `` 인라인 (기본 off; wrapper 309s 방지) |
 | `HIERWALK_PW_DEFINE_INCLUDES` | `0` | tier1 define accumulate include 추적 (기본 off) |
 | `HIERWALK_PW_DEFINE_ACCUM_MAX` | `128` | tier1 define batch cap (0=무제한) |
@@ -156,7 +193,8 @@ pytest tests/test_path_walk_db.py \
 
 | 테스트 | KEEP 보호 대상 |
 |--------|----------------|
-| `test_tier0_parallel_finds_module_without_waiting_for_all` | `_regex_queue` + parallel 배치 조기 종료 |
+| `test_tier0_confident_skips_unrelated_filelist_rtl` | confident tier0 가 parallel filelist branch 미스캔 |
+| `test_tier0_parallel_finds_module_without_waiting_for_all` | scoped `_regex_queue` + parallel 배치 조기 종료 |
 | `test_tier0_hides_ifdef_gated_module` | tier0 `ifdef` 필터 |
 | `test_ensure_regex_candidates_recovery_scans_past_stub_map` | recovery stub map 후 global scan |
 | `test_top_module_found_in_root_shell_without_deep_scan` | progressive fast path (hierarchy 있을 때) |
@@ -178,6 +216,7 @@ pytest tests/test_path_walk_db.py \
 | 2026-07 | `_apply_file_modules` 가 define cache 무효화 → 매 preprocess 0..idx 재누적 | define cache 유지; tier0 는 `_tier1_defines()` 사용 |
 | 2026-07 | `top.a` 첫 hit cold preprocess + tier0 `NoneType` | seed 시 tier1 prewarm; `_tier0_make_job` 안전화 |
 | 2026-07 | `bla.v` tier1 `pp-t1` 309s / 2.3MiB (include 전개) | `HIERWALK_PW_TIER1_INCLUDES=0` 기본 — 단일 TU 만 preprocess |
+| 2026-07 | tier0 `_regex_queue ← _sources` + scoped fallback → `pp-t0` 8866건 | 성능 튜닝 전 pp-t0 건수·파일명으로 scope 먼저; `_tier0_queue_seed_sources` |
 
 ---
 
@@ -187,4 +226,6 @@ pytest tests/test_path_walk_db.py \
 - [ ] 새 fast path 가 메타 없을 때 `_tier0_regex_queue_scan` 으로 fall through 하는가?
 - [ ] `RESOLVE_CONFIDENT` 와 `RESOLVE_RECOVERY` 분기를 바꿨다면 recovery 테스트 재실행했는가?
 - [ ] tier0 에 preprocess 를 다시 넣지 않았는가?
+- [ ] tier0 가 path 밖 RTL 을 열지 않는가? (`test_tier0_confident_skips_unrelated_filelist_rtl`)
+- [ ] pp-t0 로그에 scope 태그가 붙는가?
 - [ ] 이 파일(`history_fn2keep.md`) 해당 섹션을 갱신했는가?

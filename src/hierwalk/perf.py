@@ -138,6 +138,12 @@ def pw_module_file_cap() -> int:
     return 32
 
 
+def pw_tier0_global_enabled() -> bool:
+    """Allow tier-0 regex queue to seed from the full design (default off)."""
+    raw = os.environ.get("HIERWALK_PW_TIER0_GLOBAL", "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
 def pw_tier0_global_scan_max() -> int:
     """Max tier-0 files in a recovery global expand."""
     raw = os.environ.get("HIERWALK_PW_TIER0_GLOBAL_MAX", "").strip()
@@ -190,6 +196,25 @@ def pw_define_accum_max_files() -> int:
         except ValueError:
             pass
     return 128
+
+
+def pw_rust_scanner_enabled() -> bool:
+    """Use Rust hw-scan for structural RTL scan (``HIERWALK_RUST_SCANNER=1``)."""
+    raw = os.environ.get("HIERWALK_RUST_SCANNER", "").strip().lower()
+    return raw in ("1", "true", "yes", "on", "rust")
+
+
+def pw_cache_backend() -> str:
+    """
+    Path-walk disk cache backend (``HIERWALK_PW_CACHE``).
+
+    ``pickle`` (default) — per-file ``.pkl`` sidecars under regex/validated/preprocessed.
+    ``sqlite`` — single ``pw_cache.sqlite`` per cache namespace (stdlib sqlite3).
+    """
+    raw = os.environ.get("HIERWALK_PW_CACHE", "").strip().lower()
+    if raw in ("sqlite", "sql"):
+        return "sqlite"
+    return "pickle"
 
 
 def pw_include_closure_direct() -> bool:
