@@ -538,6 +538,71 @@ def test_compact_hierarchy_evidence_one_final_row_per_side():
     assert by_side["b"].path == "top.clk"
 
 
+def test_compact_hierarchy_evidence_with_preferred_paths_one_row_per_side():
+    from hierwalk.connect.pipeline.artifacts import (
+        HierarchyEvidenceRow,
+        _preferred_hierarchy_paths_for_check,
+        compact_hierarchy_evidence,
+    )
+    from hierwalk.connect.shared.request import ConnectivityCheck
+
+    chk = ConnectivityCheck("top.a.b.sig", "top.a.b.sig", check_id="c1")
+    pref = _preferred_hierarchy_paths_for_check(chk)
+    evidence = [
+        HierarchyEvidenceRow("c1", "a", "inst", "top", "hit", "TOP"),
+        HierarchyEvidenceRow("c1", "a", "inst", "top.a", "hit", "A"),
+        HierarchyEvidenceRow("c1", "a", "inst", "top.a.b", "hit", "B"),
+        HierarchyEvidenceRow("c1", "a", "wire", "top.a.b.sig", "hit", "B"),
+        HierarchyEvidenceRow("c1", "b", "inst", "top", "hit", "TOP"),
+        HierarchyEvidenceRow("c1", "b", "inst", "top.a", "hit", "A"),
+        HierarchyEvidenceRow("c1", "b", "inst", "top.a.b", "hit", "B"),
+        HierarchyEvidenceRow("c1", "b", "wire", "top.a.b.sig", "hit", "B"),
+    ]
+    compact = compact_hierarchy_evidence(evidence, preferred=pref)
+    assert len(compact) == 2
+    by_side = {row.side: row for row in compact}
+    assert by_side["a"].path == "top.a.b.sig"
+    assert by_side["b"].path == "top.a.b.sig"
+
+
+def test_incremental_hierarchy_writer_one_final_row_per_side(tmp_path: Path):
+    from hierwalk.connect.pipeline.artifacts import IncrementalHierarchyTsvWriter
+    from hierwalk.connect.shared.request import ConnectivityCheck
+    from hierwalk.path_walk import run_path_walk_connect
+    from hierwalk.filelist import parse_filelist
+
+    rtl = tmp_path / "top.v"
+    rtl.write_text(
+        "module B; wire sig; endmodule\n"
+        "module A; B b (); endmodule\n"
+        "module top; A a (); endmodule\n",
+        encoding="utf-8",
+    )
+    fl_path = tmp_path / "design.f"
+    fl_path.write_text(f"{rtl.resolve()}\n", encoding="utf-8")
+    fl = parse_filelist(str(fl_path), index_cwd=str(tmp_path))
+    out_dir = tmp_path / ".db_top"
+    req = ConnectivityRequest(
+        checks=(ConnectivityCheck("top.a.b.sig", "top.a.b.sig", check_id="c1"),),
+        top="top",
+    )
+    run_path_walk_connect(
+        req,
+        fl,
+        top="top",
+        no_cache=True,
+        connect_phase="text",
+        connect_output_dir=out_dir,
+    )
+    hier_text = out_dir / "hierarchy.text.tsv"
+    assert hier_text.is_file()
+    body = hier_text.read_text(encoding="utf-8")
+    a_rows = [ln for ln in body.splitlines() if ln.startswith("c1\ta\t")]
+    b_rows = [ln for ln in body.splitlines() if ln.startswith("c1\tb\t")]
+    assert len(a_rows) == 1 and "top.a.b.sig" in a_rows[0]
+    assert len(b_rows) == 1 and "top.a.b.sig" in b_rows[0]
+
+
 def test_compact_hierarchy_evidence_drops_redundant_inst_hits():
     from hierwalk.connect.pipeline.artifacts import (
         HierarchyEvidenceRow,

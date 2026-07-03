@@ -1552,8 +1552,7 @@ def _hierarchy_compact_row_rank(
     signal_rank = 0 if row.kind == "inst" else 1
     if preferred and row.path in preferred:
         hit_rank = 1 if row.status == "hit" else 0
-        inst_bonus = 1 if row.kind == "inst" else 0
-        return (3, hit_rank, inst_bonus, -depth, row.path)
+        return (3, hit_rank, depth, signal_rank, row.path)
     return (0, depth, signal_rank, row.path)
 
 
@@ -1583,22 +1582,17 @@ def compact_hierarchy_evidence(
             continue
         pref = pref_map.get(key, frozenset())
         if pref:
-            by_path: dict[str, List[HierarchyEvidenceRow]] = {}
-            for row in rows:
-                if row.path not in pref:
-                    continue
-                by_path.setdefault(row.path, []).append(row)
-            if by_path:
-                for path in sorted(by_path):
-                    compact.append(
-                        max(
-                            by_path[path],
-                            key=lambda row: _hierarchy_compact_row_rank(
-                                row,
-                                preferred=pref,
-                            ),
-                        )
+            filtered = [row for row in rows if row.path in pref]
+            if filtered:
+                compact.append(
+                    max(
+                        filtered,
+                        key=lambda row: _hierarchy_compact_row_rank(
+                            row,
+                            preferred=pref,
+                        ),
                     )
+                )
                 continue
         compact.append(
             max(

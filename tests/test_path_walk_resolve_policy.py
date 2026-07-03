@@ -517,6 +517,28 @@ def _write_top_a_b_cd_scoped_design(tmp_path: Path) -> tuple[Path, str]:
     return root, "top.a.b.c.d"
 
 
+def test_confident_ancestor_tier0_finds_dup_module_without_recovery(tmp_path: Path):
+    """Module co-listed on ancestor FL must resolve under confident child scope."""
+    fl_path, target = _write_top_a_b_cd_scoped_design(tmp_path)
+    fl = parse_filelist(str(fl_path), index_cwd=str(tmp_path))
+    req = ConnectivityRequest(
+        checks=(ConnectivityCheck("top.a.b", "top.a.b", check_id="1"),),
+        top="top",
+    )
+    batch, _index, state = run_path_walk_connect(
+        req,
+        fl,
+        top="top",
+        no_cache=True,
+        connect_phase="text",
+    )
+    row = state.rows_by_path.get("top.a.b")
+    assert row is not None
+    assert row.module == "B"
+    assert batch.results[0].connected is True
+    assert state.mod_db.defer_count() == 0
+
+
 def test_text_phase_resolves_top_a_b_c_d_with_scoped_filelist(tmp_path: Path):
     """Text-conn must selective-recover dup-module paths (not defer to logical only)."""
     fl_path, target = _write_top_a_b_cd_scoped_design(tmp_path)

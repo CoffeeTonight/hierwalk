@@ -2420,6 +2420,50 @@ class PathWalkModuleDb:
                         inst_leaf=inst_leaf,
                     )
             if policy == RESOLVE_CONFIDENT:
+                if (
+                    module_name
+                    and module_name not in self._module_to_files
+                    and not inst_leaf
+                ):
+                    listing = self._listing_for_rtl(scope_anchor)
+                    if listing and self.should_retry_deferred_recovery(scope_anchor):
+                        extra = [
+                            s
+                            for s in self._ancestor_direct_rtl_sources(listing)
+                            if s not in self._regex_scanned
+                            and s not in self._tier0_inflight
+                        ]
+                        if extra:
+                            saved_scope = self._tier0_pp_scope
+                            self._tier0_pp_scope = (
+                                f"scoped:confident-ancestor:{scope_anchor}"
+                            )
+                            self._tier0_scan_sources(
+                                self._sort_files_by_resolve_rank(
+                                    extra,
+                                    scope_anchor=scope_anchor,
+                                    module_name=module_name,
+                                    inst_leaf=inst_leaf,
+                                ),
+                                target_module=module_name,
+                            )
+                            self._tier0_pp_scope = saved_scope
+                            if module_name in self._module_to_files:
+                                scope_pool = self._scoped_pool_for_policy(
+                                    scope_anchor,
+                                    policy=policy,
+                                )
+                                files = list(
+                                    self._module_to_files.get(module_name, [])
+                                )
+                                return self._sort_module_files(
+                                    module_name,
+                                    files,
+                                    scope_anchor=scope_anchor,
+                                    policy=policy,
+                                    scope_pool=scope_pool,
+                                    inst_leaf=inst_leaf,
+                                )
                 return []
 
         center_listing = self._infer_root_filelist()
