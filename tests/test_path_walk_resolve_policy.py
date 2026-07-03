@@ -226,6 +226,87 @@ def test_recovery_global_tier0_finds_second_dup_with_tier1_cap_1(
     assert blk_real in mod_db._module_to_files["BLK"]
 
 
+def test_recovery_expand_skips_parallel_sibling_filelist(tmp_path: Path):
+    """recovery-expand must not tier0-scan RTL from parallel sibling filelists."""
+    from hierwalk.filelist import filelist_provenance_maps
+    from hierwalk.index import DesignIndex
+    from hierwalk.preprocess_log import register_pp_log_sink
+
+    fl_path, _leaf = _write_stub_child_recovery_design(tmp_path)
+    for i in range(12):
+        (tmp_path / f"noise_{i}.v").write_text(
+            f"module noise_{i}; endmodule\n",
+            encoding="utf-8",
+        )
+    noise_f = tmp_path / "noise.f"
+    noise_f.write_text(
+        "\n".join(
+            str((tmp_path / f"noise_{i}.v").resolve()) for i in range(12)
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    mega_f = tmp_path / "mega.f"
+    mega_f.write_text(f"-f {fl_path.name}\n-f {noise_f.name}\n", encoding="utf-8")
+    fl = parse_filelist(str(mega_f), index_cwd=str(tmp_path))
+    sources = [str(Path(p).resolve()) for p in fl.source_files]
+    via_map, _chain_map = filelist_provenance_maps(fl)
+    index = DesignIndex._assemble(
+        {},
+        path_patterns=[],
+        module_patterns=[],
+        filelist_patterns=[],
+        library_files=[],
+        library_dirs=[],
+        libexts=[],
+        file_via_filelist={
+            str(Path(k).resolve()): str(Path(v).resolve())
+            for k, v in fl.source_via_filelist.items()
+        },
+        file_filelist_chain={
+            str(Path(k).resolve()): v for k, v in fl.source_filelist_chain.items()
+        },
+        preprocess_include_dirs=[str(p) for p in fl.include_dirs],
+        preprocess_defines={},
+    )
+    mod_db = PathWalkModuleDb(
+        sources,
+        index,
+        defines={},
+        no_cache=True,
+        jobs=4,
+        file_via_filelist=via_map,
+        filelist_children={
+            str(Path(k).resolve()): [str(Path(c).resolve()) for c in v]
+            for k, v in fl.filelist_children.items()
+        },
+    )
+    blk_stub = str((tmp_path / "blk_stub.v").resolve())
+    blk_real = str((tmp_path / "blk_real.v").resolve())
+    pp_t0_files: list[str] = []
+
+    def _capture_pp(line: str) -> None:
+        if "[hier-walk pp] pp-t0" in line and "pp-t0-hit" not in line:
+            parts = line.split()
+            if len(parts) >= 4:
+                pp_t0_files.append(parts[3])
+
+    register_pp_log_sink(_capture_pp)
+    mod_db._tier0_scan_file(blk_stub)
+    candidates = mod_db._ensure_regex_candidates(
+        "BLK",
+        scope_anchor=blk_stub,
+        policy=RESOLVE_RECOVERY,
+    )
+    assert blk_real in candidates
+    for i in range(12):
+        assert f"noise_{i}.v" not in pp_t0_files
+    recovery_expand = [
+        f for f in pp_t0_files if f in {"blk_real.v", "top.v", "core.v", "leaf.v"}
+    ]
+    assert recovery_expand
+
+
 def test_ensure_regex_candidates_recovery_scans_past_stub_map(tmp_path: Path):
     """Recovery must not early-return when stub alone is already in _module_to_files."""
     stub = tmp_path / "blk_stub.v"

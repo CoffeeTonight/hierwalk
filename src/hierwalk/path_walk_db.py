@@ -1567,6 +1567,21 @@ class PathWalkModuleDb:
 
         return sorted(listings, key=rank)
 
+    def _ancestor_direct_rtl_sources(self, listing: str) -> List[str]:
+        """RTL listed directly on ancestor filelists (exclude parallel sibling branches)."""
+        listing_key = str(Path(listing).resolve())
+        out: List[str] = []
+        seen: Set[str] = set()
+        for anc in self._ancestor_listings(listing):
+            anc_key = str(Path(anc).resolve())
+            if anc_key == listing_key:
+                continue
+            for src in self._sources_for_listing(anc):
+                if src not in seen:
+                    seen.add(src)
+                    out.append(src)
+        return out
+
     def _recovery_tier0_expand_sources(
         self,
         *,
@@ -1575,7 +1590,7 @@ class PathWalkModuleDb:
         inst_leaf: str = "",
         fl_center: str = "",
     ) -> List[str]:
-        """Recovery-only tier0 pool: sibling filelists or flat co-list, not whole design."""
+        """Recovery-only tier0 pool: ancestor co-listed RTL for dup decl, not sibling FLs."""
         from hierwalk.perf import pw_tier0_global_enabled
 
         conf_pool: Set[str] = set()
@@ -1586,16 +1601,7 @@ class PathWalkModuleDb:
             listing = self._listing_for_rtl(scope_anchor)
             candidates: List[str] = []
             if listing and self.should_retry_deferred_recovery(scope_anchor):
-                listing_key = str(Path(listing).resolve())
-                extra_listings: Set[str] = set()
-                for anc in self._ancestor_listings(listing):
-                    anc_key = str(Path(anc).resolve())
-                    if anc_key != listing_key:
-                        extra_listings.add(anc_key)
-                for sib in self._listing_siblings.get(listing_key, ()):
-                    extra_listings.add(sib)
-                for fl in extra_listings:
-                    candidates.extend(self._scoped_sources_for_listings([fl]))
+                candidates.extend(self._ancestor_direct_rtl_sources(listing))
             else:
                 rec_pool = set(
                     self._scoped_pool_for_policy(scope_anchor, policy=RESOLVE_RECOVERY)
@@ -1863,8 +1869,8 @@ class PathWalkModuleDb:
 
         Recovery can differ from confident on the same scoped pool (subtree vs child
         filelist, tier0 ordering). Also true when extra RTL is co-listed on an
-        ancestor filelist or a sibling filelist of the anchor's listing — not for
-        unrelated parallel branches deeper in the hierarchy.
+        ancestor filelist on the anchor's include chain — not parallel sibling
+        filelists (unrelated branches).
         """
         if not scope_anchor:
             return False
@@ -1890,11 +1896,10 @@ class PathWalkModuleDb:
             return False
         listing_key = str(Path(listing).resolve())
         for anc in self._ancestor_listings(listing):
+            anc_key = str(Path(anc).resolve())
+            if anc_key == listing_key:
+                continue
             if self._sources_for_listing(anc) & extra:
-                self._should_retry_cache[anchor_key] = True
-                return True
-        for sibling_key in self._listing_siblings.get(listing_key, ()):
-            if self._sources_for_listing(sibling_key) & extra:
                 self._should_retry_cache[anchor_key] = True
                 return True
         self._should_retry_cache[anchor_key] = False
