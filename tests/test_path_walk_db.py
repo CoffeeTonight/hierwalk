@@ -566,10 +566,9 @@ def test_tier0_confident_skips_unrelated_filelist_rtl(tmp_path: Path, monkeypatc
         encoding="utf-8",
     )
     path_rtls.append(tmp_path / "top.v")
-    for i in range(7):
+    for i in range(8):
         stub = tmp_path / f"path_stub_{i}.v"
         stub.write_text(f"module path_stub_{i}; endmodule\n", encoding="utf-8")
-        path_rtls.append(stub)
     noise: list[Path] = []
     for i in range(24):
         p = tmp_path / f"noise_{i}.v"
@@ -615,34 +614,22 @@ def test_tier0_confident_skips_unrelated_filelist_rtl(tmp_path: Path, monkeypatc
         checks=(ConnectivityCheck("top.u_mid.u_leaf.in", "top.u_mid.u_leaf.in"),),
         top="top",
     )
-    cache_dir = tmp_path / "pw-scope-cache"
     batch, _index, state = run_path_walk_connect(
         request,
         fl,
         top="top",
         no_cache=True,
         jobs=4,
-        cache_dir=cache_dir,
-    )
-    run_path_walk_connect(
-        request,
-        fl,
-        top="top",
-        no_cache=False,
-        jobs=1,
-        cache_dir=cache_dir,
     )
     assert batch.results[0].connected is True
     assert "top.u_mid.u_leaf" in state.rows_by_path
     assert state.mod_db.defer_count() == 0
-    assert "top.v" in pp_t0_files
+    assert pp_t0_files == ["top.v"]
     for i in range(24):
         assert f"noise_{i}.v" not in pp_t0_files
+    for i in range(8):
+        assert f"path_stub_{i}.v" not in pp_t0_files
     assert pp_t0_lines
-    assert any(" worker " in ln for ln in pp_t0_lines)
-    assert any(" disk " in ln for ln in pp_t0_hit_lines) or any(
-        " sync " in ln for ln in pp_t0_lines
-    )
     assert all("ms" in ln for ln in pp_t0_lines + pp_t0_hit_lines)
     assert all("root:confident" in ln or "scoped:confident" in ln for ln in pp_t0_lines)
 

@@ -1691,7 +1691,14 @@ class PathWalkModuleDb:
         self._regex_queue = pending
 
         workers = _resolve_pw_db_jobs(self._jobs, len(self._sources))
-        batch_size = max(workers * 4, _PARALLEL_MIN_TIER0)
+        target = self._tier0_target_module(
+            module_name,
+            policy=policy,
+            inst_leaf=inst_leaf,
+        )
+        batch_size = 1 if self._tier0_scan_one_at_a_time(target_module=target) else max(
+            workers * 4, _PARALLEL_MIN_TIER0
+        )
         scan_cap = (
             pw_module_file_cap()
             if policy == RESOLVE_CONFIDENT
@@ -1842,6 +1849,13 @@ class PathWalkModuleDb:
         ):
             return ""
         return module_name
+
+    def _tier0_scan_one_at_a_time(self, *, target_module: str = "") -> bool:
+        """Confident module lookup must not parallel-open co-listed RTL past first hit."""
+        return (
+            self._tier0_pp_scope.endswith(":confident")
+            and bool(target_module)
+        )
 
     def should_retry_deferred_recovery(self, scope_anchor: str) -> bool:
         """
@@ -2151,10 +2165,15 @@ class PathWalkModuleDb:
             return 0
 
         workers = _resolve_pw_db_jobs(self._jobs, len(pending))
+        batch_stride = (
+            1
+            if self._tier0_scan_one_at_a_time(target_module=target_module)
+            else workers
+        )
         submitted = 0
         idx = 0
         while idx < len(pending):
-            batch = pending[idx : idx + workers]
+            batch = pending[idx : idx + batch_stride]
             idx += len(batch)
             submitted += self._tier0_submit(batch)
             while self._tier0_inflight:
@@ -2176,6 +2195,15 @@ class PathWalkModuleDb:
         if not pending:
             self._tier0_drain_completed(block=False)
             return 0
+
+        if self._tier0_scan_one_at_a_time(target_module=target_module):
+            added = 0
+            for key in pending:
+                self._tier0_scan_file(key)
+                added += 1
+                if target_module and target_module in self._module_to_files:
+                    return added
+            return added
 
         workers = _resolve_pw_db_jobs(self._jobs, len(pending))
         if workers <= 1 or len(pending) < _PARALLEL_MIN_TIER0:
