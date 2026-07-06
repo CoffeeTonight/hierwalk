@@ -341,12 +341,7 @@ def scan_ports_detail_from_module_text(
             infos.extend(_collect_ports_from_decl(port_list.group(1), ctx, lines))
         prefix = body[:4000]
         for pm in re.finditer(r"\b(input|output|inout)\b[^;]*;", prefix, re.IGNORECASE):
-            decl = re.sub(
-                r"^\s*\b(input|output|inout)\b",
-                "",
-                pm.group(0),
-                flags=re.IGNORECASE,
-            ).rstrip(";").strip()
+            decl = pm.group(0).rstrip(";").strip()
             infos.extend(_collect_ports_from_decl(decl, ctx, lines))
         return infos
     return []

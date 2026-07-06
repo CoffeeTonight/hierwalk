@@ -9,7 +9,20 @@ import threading
 from functools import lru_cache
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import AbstractSet, Dict, FrozenSet, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Set, Tuple
+from typing import (
+    AbstractSet,
+    Callable,
+    Dict,
+    FrozenSet,
+    Iterable,
+    List,
+    Mapping,
+    MutableMapping,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+)
 
 from hierwalk.generate_fold import fold_generate_regions, prepare_body_for_instance_scan
 from hierwalk.params import (
@@ -89,8 +102,52 @@ def extract_signal_roots(expr: str) -> Set[str]:
     return roots
 
 
+def _pure_hier_path_components(expr: str) -> Optional[List[str]]:
+    """Split a pure dotted hier path (``u_vuln.u_b1.dst``) into components."""
+    text = re.sub(r"\s+", "", expr.strip().rstrip(";"))
+    if not text or "." not in text:
+        return None
+    if any(ch in text for ch in "(){}'\"?:"):
+        return None
+    parts = [p for p in text.split(".") if p]
+    if len(parts) < 2:
+        return None
+    for part in parts:
+        if not re.fullmatch(r"(?:\\(?:[A-Za-z_]\w*|\S+)|[A-Za-z_]\w*)", part):
+            return None
+    return parts
+
+
+def _is_pure_hier_path(expr: str) -> bool:
+    return _pure_hier_path_components(expr) is not None
+
+
+def expand_nested_hier_child_targets(
+    child_by_parent_leaf: Mapping[Tuple[str, str], str],
+    scope: str,
+    inst_leaf: str,
+    port_path: str,
+) -> List[Tuple[str, str]]:
+    """Resolve ``inst.sub.port`` hier tails through walked instance hierarchy."""
+    child_path = child_by_parent_leaf.get((scope, inst_leaf))
+    if not child_path:
+        return []
+    if "." not in port_path:
+        return [(child_path, port_path)]
+    sub_inst, rest = port_path.split(".", 1)
+    return expand_nested_hier_child_targets(
+        child_by_parent_leaf,
+        child_path,
+        sub_inst,
+        rest,
+    )
+
+
 def extract_hier_refs(expr: str) -> List[Tuple[str, str]]:
     """Return ``(inst_leaf, port_or_net)`` for dotted hierarchical references."""
+    chain = _pure_hier_path_components(expr)
+    if chain is not None:
+        return [(chain[0], ".".join(chain[1:]))]
     out: List[Tuple[str, str]] = []
     seen: Set[Tuple[str, str]] = set()
     for m in _HIER_REF_RE.finditer(expr):
@@ -2076,6 +2133,21 @@ def _collect_const_assigns_from_stmts(
     return consts
 
 
+def _assign_rhs_param_seeds(body: str, pmap: Mapping[str, str]) -> Set[str]:
+    """Identifiers on assign RHS that may name ``localparam`` tie-offs."""
+    seeds: Set[str] = set()
+    for stmt in split_statements(_clean_body(body)):
+        if not _stmt_starts_with(stmt, "assign"):
+            continue
+        pos = _skip_ws(stmt, 6)
+        eq = _find_blocking_eq(stmt[pos:])
+        if eq is None:
+            continue
+        rhs = stmt[pos + eq + 1 :].strip().rstrip(";")
+        seeds.update(extract_connect_nodes(rhs, pmap))
+    return seeds
+
+
 def _collect_const_assigns_fixed(
     body: str,
     *,
@@ -2084,7 +2156,13 @@ def _collect_const_assigns_fixed(
 ) -> Tuple[Dict[str, int], Dict[str, str]]:
     """Grow const map with at most *max_rounds* passes over one statement list."""
     pmap = dict(param_map or {})
-    stmts = split_statements(_clean_body(body))
+    clean = _clean_body(body)
+    rhs_seeds = _assign_rhs_param_seeds(body, pmap)
+    if rhs_seeds:
+        from hierwalk.params import collect_body_params_closure
+
+        pmap.update(collect_body_params_closure(clean, rhs_seeds))
+    stmts = split_statements(clean)
     consts: Dict[str, int] = {}
     for _ in range(max_rounds):
         grown = _collect_const_assigns_from_stmts(stmts, param_map=pmap, known=consts)
@@ -2550,7 +2628,11 @@ def _is_instance_statement(stmt: str) -> bool:
     return bool(inst)
 
 
-def _flatten_connect_statements(stmt: str) -> List[str]:
+def _flatten_connect_statements(
+    stmt: str,
+    *,
+    _split_endgenerate: bool = True,
+) -> List[str]:
     """Unwrap ``for/generate begin`` wrappers; surface embedded procedural stmts."""
     stmt = stmt.strip()
     if not stmt:
@@ -2562,6 +2644,23 @@ def _flatten_connect_statements(stmt: str) -> List[str]:
         or _is_instance_statement(stmt)
     ):
         return [stmt]
+
+    if _split_endgenerate:
+        matches = list(re.finditer(r"\bendgenerate\b", stmt, re.IGNORECASE))
+        if matches and not _is_instance_statement(stmt):
+            last = matches[-1]
+            tail = stmt[last.end() :].strip()
+            if tail:
+                head = stmt[: last.end()].strip()
+                flat: List[str] = []
+                if head:
+                    flat.extend(
+                        _flatten_connect_statements(head, _split_endgenerate=False)
+                    )
+                for piece in split_statements(tail):
+                    flat.extend(_flatten_connect_statements(piece))
+                if flat:
+                    return flat
 
     pos = _skip_ws(stmt, 0)
     if _case_keyword_at(stmt, pos):
@@ -3944,6 +4043,134 @@ def apply_empty_module_passthrough(
     mod_idx.rep_adj.setdefault(rep_out, set()).add(rep_in)
 
 
+def _child_port_traces_from_input(
+    child_body: str,
+    in_port: str,
+    out_port: str,
+    *,
+    param_map: Mapping[str, str] | None = None,
+    defines: Mapping[str, str] | None = None,
+    cell: str = "",
+    design_index: object | None = None,
+) -> bool:
+    """True when child COI links *out_port* back to *in_port* (e.g. ``assign y = x``)."""
+    in_base = in_port.split("[", 1)[0]
+    out_base = out_port.split("[", 1)[0]
+    if not child_body.strip():
+        if cell and design_index is not None:
+            from hierwalk.connect.shared.endpoints import _empty_module_passthrough_ports
+
+            passthrough = _empty_module_passthrough_ports(
+                design_index,
+                cell,
+                dict(param_map or {}),
+                defines=defines,
+            )
+            if passthrough:
+                return in_base == passthrough[0] and out_base == passthrough[1]
+        return False
+    child_idx = build_module_connect_index(
+        child_body,
+        param_map=param_map,
+        defines=defines,
+        fold_generate=True,
+        ff_barrier=False,
+        resolve_param_dims=True,
+    )
+    probes = (
+        (in_base, out_base),
+        (f"{in_base}[0][0]", f"{out_base}[0][0]"),
+        (f"{in_base}[0]", f"{out_base}[0]"),
+    )
+    for left, right in probes:
+        if left in child_idx.net_rep or right in child_idx.net_rep:
+            if net_representative(child_idx, left) == net_representative(
+                child_idx, right
+            ):
+                return True
+    return False
+
+
+def _apply_inst_blackbox_passthrough_adjacency(
+    adj: Dict[str, Set[str]],
+    inst_ports: Mapping[str, List[Tuple[str, str]]],
+    cell_types: Mapping[str, str],
+    *,
+    param_map: Mapping[str, str],
+    defines: Mapping[str, str] | None = None,
+    module_body_lookup: Optional[Callable[[str], str]] = None,
+    design_index: object | None = None,
+    hier_ref_targets: Optional[Mapping[Tuple[str, str], Set[str]]] = None,
+    edge_prov: Optional[Dict[Tuple[str, str], ConnectEdgeProv]] = None,
+    expr_cache: Optional[Dict[str, FrozenSet[str]]] = None,
+) -> None:
+    """
+    Link parent nets across simple instance port maps when the child cell
+    forwards an input port to an output (``u_fork`` passthrough).
+    """
+    if module_body_lookup is None:
+        return
+    cache = expr_cache if expr_cache is not None else {}
+    pmap = dict(param_map)
+    for inst_leaf, ports in inst_ports.items():
+        cell = cell_types.get(inst_leaf, "")
+        if not cell:
+            continue
+        child_body = module_body_lookup(cell)
+        for in_port_name, in_expr in ports:
+            if (
+                not in_expr.strip()
+                or _is_compound_port_map_expr(in_expr)
+                or _is_braced_concat_rhs(in_expr)
+            ):
+                continue
+            in_roots = _cached_expr_roots(in_expr, cache, param_map=pmap)
+            if not in_roots:
+                continue
+            in_base = in_port_name.split("[", 1)[0]
+            for out_port_name, out_expr in ports:
+                if out_port_name == in_port_name:
+                    continue
+                out_base = out_port_name.split("[", 1)[0]
+                if not _child_port_traces_from_input(
+                    child_body,
+                    in_base,
+                    out_base,
+                    param_map=pmap,
+                    defines=defines,
+                    cell=cell,
+                    design_index=design_index,
+                ):
+                    continue
+                if not out_expr.strip():
+                    for in_root in in_roots:
+                        _add_undirected(
+                            adj, in_root, out_base, edge_prov=edge_prov
+                        )
+                        if hier_ref_targets is not None:
+                            for parent_net in hier_ref_targets.get(
+                                (inst_leaf, out_base), ()
+                            ):
+                                _add_undirected(
+                                    adj,
+                                    in_root,
+                                    parent_net,
+                                    edge_prov=edge_prov,
+                                )
+                    continue
+                if (
+                    _is_compound_port_map_expr(out_expr)
+                    or _is_braced_concat_rhs(out_expr)
+                    or _is_const_literal(out_expr, pmap)
+                ):
+                    continue
+                for out_root in _cached_expr_roots(out_expr, cache, param_map=pmap):
+                    for in_root in in_roots:
+                        _add_undirected(
+                            adj, in_root, out_root, edge_prov=edge_prov
+                        )
+
+
 def _apply_ifdef_only(body: str, defines: Mapping[str, str] | None) -> str:
     from hierwalk.preprocess import _preprocess_conditional_pass
 
@@ -4025,6 +4252,10 @@ def apply_bind_connectivity(
             hier_pairs: List[Tuple[str, str]] = []
             for port in group_ports:
                 expr = port_to_expr.get(port, "")
+                if _is_pure_hier_path(expr):
+                    inst_leaf, tail = extract_hier_refs(expr)[0]
+                    hier_pairs.append((inst_leaf, tail))
+                    continue
                 hier_pairs.extend(extract_hier_refs(expr))
                 for root in extract_connect_nodes(expr):
                     parent_reps.add(mod_idx.net_rep.get(root, root))
@@ -4609,6 +4840,8 @@ def build_module_connect_index(
     source_file: str | None = None,
     include_dirs: Sequence[str] | None = None,
     text_seed_adj: Optional[Mapping[str, Set[str]]] = None,
+    module_body_lookup: Optional[Callable[[str], str]] = None,
+    design_index: object | None = None,
 ) -> ModuleConnectIndex:
     if text_seed_adj or os.environ.get("HIERWALK_CONNECT_INDEX_MEMO", "").lower() in (
         "0",
@@ -4629,6 +4862,8 @@ def build_module_connect_index(
             source_file=source_file,
             include_dirs=include_dirs,
             text_seed_adj=text_seed_adj,
+            module_body_lookup=module_body_lookup,
+            design_index=design_index,
         )
     key = _build_index_cache_key(
         body,
@@ -4663,6 +4898,8 @@ def build_module_connect_index(
             source_file=source_file,
             include_dirs=include_dirs,
             text_seed_adj=None,
+            module_body_lookup=module_body_lookup,
+            design_index=design_index,
         )
         _build_index_mem_cache[key] = built
         return built
@@ -4683,6 +4920,8 @@ def _build_module_connect_index_uncached(
     source_file: str | None = None,
     include_dirs: Sequence[str] | None = None,
     text_seed_adj: Optional[Mapping[str, Set[str]]] = None,
+    module_body_lookup: Optional[Callable[[str], str]] = None,
+    design_index: object | None = None,
 ) -> ModuleConnectIndex:
     global _build_index_uncached_calls
     _build_index_uncached_calls += 1
@@ -4745,9 +4984,23 @@ def _build_module_connect_index_uncached(
         edge_prov=raw_edge_prov,
         iface_insts=iface_insts,
         braced_concat_bases=braced_concat_bases,
-        skip_comb_always=text_conn_lite,
+        # Text-conn still needs always_comb/casex/casez RHS names for coarse grep.
+        skip_comb_always=False,
         grep_only=text_conn_lite,
         seed_adj=assign_seed,
+    )
+    expr_cache_seed: Dict[str, FrozenSet[str]] = {}
+    _apply_inst_blackbox_passthrough_adjacency(
+        assign_adj,
+        inst_ports,
+        cell_types,
+        param_map=full_pmap,
+        defines=defines,
+        module_body_lookup=module_body_lookup,
+        design_index=design_index,
+        hier_ref_targets=hier_ref_targets,
+        edge_prov=raw_edge_prov,
+        expr_cache=expr_cache_seed,
     )
     bit_precise_bases: FrozenSet[str] = frozenset()
     if not resolve_param_dims:
@@ -4813,7 +5066,7 @@ def _build_module_connect_index_uncached(
     ff_net_lines: Dict[str, int] = {}
     ff_d_raw: Set[str] = set()
     ff_q_raw: Set[str] = set()
-    if text_conn_lite:
+    if text_conn_lite and ff_barrier:
         ff_adj: Dict[str, Set[str]] = {}
     else:
         ff_adj = scan_ff_adjacency(
@@ -4826,7 +5079,6 @@ def _build_module_connect_index_uncached(
             ff_q_roots=ff_q_raw,
         )
 
-    expr_cache_seed: Dict[str, FrozenSet[str]] = {}
     _seed_adj_from_instance_ports(
         assign_adj,
         inst_ports,

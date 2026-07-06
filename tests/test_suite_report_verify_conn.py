@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from hierwalk.suite_conn_policy import CONN_VERDICT_SKIP_IDS
+from hierwalk.suite_conn_policy import (
+    CONN_LOGICAL_ONLY_NEGATIVE_IDS,
+    CONN_VERDICT_SKIP_IDS,
+)
 from hierwalk.suite_report_verify import (
     _expected_conn_outcomes,
     _hierarchy_covers_path,
@@ -78,6 +81,39 @@ def test_text_conn_summary_skips_positive_disconnect_noise(tmp_path):
     assert len(errors) == 1
     assert errors[0].subject == "bad_check"
     assert errors[0].tag == "text bloom pass — logical should fail"
+
+
+def test_text_phase_skips_logical_only_negative_expectations():
+    spec = {
+        "checks": [
+            {"id": "zz_vuln_h3", "a": "top.a", "b": "top.b", "expect_connected": False},
+            {"id": "zz_vuln_a1", "a": "top.x", "b": "top.y", "expect_connected": False},
+        ]
+    }
+    text = _expected_conn_outcomes(spec, phase="text")
+    assert "zz_vuln_h3" not in text
+    assert text["zz_vuln_a1"] is False
+    logical = _expected_conn_outcomes(spec, phase="logical")
+    assert logical["zz_vuln_h3"] is False
+    assert logical["zz_vuln_a1"] is False
+    assert "zz_vuln_h3" in CONN_LOGICAL_ONLY_NEGATIVE_IDS
+
+
+def test_text_conn_summary_allows_logical_only_bloom_pass(tmp_path):
+    tsv = tmp_path / "conn.text.tsv"
+    tsv.write_text(
+        "check_id\tendpoint_a\tendpoint_b\tconnected_text\n"
+        "zz_vuln_h3\ta\tb\ttrue\n",
+        encoding="utf-8",
+    )
+    spec = {
+        "checks": [
+            {"id": "zz_vuln_h3", "a": "top.a", "b": "top.b", "expect_connected": False},
+        ]
+    }
+    stats, errors = _summarize_conn_outcomes(tsv, phase="text", spec=spec)
+    assert stats.issues == 0
+    assert not errors
 
 
 def test_text_conn_summary_skips_expected_negative_disconnect(tmp_path):

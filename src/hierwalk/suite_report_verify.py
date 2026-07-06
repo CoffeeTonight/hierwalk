@@ -31,7 +31,10 @@ from hierwalk.connect.shared.expand import (
 )
 from hierwalk.cache import resolve_run_work_dir, work_base_dir
 from hierwalk.run_request import RUN_CONE_TRACE, RUN_CONN_CHECK, RUN_IO_TRACE, RunConfig
-from hierwalk.suite_conn_policy import CONN_VERDICT_SKIP_IDS
+from hierwalk.suite_conn_policy import (
+    CONN_LOGICAL_ONLY_NEGATIVE_IDS,
+    CONN_VERDICT_SKIP_IDS,
+)
 from hierwalk.report_provenance import (
     connect_phase_timings,
     report_command_line,
@@ -178,7 +181,8 @@ def _expected_conn_outcomes(
 
     Logical phase: default ``True`` unless explicit ``expect_connected: false``
     or check is in ``CONN_VERDICT_SKIP_IDS``.
-    Text phase: only explicit expectations (negatives remain logical-only).
+    Text phase: only explicit structural-negative expectations; mask/tie-off
+    negatives (``CONN_LOGICAL_ONLY_NEGATIVE_IDS``) are logical-only.
     """
     out: Dict[str, bool] = {}
     checks = spec.get("checks") or []
@@ -193,7 +197,13 @@ def _expected_conn_outcomes(
             continue
         explicit = _parse_expect_connected(item)
         if phase_norm == "text":
-            if explicit is False:
+            if (
+                explicit is False
+                and not any(
+                    _check_id_matches(logical_only, cid)
+                    for logical_only in CONN_LOGICAL_ONLY_NEGATIVE_IDS
+                )
+            ):
                 out[cid] = False
             continue
         if explicit is not None:
@@ -317,6 +327,14 @@ def _validate_expect_hierarchy(
                 side=side,
                 path=path,
             )
+            if not matches and kind == "inst":
+                matches = [
+                    r
+                    for r in rows
+                    if r.get("path") == path
+                    and r.get("kind") == "inst"
+                    and _check_id_matches(cid, str(r.get("check_id", "")))
+                ]
             if kind:
                 matches = [r for r in matches if r.get("kind") == kind] or matches
             if status:
@@ -402,6 +420,12 @@ def _hierarchy_covers_path(
             continue
         if _check_id_matches(check_id, row_cid):
             return True
+    if any(
+        row.get("path") == path
+        and _check_id_matches(check_id, str(row.get("check_id", "")))
+        for row in rows
+    ):
+        return True
     return False
 
 

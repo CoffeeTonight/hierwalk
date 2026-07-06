@@ -504,8 +504,12 @@ def test_compact_hierarchy_final_tsv_keeps_deepest_hit_only(tmp_path: Path):
     body = out.read_text(encoding="utf-8")
     a_rows = [ln for ln in body.splitlines() if ln.startswith("c0\ta\t")]
     b_rows = [ln for ln in body.splitlines() if ln.startswith("c0\tb\t")]
-    assert len(a_rows) == 1 and "top.u_leaf.w" in a_rows[0]
-    assert len(b_rows) == 1 and "top.clk" in b_rows[0]
+    a_signal = [ln for ln in a_rows if "\twire\t" in ln or "\tport\t" in ln]
+    b_signal = [ln for ln in b_rows if "\twire\t" in ln or "\tport\t" in ln]
+    assert len(a_signal) == 1 and "top.u_leaf.w" in a_signal[0]
+    assert len(b_signal) == 1 and "top.clk" in b_signal[0]
+    assert any("\tinst\ttop\t" in ln for ln in a_rows)
+    assert any("\tinst\ttop.u_leaf\t" in ln for ln in a_rows)
 
 
 def test_resolve_hierarchy_row_identity_side():
@@ -532,10 +536,14 @@ def test_compact_hierarchy_evidence_one_final_row_per_side():
         HierarchyEvidenceRow("c1", "b", "port", "top.clk", "hit", "TOP"),
     ]
     compact = compact_hierarchy_evidence(evidence)
-    assert len(compact) == 2
-    by_side = {row.side: row for row in compact}
-    assert by_side["a"].path == "top.u.sig"
-    assert by_side["b"].path == "top.clk"
+    by_side_signal = {
+        row.side: row for row in compact if row.kind != "inst"
+    }
+    assert len(by_side_signal) == 2
+    assert by_side_signal["a"].path == "top.u.sig"
+    assert by_side_signal["b"].path == "top.clk"
+    inst_paths = {row.path for row in compact if row.kind == "inst"}
+    assert inst_paths == {"top", "top.u"}
 
 
 def test_compact_hierarchy_evidence_with_preferred_paths_one_row_per_side():
@@ -559,12 +567,19 @@ def test_compact_hierarchy_evidence_with_preferred_paths_one_row_per_side():
         HierarchyEvidenceRow("c1", "b", "logic", "top.a.b.sig", "hit", "B"),
     ]
     compact = compact_hierarchy_evidence(evidence, preferred=pref)
-    assert len(compact) == 2
-    by_side = {row.side: row for row in compact}
-    assert by_side["a"].path == "top.a.b.sig"
-    assert by_side["a"].kind == "logic"
-    assert by_side["b"].path == "top.a.b.sig"
-    assert by_side["b"].kind == "logic"
+    by_side_signal = {
+        row.side: row for row in compact if row.kind != "inst"
+    }
+    assert len(by_side_signal) == 2
+    assert by_side_signal["a"].path == "top.a.b.sig"
+    assert by_side_signal["a"].kind == "logic"
+    assert by_side_signal["b"].path == "top.a.b.sig"
+    assert by_side_signal["b"].kind == "logic"
+    assert {row.path for row in compact if row.kind == "inst"} == {
+        "top",
+        "top.a",
+        "top.a.b",
+    }
 
 
 def test_incremental_hierarchy_writer_one_final_row_per_side(tmp_path: Path):
@@ -618,9 +633,15 @@ def test_compact_hierarchy_evidence_drops_redundant_inst_hits():
         HierarchyEvidenceRow("c1", "a", "wire", "top.a.b.sig", "hit", "B"),
     ]
     compact = compact_hierarchy_evidence(evidence)
-    assert len(compact) == 1
-    assert compact[0].path == "top.a.b.sig"
-    assert compact[0].kind == "wire"
+    signal_rows = [row for row in compact if row.kind != "inst"]
+    assert len(signal_rows) == 1
+    assert signal_rows[0].path == "top.a.b.sig"
+    assert signal_rows[0].kind == "wire"
+    assert {row.path for row in compact if row.kind == "inst"} == {
+        "top",
+        "top.a",
+        "top.a.b",
+    }
 
 
 def test_format_connect_hierarchy_tsv_includes_absolute_rtl_path(tmp_path: Path):

@@ -17,6 +17,18 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from hierwalk.connect.shared.expand import build_expand_meta
 from hierwalk.connect.shared.request import ConnectivityCheck, ConnectivityRequest
 from hierwalk.suite_conn_policy import CONN_VERDICT_SKIP_IDS
+from hierwalk.zigzag_annex_gen import (
+    ZZ_MATRIX_ANNEX_RTL,
+    matrix_hierarchy_specs,
+    ZZ_VULN_ANNEX_RTL,
+    matrix_annex_rtl,
+    matrix_hierarchy_suite_spec,
+    torture_top_annex_insts,
+    vuln_annex_checks,
+    vuln_annex_negative_ids,
+    vuln_annex_rtl,
+    vuln_annex_suite_specs,
+)
 
 TOP = "zz_torture_top"
 HUB = f"{TOP}.u_zigzag"
@@ -31,15 +43,35 @@ D1_SHADOW = f"{DEEP_ARM}.d1.d1_shadow"
 D1_NEXT_DECOY = f"{DEEP_ARM}.d1.u_next_decoy"
 R3_ALT = f"{SHALLOW_ARM}.r1.r2.r3.r3_alt"
 COLLISION = f"{TOP}.u_collision"
-SCOPE_ARM = f"{TOP}.u_scope"
+SCOPE_ARM = f"{TOP}.u_a"
 SCOPE_B = f"{SCOPE_ARM}.u_b"
+SCOPE_C = f"{SCOPE_ARM}.u_c"
+SCOPE_B_TO_C_BRIDGE = "zz_b_to_c"
+SCOPE_C_FROM_B = "zz_c_from_b"
 BLACKBOX = f"{HUB}.u_bb"
 ZZ_COMMON_RTL = "zz_common.v"
 ZZ_SCOPE_DECOY_RTL = "zz_scope_decoy.v"
 ZZ_SCOPE_A_RTL = "zz_scope_a.v"
+ZZ_SCOPE_B_RTL = "zz_scope_b.v"
+ZZ_SCOPE_C_RTL = "zz_scope_c.v"
 ZZ_SCOPE_STUB_RTL = "zz_scope_stub.v"
+ZZ_SCOPE_FL_DIR = "zz_scope_fl"
+SCOPE_VARIANT_COUNT = 10
+
+
+def _scope_variant_rtl_name(idx: int) -> str:
+    return f"zz_scope_v{idx:02d}.v"
+
+
 ZZ_SCOPE_FL_RTL = frozenset(
-    {ZZ_SCOPE_DECOY_RTL, ZZ_SCOPE_A_RTL, ZZ_SCOPE_STUB_RTL}
+    {
+        ZZ_SCOPE_DECOY_RTL,
+        ZZ_SCOPE_A_RTL,
+        ZZ_SCOPE_B_RTL,
+        ZZ_SCOPE_C_RTL,
+        ZZ_SCOPE_STUB_RTL,
+        *(_scope_variant_rtl_name(i) for i in range(SCOPE_VARIANT_COUNT)),
+    }
 )
 ZZ_FAKE_DEEP_RTL = "zz_fake_deep.v"
 DW_VENDOR_RTL = "DW_zz_vendor.v"
@@ -68,6 +100,7 @@ SUITE_CONN_NEGATIVE_IDS = frozenset(
         "zz_intentional_fail",
         "zz_fake_deep_not_on_spine",
         "zz_multi_g3_empty",
+        *vuln_annex_negative_ids(),
     }
 )
 
@@ -375,10 +408,8 @@ def _deep_level_body(lvl: int) -> str:
               .din(shallow_return),
               .dout(zig_decoy)
             );
-            logic [2:0][3:0] bridge_expr_din;
             logic [2:0][3:0] bridge_expr_xor;
             assign bridge_expr_xor = chain_in ^ shallow_return;
-            assign bridge_expr_din = chain_in | shallow_return;
             zz_bridge_ping u_bridge_expr (
               .din(bridge_expr_xor),
               .dout(expr_mapped)
@@ -424,9 +455,7 @@ def _deep_level_body(lvl: int) -> str:
         casex_block = textwrap.dedent(
             """
             logic route_casex;
-            logic route_casex_conn;
             logic [3:0] key_casex;
-            assign route_casex_conn = chain_in[0][0];
             assign key_casex = 4'b?1??;
             always_comb begin
               casex (key_casex)
@@ -436,14 +465,12 @@ def _deep_level_body(lvl: int) -> str:
             end
             """
         ).strip()
-        route_wire = "route_casex_conn"
+        route_wire = "route_casex"
     elif lvl == 3:
         casex_block = textwrap.dedent(
             """
             logic route_casez;
-            logic route_casez_conn;
             logic [3:0] key_casez;
-            assign route_casez_conn = chain_in[2][1];
             assign key_casez = 4'b1010;
             always_comb begin
               casez (key_casez)
@@ -453,7 +480,7 @@ def _deep_level_body(lvl: int) -> str:
             end
             """
         ).strip()
-        route_wire = "route_casez_conn"
+        route_wire = "route_casez"
     else:
         route_wire = f"{chain_src}[0][0]"
 
@@ -474,8 +501,6 @@ def _deep_level_body(lvl: int) -> str:
         ff_barrier = textwrap.dedent(
             """
             logic ff_barrier_tap;
-            logic ff_barrier_conn;
-            assign ff_barrier_conn = chain_in[0][0];
             always_ff @(posedge clk) begin
               if (!rst_n)
                 ff_barrier_tap <= 1'b0;
@@ -626,10 +651,10 @@ def _deep_level_body(lvl: int) -> str:
         strb_hop,
         leaf_assign,
         cube_assign,
+        child,
         gen_block,
         ifdef_block,
         ifndef_define_block,
-        child,
         decoys,
         "endmodule",
     ]
@@ -899,20 +924,174 @@ def _scope_decoy_module() -> str:
     ).strip()
 
 
-def _scope_real_modules() -> str:
+def _scope_nested_ifdef_u_b_inst(probe_net: str) -> str:
+    """``top.u_a.u_b``: line/block comments + nested ``ifdef``/``ifndef``/``else``."""
+    probe = f".scope_probe({probe_net})"
     return textwrap.dedent(
+        f"""
+        ////////
+        // scope child: u_b under nested compile guards
+        // `endif trap in line comment — must not pop stack
+        /*
+         * `ifdef ZZ_SCOPE_FAKE_BLK
+         * zz_scope_B u_fake_b ();
+         * `endif
+         */
+        `ifndef ZZ_SCOPE_NO_B
+          `ifndef ZZ_SCOPE_ALT_B
+            zz_scope_B u_b (
+              .clk(clk),
+        `ifndef ZZ_SCOPE_HIDE_PROBE
+              {probe}
+        `else
+              {probe}
+        `endif
+            );
+          `else
+            `ifdef ZZ_SCOPE_USE_ALT
+              zz_scope_B u_b (
+                .clk(clk),
+                {probe}
+              );
+            `else
+              zz_scope_B u_b (
+                .clk(clk),
+                {probe}
+              );
+            `endif
+          `endif
+        `else
+          `ifdef ZZ_SCOPE_FALLBACK
+            zz_scope_B u_b (
+              .clk(clk),
+              {probe}
+            );
+          `endif
+        `endif
         """
+    ).strip()
+
+
+def _scope_b_to_c_zigzag_bridge(src_net: str, dst_net: str) -> str:
+    """Lateral ``u_b``→``u_c`` tie inside ``zz_scope_A`` under comment/ifdef guards."""
+    return textwrap.dedent(
+        f"""
+        ////////
+        // zigzag bridge: u_b.scope_probe -> u_c.din
+        // `else trap in line comment
+        /*
+         * `ifdef ZZ_SCOPE_FAKE_BRIDGE
+         * assign {dst_net} = 1'b0;
+         * `endif
+         */
+        `ifndef ZZ_SCOPE_NO_BRIDGE
+          `ifndef ZZ_SCOPE_BRIDGE_ALT
+            assign {dst_net} = {src_net};
+          `else
+            `ifdef ZZ_SCOPE_BRIDGE_PICK
+              assign {dst_net} = {src_net};
+            `else
+              assign {dst_net} = {src_net};
+            `endif
+          `endif
+        `else
+          `ifdef ZZ_SCOPE_BRIDGE_FALLBACK
+            assign {dst_net} = {src_net};
+          `endif
+        `endif
+        """
+    ).strip()
+
+
+def _scope_nested_ifdef_u_c_inst(din_net: str) -> str:
+    """``top.u_a.u_c``: sibling child under offset nested ``ifdef`` guards."""
+    din = f".din({din_net})"
+    return textwrap.dedent(
+        f"""
+        // sibling child: u_c fed from u_b via zz_c_from_b
+        /*
+         * `ifndef ZZ_SCOPE_FAKE_C
+         * zz_scope_C u_fake_c ();
+         * `endif
+         */
+        `ifndef ZZ_SCOPE_NO_C
+          `ifndef ZZ_SCOPE_ALT_C
+            zz_scope_C u_c (
+              .clk(clk),
+        `ifndef ZZ_SCOPE_HIDE_DIN
+              {din},
+              .dout()
+        `else
+              {din},
+              .dout()
+        `endif
+            );
+          `else
+            `ifdef ZZ_SCOPE_USE_ALT_C
+              zz_scope_C u_c (
+                .clk(clk),
+                {din},
+                .dout()
+              );
+            `else
+              zz_scope_C u_c (
+                .clk(clk),
+                {din},
+                .dout()
+              );
+            `endif
+          `endif
+        `else
+          `ifdef ZZ_SCOPE_FALLBACK_C
+            zz_scope_C u_c (
+              .clk(clk),
+              {din},
+              .dout()
+            );
+          `endif
+        `endif
+        """
+    ).strip()
+
+
+def _scope_a_module() -> str:
+    return textwrap.dedent(
+        f"""
         module zz_scope_A (
           input logic clk
         );
-          zz_scope_B u_b (.clk(clk), .scope_probe());
+          logic {SCOPE_B_TO_C_BRIDGE};
+          logic {SCOPE_C_FROM_B};
+          {_scope_nested_ifdef_u_b_inst(SCOPE_B_TO_C_BRIDGE)}
+          {_scope_b_to_c_zigzag_bridge(SCOPE_B_TO_C_BRIDGE, SCOPE_C_FROM_B)}
+          {_scope_nested_ifdef_u_c_inst(SCOPE_C_FROM_B)}
         endmodule
+        """
+    ).strip()
 
+
+def _scope_b_module() -> str:
+    return textwrap.dedent(
+        """
         module zz_scope_B (
           input  logic clk,
           output logic scope_probe
         );
           assign scope_probe = clk;
+        endmodule
+        """
+    ).strip()
+
+
+def _scope_c_module() -> str:
+    return textwrap.dedent(
+        """
+        module zz_scope_C (
+          input  logic clk,
+          input  logic din,
+          output logic dout
+        );
+          assign dout = din;
         endmodule
         """
     ).strip()
@@ -927,8 +1106,203 @@ def _scope_child_fl_stub() -> str:
 
         module zz_scope_B;
         endmodule
+
+        module zz_scope_C;
+        endmodule
         """
     ).strip()
+
+
+def _scope_variant_arm(idx: int) -> str:
+    return f"{TOP}.u_av{idx:02d}"
+
+
+def _scope_variant_b(idx: int) -> str:
+    return f"{_scope_variant_arm(idx)}.u_b"
+
+
+def _scope_variant_module(idx: int) -> str:
+    return f"zz_scope_v{idx:02d}"
+
+
+def _scope_variant_inst_bodies() -> Tuple[str, ...]:
+    """Ten ``top.u_avNN.u_b`` shapes: ``//``, ``/* */``, nested ``ifdef`` guards."""
+    return (
+        textwrap.dedent(
+            """
+            ////////
+            // variant 00: multiline u_b under `ifndef
+            `ifndef ZZ_SCV00_NO_B
+            zz_scope_B u_b
+            (
+            .clk(clk),
+            .scope_probe()
+            );
+            `endif
+            """
+        ).strip(),
+        textwrap.dedent(
+            """
+            // `endif // `else trap in line comment
+            `ifndef ZZ_SCV01_NO_B
+              zz_scope_B u_b (.clk(clk), .scope_probe());
+            `endif
+            """
+        ).strip(),
+        textwrap.dedent(
+            """
+            /*
+             * `ifndef ZZ_SCV02_FAKE
+             * zz_scope_B u_decoy ();
+             * `endif
+             */
+            `ifndef ZZ_SCV02_NO_B
+            `ifdef ZZ_SCV02_PICK
+              zz_scope_B u_b (.clk(clk), .scope_probe());
+            `else
+              zz_scope_B u_b (.clk(clk), .scope_probe());
+            `endif
+            `endif
+            """
+        ).strip(),
+        textwrap.dedent(
+            """
+            `ifndef ZZ_SCV03_A
+              zz_scope_B u_b (.clk(clk), .scope_probe());
+            `elsif ZZ_SCV03_B
+              zz_scope_B u_b (.clk(clk), .scope_probe());
+            `else
+              zz_scope_B u_b (.clk(clk), .scope_probe());
+            `endif
+            """
+        ).strip(),
+        textwrap.dedent(
+            """
+            `ifndef ZZ_SCV04_NO_B
+            zz_scope_B u_b (.clk(clk), .scope_probe());
+            `endif//ZZ_SCV04_NO_B
+            """
+        ).strip(),
+        textwrap.dedent(
+            """
+            `ifndef ZZ_SCV05_NO_B
+            zz_scope_B u_b (
+              .clk(clk),
+            `ifndef ZZ_SCV05_PORT_X
+              .scope_probe()
+            `else
+              .scope_probe()
+            `endif
+            );
+            `endif
+            """
+        ).strip(),
+        textwrap.dedent(
+            """
+            // abc_top-style nested port guards
+            `ifndef ZZ_SCV06_NO_B
+            zz_scope_B u_b (
+              .clk(clk),
+            `ifdef ZZ_SCV06_POPO
+              .scope_probe()
+            `else
+            `ifndef ZZ_SCV06_IIOO
+              .scope_probe()
+            `endif
+            `endif
+            );
+            `endif
+            """
+        ).strip(),
+        textwrap.dedent(
+            """
+            ////////
+            // variant 07 — banner + nested ifndef/ifdef
+            // `ifdef ZZ_SCV07_FAKE
+            `ifndef ZZ_SCV07_NO_B
+              `ifndef ZZ_SCV07_ALT
+                zz_scope_B u_b (.clk(clk), .scope_probe());
+              `else
+                `ifdef ZZ_SCV07_FB
+                  zz_scope_B u_b (.clk(clk), .scope_probe());
+                `else
+                  zz_scope_B u_b (.clk(clk), .scope_probe());
+                `endif
+              `endif
+            `endif
+            """
+        ).strip(),
+        textwrap.dedent(
+            """
+            // prelude
+            /* `else block trap */
+            `ifndef ZZ_SCV08_WRAP_
+            `define ZZ_SCV08_WRAP_
+            `ifndef ZZ_SCV08_NO_B
+              zz_scope_B u_b (.clk(clk), .scope_probe());
+            `endif
+            `endif
+            """
+        ).strip(),
+        textwrap.dedent(
+            """
+            `ifndef ZZ_SCV09_NO_B
+            zz_scope_B u_b (.clk(clk), .scope_probe());
+            `endif//ZZ_SCV09_NO_B logic scv09_pad;
+            """
+        ).strip(),
+    )
+
+
+def _scope_variant_parent_module(idx: int) -> str:
+    body = _scope_variant_inst_bodies()[idx]
+    mod = _scope_variant_module(idx)
+    return textwrap.dedent(
+        f"""
+        module {mod} (
+          input logic clk
+        );
+          {body}
+        endmodule
+        """
+    ).strip()
+
+
+def _scope_variant_rtl_files() -> Dict[str, str]:
+    return {
+        _scope_variant_rtl_name(idx): _scope_variant_parent_module(idx)
+        for idx in range(SCOPE_VARIANT_COUNT)
+    }
+
+
+def _scope_variant_top_insts() -> str:
+    lines = [
+        f"  {_scope_variant_module(idx)} u_av{idx:02d} (.clk(clk));"
+        for idx in range(SCOPE_VARIANT_COUNT)
+    ]
+    return "\n".join(lines)
+
+
+def _scope_variant_check_id(idx: int) -> str:
+    return f"zz_ifdef_var_{idx:02d}"
+
+
+def _scope_variant_expect_hierarchy(idx: int) -> List[Dict[str, Any]]:
+    arm = _scope_variant_arm(idx)
+    return [
+        {
+            "side": "a",
+            "path": arm,
+            "module": _scope_variant_module(idx),
+            "rtl_file": _scope_variant_rtl_name(idx),
+        },
+        {
+            "side": "a",
+            "path": _scope_variant_b(idx),
+            "module": "zz_scope_B",
+            "rtl_file": ZZ_SCOPE_B_RTL,
+        },
+    ]
 
 
 def _top_module() -> str:
@@ -949,8 +1323,8 @@ def _top_module() -> str:
           logic loop_xA, loop_xB, loop_yA, loop_yB;
           logic [1:0] literal_bus;
 
-          assign loop_ref = clk;
-          assign loop_tie0 = loop_ref;
+          assign loop_tie0 = clk;
+          assign loop_ref = loop_tie0;
           assign loop_tie1 = loop_ref;
           assign loop_tie2 = loop_ref;
           assign loop_tie3 = loop_ref;
@@ -972,8 +1346,10 @@ def _top_module() -> str:
             .leaf_echo(leaf_echo)
           );
           zz_collision_d u_collision ();
-          zz_scope_A u_scope (.clk(clk));
+          zz_scope_A u_a (.clk(clk));
+          {_scope_variant_top_insts()}
           {DW_VENDOR_CELL} u_dw_vendor (.in(clk));
+          {torture_top_annex_insts(TOP)}
         endmodule
         """
     ).strip()
@@ -995,6 +1371,10 @@ def _hierarchy_specs() -> Tuple[str, ...]:
         f"{SHALLOW_ARM}.r1.r2.r3.r3_alt",
         SCOPE_ARM,
         SCOPE_B,
+        SCOPE_C,
+        *(_scope_variant_arm(idx) for idx in range(SCOPE_VARIANT_COUNT)),
+        *(_scope_variant_b(idx) for idx in range(SCOPE_VARIANT_COUNT)),
+        *matrix_hierarchy_specs(torture_top=TOP),
     )
 
 
@@ -1074,12 +1454,12 @@ def _round18_design_checks() -> Tuple[ConnectivityCheck, ...]:
     return (
         ConnectivityCheck(
             f"{DEEP_D1}.chain_in[0][0]",
-            f"{DEEP_D1}.route_casex_conn",
+            f"{DEEP_D1}.route_casex",
             check_id="zz_casex_route",
         ),
         ConnectivityCheck(
             f"{DEEP_D3}.chain_in[2][1]",
-            f"{DEEP_D3}.route_casez_conn",
+            f"{DEEP_D3}.route_casez",
             check_id="zz_casez_route",
         ),
         ConnectivityCheck(
@@ -1098,7 +1478,7 @@ def _round18_design_checks() -> Tuple[ConnectivityCheck, ...]:
                 f"{DEEP_D2}.chain_in[1][2]",
                 f"{DEEP_D2}.shallow_return[1][2]",
             ),
-            f"{DEEP_D2}.u_bridge_expr.dout[1][2]",
+            f"{DEEP_D2}.u_bridge_expr.din[1][2]",
         ),
         ConnectivityCheck(
             f"{DEEP_D2}.chain_in[0][0]",
@@ -1220,12 +1600,58 @@ def _round20_design_checks() -> Tuple[ConnectivityCheck, ...]:
 
 
 def _round21_design_checks() -> Tuple[ConnectivityCheck, ...]:
-    """Round21: scoped child FL + co-list dup decl order (``top.a.b`` regression anchor)."""
+    """Round21: scoped child FL + co-list dup decl order (``top.u_a.u_b`` regression anchor)."""
     return (
         ConnectivityCheck(
             f"{SCOPE_B}.scope_probe",
             f"{TOP}.clk",
             check_id="zz_scope_confident_b",
+        ),
+    )
+
+
+def _round22_design_checks() -> Tuple[ConnectivityCheck, ...]:
+    """Round22: ``top.u_a.u_b`` under ``//`` + ``/* */`` + nested ``ifdef`` guards."""
+    return (
+        ConnectivityCheck(
+            f"{SCOPE_B}.clk",
+            f"{TOP}.clk",
+            check_id="zz_ifdef_nested_u_b",
+        ),
+    )
+
+
+def _round23_design_checks() -> Tuple[ConnectivityCheck, ...]:
+    """Round23: ten ``top.u_avNN.u_b`` ifdef/comment guard variants."""
+    checks: List[ConnectivityCheck] = []
+    for idx in range(SCOPE_VARIANT_COUNT):
+        child = _scope_variant_b(idx)
+        if idx % 2 == 0:
+            ep_a, ep_b = f"{child}.scope_probe", f"{TOP}.clk"
+        else:
+            ep_a, ep_b = f"{child}.clk", f"{TOP}.clk"
+        checks.append(
+            ConnectivityCheck(
+                ep_a,
+                ep_b,
+                check_id=_scope_variant_check_id(idx),
+            )
+        )
+    return tuple(checks)
+
+
+def _round24_design_checks() -> Tuple[ConnectivityCheck, ...]:
+    """Round24: sibling zigzag ``top.u_a.u_b`` → ``top.u_a.u_c`` under ifdef bridge."""
+    return (
+        ConnectivityCheck(
+            f"{SCOPE_B}.scope_probe",
+            f"{SCOPE_C}.din",
+            check_id="zz_scope_b_to_c",
+        ),
+        ConnectivityCheck(
+            f"{SCOPE_C}.dout",
+            f"{SCOPE_B}.scope_probe",
+            check_id="zz_scope_c_to_b",
         ),
     )
 
@@ -1242,9 +1668,19 @@ def _scope_expect_hierarchy() -> List[Dict[str, Any]]:
             "side": "a",
             "path": SCOPE_B,
             "module": "zz_scope_B",
-            "rtl_file": ZZ_SCOPE_A_RTL,
+            "rtl_file": ZZ_SCOPE_B_RTL,
+        },
+        {
+            "side": "b",
+            "path": SCOPE_C,
+            "module": "zz_scope_C",
+            "rtl_file": ZZ_SCOPE_C_RTL,
         },
     ]
+
+
+def _scope_b_to_c_expect_hierarchy() -> List[Dict[str, Any]]:
+    return _scope_expect_hierarchy()
 
 
 def _round19_design_checks() -> Tuple[ConnectivityCheck, ...]:
@@ -1262,7 +1698,7 @@ def _round19_design_checks() -> Tuple[ConnectivityCheck, ...]:
         ),
         ConnectivityCheck(
             f"{DEEP_D1}.chain_in[0][0]",
-            f"{DEEP_D1}.ff_barrier_conn",
+            f"{DEEP_D1}.ff_barrier_tap",
             check_id="zz_ff_barrier_tap",
         ),
         ConnectivityCheck(
@@ -1306,6 +1742,7 @@ def _apply_suite_conn_defaults(specs: List[Dict[str, Any]]) -> List[Dict[str, An
 def _fanin_merge_check() -> ConnectivityCheck:
     """Fan-in via fanout expand: list sources in a, scalar sink in b."""
     ep_a = (
+        f"{DEEP_D4}.chain_in[1][2]",
         f"{DEEP_D4}.shallow_return[1][2]",
         f"{DEEP_D4}.fork_main[1][2]",
     )
@@ -1328,7 +1765,7 @@ def _port_expr_xor_check() -> ConnectivityCheck:
         f"{DEEP_D2}.chain_in[1][2]",
         f"{DEEP_D2}.shallow_return[1][2]",
     )
-    ep_b = f"{DEEP_D2}.bridge_expr_din[1][2]"
+    ep_b = f"{DEEP_D2}.u_bridge_expr.din[1][2]"
     expand = build_expand_meta(ep_a, ep_b)
     display_a = f"[{ep_a[0]}, {ep_a[1]}]"
     return ConnectivityCheck(display_a, ep_b, check_id="zz_port_expr_xor", expand=expand)
@@ -1398,6 +1835,10 @@ def _build_checks() -> Tuple[ConnectivityCheck, ...]:
         *_round19_design_checks(),
         *_round20_design_checks(),
         *_round21_design_checks(),
+        *_round22_design_checks(),
+        *_round23_design_checks(),
+        *_round24_design_checks(),
+        *vuln_annex_checks(torture_top=TOP),
     ]
     return tuple(checks)
 
@@ -1423,8 +1864,13 @@ def generate_zigzag_torture_design() -> ZigzagTortureDesign:
         "zz_zigzag.v": _zigzag_hub(),
         "zz_torture_top.v": _top_module(),
         ZZ_SCOPE_DECOY_RTL: _scope_decoy_module(),
-        ZZ_SCOPE_A_RTL: _scope_real_modules(),
+        ZZ_SCOPE_A_RTL: _scope_a_module(),
+        ZZ_SCOPE_B_RTL: _scope_b_module(),
+        ZZ_SCOPE_C_RTL: _scope_c_module(),
         ZZ_SCOPE_STUB_RTL: _scope_child_fl_stub(),
+        **_scope_variant_rtl_files(),
+        ZZ_VULN_ANNEX_RTL: vuln_annex_rtl(),
+        ZZ_MATRIX_ANNEX_RTL: matrix_annex_rtl(),
     }
     for lvl in range(1, DEEP_DEPTH + 1):
         files[f"zz_deep_d{lvl}.v"] = _deep_level_body(lvl)
@@ -1515,6 +1961,7 @@ def _suite_conn_checks() -> List[Dict[str, Any]]:
         {
             "id": "zz_fanin_merge",
             "a": [
+                f"{DEEP_D4}.chain_in[1][2]",
                 f"{DEEP_D4}.shallow_return[1][2]",
                 f"{DEEP_D4}.fork_main[1][2]",
             ],
@@ -1533,7 +1980,7 @@ def _suite_conn_checks() -> List[Dict[str, Any]]:
                 f"{DEEP_D2}.chain_in[1][2]",
                 f"{DEEP_D2}.shallow_return[1][2]",
             ],
-            "b": f"{DEEP_D2}.bridge_expr_din[1][2]",
+            "b": f"{DEEP_D2}.u_bridge_expr.din[1][2]",
             "expect_connected": True,
         },
         {"id": "zz_list_expand", "a": list_a, "b": list_b},
@@ -1657,9 +2104,46 @@ def _suite_conn_checks() -> List[Dict[str, Any]]:
             "expect_connected": True,
             "expect_hierarchy": _scope_expect_hierarchy(),
         },
+        {
+            "id": "zz_ifdef_nested_u_b",
+            "a": f"{SCOPE_B}.clk",
+            "b": f"{TOP}.clk",
+            "expect_connected": True,
+            "expect_hierarchy": _scope_expect_hierarchy(),
+        },
+        {
+            "id": "zz_scope_b_to_c",
+            "a": f"{SCOPE_B}.scope_probe",
+            "b": f"{SCOPE_C}.din",
+            "expect_connected": True,
+            "expect_hierarchy": _scope_b_to_c_expect_hierarchy(),
+        },
+        {
+            "id": "zz_scope_c_to_b",
+            "a": f"{SCOPE_C}.dout",
+            "b": f"{SCOPE_B}.scope_probe",
+            "expect_connected": True,
+            "expect_hierarchy": _scope_b_to_c_expect_hierarchy(),
+        },
+        *[
+            {
+                "id": _scope_variant_check_id(idx),
+                "a": (
+                    f"{_scope_variant_b(idx)}.scope_probe"
+                    if idx % 2 == 0
+                    else f"{_scope_variant_b(idx)}.clk"
+                ),
+                "b": f"{TOP}.clk",
+                "expect_connected": True,
+                "expect_hierarchy": _scope_variant_expect_hierarchy(idx),
+            }
+            for idx in range(SCOPE_VARIANT_COUNT)
+        ],
         *_gap_suite_specs(_round18_design_checks()),
         *_gap_suite_specs(_round19_design_checks()),
         *_gap_suite_specs(_round20_design_checks()),
+        matrix_hierarchy_suite_spec(torture_top=TOP, matrix_rtl=ZZ_MATRIX_ANNEX_RTL),
+        *vuln_annex_suite_specs(torture_top=TOP, spec_from_check=_suite_spec_from_check),
     ]
     return _apply_suite_conn_defaults(specs)
 
@@ -2062,6 +2546,52 @@ def build_flat_suite_document(design: ZigzagTortureDesign) -> Dict[str, Any]:
                     "output": "zz_io_top_loop.tsv",
                 },
             },
+            {
+                "name": "io_trace_vuln_d1_hier",
+                "run_io_trace": {
+                    "enable": 1,
+                    "mode": "path-walk",
+                    "instance": f"{TOP}.u_vuln.u_d1",
+                    "direction": "both",
+                    "path_kind": "comb",
+                    "trace_max_depth": 4,
+                    "output": "zz_io_vuln_d1.tsv",
+                },
+            },
+            {
+                "name": "io_trace_matrix_def",
+                "run_io_trace": {
+                    "enable": 1,
+                    "mode": "path-walk",
+                    "instance": f"{TOP}.u_matrix.port_ifndef_blk.u_DEF",
+                    "direction": "sinker",
+                    "path_kind": "comb",
+                    "trace_max_depth": 3,
+                    "output": "zz_io_matrix_def.tsv",
+                },
+            },
+            {
+                "name": "cone_vuln_h10_gen",
+                "run_cone_trace": {
+                    "enable": 1,
+                    "mode": "path-walk",
+                    "fanout_cone": f"{TOP}.u_vuln.u_h10.dst",
+                    "path_kind": "comb",
+                    "trace_max_depth": 5,
+                    "output": "zz_cone_vuln_h10.tsv",
+                },
+            },
+            {
+                "name": "cone_matrix_nest",
+                "run_cone_trace": {
+                    "enable": 1,
+                    "mode": "path-walk",
+                    "fanin_cone": f"{TOP}.u_matrix.outer[0].inner[0].u_nest",
+                    "path_kind": "comb",
+                    "trace_max_depth": 4,
+                    "output": "zz_cone_matrix_nest.tsv",
+                },
+            },
         ],
     }
 
@@ -2078,23 +2608,48 @@ def write_flat_suite_artifacts(root: Path) -> Tuple[Path, Path, ZigzagTortureDes
 
 
 def _write_scope_nested_filelists(root: Path) -> Path:
-    """parent → child → grandchild chain; grandchild lists stub RTL only."""
-    fl_dir = root / "zz_scope_fl"
+    """Each scope RTL body lives in its own filelist, chained via ``-f``.
+
+    Chain: ``parent.f`` → ``b.f`` → ``c.f`` → ``v00.f`` … ``v09.f`` → ``stub.f``.
+    Root ``filelist.f`` lists only ``zz_scope_a.v`` plus ``-f parent.f`` for the chain.
+    """
+    fl_dir = root / ZZ_SCOPE_FL_DIR
     fl_dir.mkdir(parents=True, exist_ok=True)
-    stub = (root / ZZ_SCOPE_STUB_RTL).resolve()
-    grandchild = fl_dir / "grandchild.f"
-    child = fl_dir / "child.f"
+
+    stub_fl = fl_dir / "stub.f"
+    stub_fl.write_text(f"{(root / ZZ_SCOPE_STUB_RTL).resolve()}\n", encoding="utf-8")
+
+    next_fl = stub_fl
+    for idx in range(SCOPE_VARIANT_COUNT - 1, -1, -1):
+        variant_fl = fl_dir / f"v{idx:02d}.f"
+        variant_rtl = (root / _scope_variant_rtl_name(idx)).resolve()
+        variant_fl.write_text(
+            f"{variant_rtl}\n-f {next_fl.resolve()}\n",
+            encoding="utf-8",
+        )
+        next_fl = variant_fl
+
+    c_fl = fl_dir / "c.f"
+    c_fl.write_text(
+        f"{(root / ZZ_SCOPE_C_RTL).resolve()}\n-f {next_fl.resolve()}\n",
+        encoding="utf-8",
+    )
+
+    b_fl = fl_dir / "b.f"
+    b_fl.write_text(
+        f"{(root / ZZ_SCOPE_B_RTL).resolve()}\n-f {c_fl.resolve()}\n",
+        encoding="utf-8",
+    )
+
     parent = fl_dir / "parent.f"
-    grandchild.write_text(f"{stub}\n", encoding="utf-8")
-    child.write_text(f"-f {grandchild.resolve()}\n", encoding="utf-8")
-    parent.write_text(f"-f {child.resolve()}\n", encoding="utf-8")
+    parent.write_text(f"-f {b_fl.resolve()}\n", encoding="utf-8")
     return parent
 
 
 def _build_adversarial_filelist_lines(
     root: Path, design: ZigzagTortureDesign
 ) -> List[str]:
-    """Co-list decoy before real RTL; nested child FL before flat corpus."""
+    """Co-list decoy before real RTL; scope bodies only via nested filelists."""
     parent_fl = _write_scope_nested_filelists(root)
     lines = [
         str((root / ZZ_SCOPE_DECOY_RTL).resolve()),

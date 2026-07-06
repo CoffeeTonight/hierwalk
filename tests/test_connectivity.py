@@ -430,6 +430,32 @@ def test_primitive_and_gate_connectivity():
     assert net_representative(idx, "src") == net_representative(idx, "dst")
 
 
+def test_bind_connectivity_multi_hop_hier_port(tmp_path):
+    v = tmp_path / "bind_multi.v"
+    v.write_text(
+        """
+        module b1_core(input src, output dst);
+          assign dst = 1'b0;
+        endmodule
+        module vuln(input src_bind, output dummy);
+          b1_core u_b1 (.src(1'b0), .dst());
+        endmodule
+        module tie(input src, output dst);
+          assign dst = src;
+        endmodule
+        module top(input src_bind, output out);
+          vuln u_vuln (.src_bind(src_bind), .dummy());
+        endmodule
+        bind top tie u_tie (.src(src_bind), .dst(u_vuln.u_b1.dst));
+        """,
+        encoding="utf-8",
+    )
+    index, rows = _index_and_rows(v.read_text(), tmp_path)
+    assert check_connectivity(
+        "top.src_bind", "top.u_vuln.u_b1.dst", rows=rows, index=index, top="top"
+    ).connected
+
+
 def test_bind_connectivity_src_to_hier_port(tmp_path):
     v = tmp_path / "bind.v"
     v.write_text(
@@ -544,6 +570,59 @@ def test_empty_module_port_passthrough(tmp_path):
     )
     index, rows = _index_and_rows(v.read_text(), tmp_path)
     assert check_connectivity(
+        "top.src", "top.dst", rows=rows, index=index, top="top"
+    ).connected
+
+
+def test_gen_for_nested_if_unroll_connectivity(tmp_path):
+    v = tmp_path / "n9.v"
+    v.write_text(
+        """
+        module chain(input src, output dst);
+          wire [3:0] chain;
+          assign chain[0] = src;
+          generate
+            for (genvar gi = 0; gi < 4; gi = gi + 1)
+              if (gi > 0) assign chain[gi] = chain[gi - 1];
+          endgenerate
+          assign dst = chain[3];
+        endmodule
+        module top(input src, output dst);
+          chain u (.src(src), .dst(dst));
+        endmodule
+        """,
+        encoding="utf-8",
+    )
+    index, rows = _index_and_rows(v.read_text(), tmp_path)
+    assert check_connectivity(
+        "top.src",
+        "top.dst",
+        rows=rows,
+        index=index,
+        top="top",
+        over_approximate_if=False,
+    ).connected
+
+
+def test_localparam_tieoff_masks_driver(tmp_path):
+    v = tmp_path / "h3.v"
+    v.write_text(
+        """
+        module tieoff(input src, output dst);
+          localparam TIE = 1'b0;
+          wire link;
+          assign link = src;
+          assign link = TIE;
+          assign dst = link;
+        endmodule
+        module top(input src, output dst);
+          tieoff u (.src(src), .dst(dst));
+        endmodule
+        """,
+        encoding="utf-8",
+    )
+    index, rows = _index_and_rows(v.read_text(), tmp_path)
+    assert not check_connectivity(
         "top.src", "top.dst", rows=rows, index=index, top="top"
     ).connected
 

@@ -203,7 +203,81 @@ def _regex_net_in_assign(clean: str, target: str) -> bool:
 - **conn:** design **42** + suite **55** (+20); cone **15** + io **10**
 - **검증:** fast pytest PASS → `test_run_and_verify_zigzag_suite` (full)
 
+### 회차25 (1-1) — 종합 annex: vuln_plan + parse_matrix
+
+- **신규 모듈:** `zigzag_annex_gen.py` — `zz_vuln_annex.v` (vuln_plan 45종), `zz_matrix_annex.v` (parse_matrix 14축)
+- **top graft:** `u_vuln` + `u_matrix` + `bind zz_torture_top zz_v_b1_bind` (B1)
+- **conn:** design **106**, suite **119** (+45 vuln +1 matrix hier batch); `expect_connected` = `vuln_plan.expected_default`
+- **phase policy:** `CONN_LOGICAL_ONLY_NEGATIVE_IDS` — tie-off/mask/opaque negatives (H3/H8/H9 등)는 **logical만** verdict; text bloom pass 허용. structural negative (A1/A2b/B5/G3)만 text phase에서도 disc 검증
+- **cone/io:** +2 cone (`zz_cone_vuln_h10`, `zz_cone_matrix_nest`) +2 io (`zz_io_vuln_d1`, `zz_io_matrix_def`)
+- **매핑:** `vuln_mapping_rows()` → 아래 표; A2a→`u_e1` inline-define, C2→verdict skip (spine zigzag)
+
+#### vuln_plan → zigzag 매핑 (45/45)
+
+| ID | group | zigzag check | expect | 비고 |
+|----|-------|--------------|--------|------|
+| A1 | branch_over_approx | zz_vuln_a1 | disc | unresolved generate if |
+| A2a | preprocess | zz_vuln_a2a | conn | `u_e1` inline `define` |
+| A2b | preprocess | zz_vuln_a2b | disc | external ifdef w/o define |
+| A3 | branch_over_approx | zz_vuln_a3 | disc | folded always_ff case |
+| A4 | signal_granularity | zz_vuln_a4 | disc | hop[0]≠hop[1] |
+| A5 | structural_timing | zz_vuln_a5 | disc | comb-only FF barrier |
+| B1 | excluded_syntax | zz_vuln_b1 | conn | bind → u_b1.dst |
+| B2 | excluded_syntax | zz_vuln_b2 | conn | primitive AND |
+| B3 | cross_scope_expr | zz_vuln_b3 | conn | port-mapped bridge |
+| B4 | body_missing | zz_vuln_b4 | conn | empty scalar passthrough |
+| B5 | unresolved_gen | zz_vuln_b5 | disc | gen-if no else |
+| B6 | preprocess | zz_vuln_b6 | conn | macro expand |
+| B7 | cross_scope_expr | zz_vuln_b7 | disc | src & 1'b0 |
+| C1 | scale | zz_vuln_c1 | conn | decoy siblings |
+| C2 | scale | zz_vuln_c2 | conn | annex ping-pong (skip verdict) |
+| D1 | cross_scope_expr | zz_vuln_d1 | conn | hier-ref u_child.hidden |
+| D2 | branch_over_approx | zz_vuln_d2 | disc | folded comb case |
+| D3 | signal_granularity | zz_vuln_d3 | conn | concat {src,0}[0] |
+| E1 | preprocess | zz_vuln_e1 | conn | in-module define |
+| G1 | branch_over_approx | zz_vuln_g1 | disc | folded casez |
+| G2 | cross_scope_expr | zz_vuln_g2 | disc | multi-driver tie-off |
+| G3 | body_missing | zz_vuln_g3 | disc | multi-input empty |
+| G4 | cross_scope_expr | zz_vuln_g4 | disc | interface hier-ref |
+| H2–H10 | branch/cross | zz_vuln_h* | disc | tie-off / opaque select / gen-for |
+| I11 | signal_granularity | zz_vuln_i11 | disc | concat high bit |
+| J35 | preprocess | zz_vuln_j35 | disc | single-line ifdef |
+| J9 | branch_over_approx | zz_vuln_j9 | disc | ff if w/o else |
+| J20 | unresolved_gen | zz_vuln_j20 | conn | gen-for w/o genvar kw |
+| J25 | body_missing | zz_vuln_j25 | conn | blackbox passthrough |
+| K13 | signal_granularity | zz_vuln_k13 | conn | param index P=0 |
+| L2 | signal_granularity | zz_vuln_l2 | disc | OOB concat |
+| M1,M2,M9 | cross_scope_expr | zz_vuln_m* | disc | algebraic / $bits |
+| M4,M7 | signal/cross | zz_vuln_m4/m7 | conn | reduction OR / replicate |
+| N9 | unresolved_gen | zz_vuln_n9 | conn | nested gen-for if |
+
+#### parse_matrix → zigzag 매핑
+
+| axis | zigzag RTL | hierarchy check |
+|------|------------|-----------------|
+| ifndef/elsif/else + line-comment trap | `u_matrix.u_A` | zz_matrix_hier_batch |
+| block-comment fake ifdef | (no u_fake_blk) | absent u_ghost |
+| endif//LABEL same-line | `u_cpusystem_top` | batch |
+| flat param override | `u_BCD` | batch |
+| comma-separated inst | `u_t0`/`u_t1` | batch |
+| macro cell ifndef | `u_macro` | batch |
+| generate for+ifdef+param | `gen_blk[*].u_BCD_gen` | batch |
+| generate if+param | `ifg_blk.u_ifg` | batch |
+| nested generate for | `outer[*].inner[*].u_nest` | batch + cone |
+| nested ifndef port map | `port_ifndef_blk.u_DEF` | batch + io_trace |
+| generate array param | `arr_blk.u_arr[0]` | batch (u_arr[1] known gap) |
+| bind ignored | `bind zz_matrix_soc ghost` | u_ghost absent |
+
+#### spine 패턴 (round24 이전, 유지)
+
+| 패턴 | check |
+|------|-------|
+| zigzag ping-pong d1–d5/r1–r4 | zz_src_deep_a00, zz_cross_leaf, … |
+| scope FL chain | zz_scope_confident_b, zz_ifdef_var_00..09 |
+| fan-in/expr/ifdef round18–24 | zz_fanin_merge, zz_casex_route, … |
+
 ### 다음 1-1 후보
 
 - generate hierarchy path (`g_real_d5.gen_pass`) when fold enabled
 - 회차13~16 패턴 복원 (`zz_ifdef_else`, `zz_ff_barrier`, …)
+- `arr_blk.u_arr[1]` path-walk hierarchy gap closure

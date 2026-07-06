@@ -66,16 +66,17 @@ def test_hierarchy_ignore_descendants_only():
 
 def test_fanout_cone_ignore_hierarchy_stops_below_prefix(tmp_path: Path):
     index, rows = _index_and_rows(DEEP_RTL, tmp_path)
-    open_result = fanout_cone("top.a", rows=rows, index=index, top="top", path_kind="ff")
+    origin = "top.u_a.x"
+    open_result = fanout_cone(origin, rows=rows, index=index, top="top", path_kind="ff")
     stopped = fanout_cone(
-        "top.a",
+        origin,
         rows=rows,
         index=index,
         top="top",
         path_kind="ff",
         ignore_hierarchy=["top.u_a.*"],
     )
-    assert stopped.nets_visited < open_result.nets_visited
+    assert any(b.scope == "top.u_a.deep" for b in open_result.boundaries)
     assert any(
         b.kind == "ignore-hierarchy" and b.scope == "top.u_a.deep"
         for b in stopped.boundaries

@@ -14,6 +14,7 @@ from hierwalk.connect.logical.scan import (
     _is_literal_slice_suffix,
     _port_select_suffix,
     _range_to_bit_indices,
+    expand_nested_hier_child_targets,
     extract_connect_nodes,
     net_representative,
 )
@@ -491,37 +492,43 @@ def _expand_state(
         )
 
     for inst_leaf, port in mod_idx.hier_links.get(rep, ()):
-        child_path = ctx.child_by_parent_leaf.get((scope, inst_leaf))
-        if not child_path:
-            continue
-        child_row = ctx.rows_by_path.get(child_path)
-        if child_row is None:
-            continue
-        child_rec = ctx.index.get_module(child_row.module)
-        if child_rec is not None and child_rec.is_interface:
-            continue
-        child_ctx = _cached_param_ctx(ctx, child_row)
-        child_idx = _module_index(
-            ctx.mod_cache,
-            ctx.index,
-            child_row.module,
-            child_ctx,
-            defines=ctx.defines,
-            over_approximate_if=ctx.over_approximate_if,
-            ff_barrier=ctx.ff_barrier,
-            resolve_param_dims=ctx.resolve_param_dims,
-            text_grep_cache=ctx.text_grep_cache,
-        )
-        push(
-            child_path,
+        targets = expand_nested_hier_child_targets(
+            ctx.child_by_parent_leaf,
+            scope,
+            inst_leaf,
             port,
-            kind="child-hier",
-            detail=(
-                f"{here} -> {_net_label(child_path, port)} "
-                f"(hier ref {inst_leaf}.{port} in {mod_name})"
-            ),
-            target_mod_idx=child_idx,
         )
+        if not targets:
+            continue
+        for child_path, child_net in targets:
+            child_row = ctx.rows_by_path.get(child_path)
+            if child_row is None:
+                continue
+            child_rec = ctx.index.get_module(child_row.module)
+            if child_rec is not None and child_rec.is_interface:
+                continue
+            child_ctx = _cached_param_ctx(ctx, child_row)
+            child_idx = _module_index(
+                ctx.mod_cache,
+                ctx.index,
+                child_row.module,
+                child_ctx,
+                defines=ctx.defines,
+                over_approximate_if=ctx.over_approximate_if,
+                ff_barrier=ctx.ff_barrier,
+                resolve_param_dims=ctx.resolve_param_dims,
+                text_grep_cache=ctx.text_grep_cache,
+            )
+            push(
+                child_path,
+                child_net,
+                kind="child-hier",
+                detail=(
+                    f"{here} -> {_net_label(child_path, child_net)} "
+                    f"(hier ref {inst_leaf}.{port} in {mod_name})"
+                ),
+                target_mod_idx=child_idx,
+            )
 
     parent_path = row.parent_path
     if parent_path:

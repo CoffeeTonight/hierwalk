@@ -56,6 +56,7 @@ def connect_pair_text(
     walk_caches: Optional[TextWalkSessionCaches] = None,
     decl_net_cache: Optional[DeclNetCache] = None,
     module_body_cache: Optional[ModuleBodyCache] = None,
+    sources: Optional[Sequence[str]] = None,
     walk_cache_lock: Optional[threading.Lock] = None,
 ) -> ConnectResult:
     """
@@ -137,8 +138,10 @@ def connect_pair_text(
             walk_caches=walk_caches,
             defines=effective_defines,
             over_approximate_if=over_approx,
+            ff_barrier=ff_barrier,
             param_ctx_cache=param_ctx_cache,
             module_body_cache=module_body_cache,
+            sources=sources,
         )
         if vkey is None:
             return None
@@ -176,8 +179,10 @@ def connect_pair_text(
             walk_caches=walk_caches,
             defines=effective_defines,
             over_approximate_if=over_approx,
+            ff_barrier=ff_barrier,
             param_ctx_cache=param_ctx_cache,
             module_body_cache=module_body_cache,
+            sources=sources,
         )
         if vkey is None:
             return
@@ -224,11 +229,13 @@ def connect_pair_text(
             trace=trace,
             strict_generate=strict_generate,
             over_approximate_if=over_approximate_if,
+            ff_barrier=ff_barrier,
             grep_cache=text_grep_cache,
             param_ctx_cache=param_ctx_cache,
             elab_index=elab_index,
             walk_caches=walk_caches,
             module_body_cache=module_body_cache,
+            sources=sources,
         )
         _store_walk_verdict(start, goal, ok, mod_n, diag)
         walk_notes: List[str] = []
@@ -290,11 +297,13 @@ def connect_pair_text(
             trace=trace,
             strict_generate=strict_generate,
             over_approximate_if=over_approximate_if,
+            ff_barrier=ff_barrier,
             grep_cache=text_grep_cache,
             param_ctx_cache=param_ctx_cache,
             elab_index=elab_index,
             walk_caches=walk_caches,
             module_body_cache=module_body_cache,
+            sources=sources,
         )
         _store_walk_verdict(start, goal, ok, mod_n, diag)
         walk_notes: List[str] = []
@@ -359,6 +368,7 @@ def connect_pair_text_deduped(
     walk_caches: Optional[TextWalkSessionCaches] = None,
     decl_net_cache: Optional[DeclNetCache] = None,
     module_body_cache: Optional[ModuleBodyCache] = None,
+    sources: Optional[Sequence[str]] = None,
 ) -> ConnectResult:
     lookup = rows_by_path
     ep_a, err_a = resolve_endpoint_cached(
@@ -423,6 +433,7 @@ def connect_pair_text_deduped(
         walk_caches=walk_caches,
         decl_net_cache=decl_net_cache,
         module_body_cache=module_body_cache,
+        sources=sources,
         walk_cache_lock=dedup_lock,
     )
 

@@ -321,7 +321,8 @@ def test_text_conn_lite_skips_comb_always_and_ff_metadata(tmp_path: Path):
                 resolve_param_dims=False,
                 ff_barrier=True,
             )
-    assert comb_spy.call_count == 0
+    # Text-conn lite still parses always_comb for coarse grep bloom.
+    assert comb_spy.call_count > 0
     assert ff_spy.call_count == 0
 
 

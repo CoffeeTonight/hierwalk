@@ -9,7 +9,7 @@ import re
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from hierwalk.connect.logical.scan import BindRecord
 
@@ -426,6 +426,99 @@ def _module_body_for_row(index: DesignIndex, row: FlatRow) -> str:
 DeclNetCacheKey = Tuple[str, Tuple[Tuple[str, str], ...]]
 DeclNetCache = Dict[DeclNetCacheKey, Set[str]]
 ModuleBodyCache = Dict[str, str]
+
+_CELL_MODULE_BODY_CACHE_PREFIX = "cell:"
+
+
+def lookup_cell_module_body(
+    index: DesignIndex,
+    cell: str,
+    *,
+    module_body_cache: Optional[ModuleBodyCache] = None,
+    sources: Optional[Sequence[str]] = None,
+) -> str:
+    """
+    Resolve a child cell module body for inst-blackbox passthrough.
+
+    Path-walk often knows a cell type before the module is registered in
+    ``DesignIndex`` (e.g. ``zz_y_fork`` in ``zz_common.v``). Fall back to
+    preprocessed/indexed RTL and the design filelist when ``get_module`` misses.
+    """
+    from hierwalk.index import _module_header_body
+
+    name = (cell or "").strip()
+    if not name:
+        return ""
+    cache_key = f"{_CELL_MODULE_BODY_CACHE_PREFIX}{name}"
+    if module_body_cache is not None and cache_key in module_body_cache:
+        return module_body_cache[cache_key]
+
+    rec = index.get_module(name)
+    if rec is not None:
+        body = index.module_body(name)
+        if body.strip():
+            if module_body_cache is not None:
+                module_body_cache[cache_key] = body
+            return body
+
+    preprocessed = getattr(index, "_preprocessed_sources", None) or {}
+    for text in preprocessed.values():
+        if not text:
+            continue
+        _header, body = _module_header_body(text, name)
+        if body.strip():
+            if module_body_cache is not None:
+                module_body_cache[cache_key] = body
+            return body
+
+    paths: List[str] = []
+    if sources:
+        paths.extend(sources)
+    else:
+        from hierwalk.connect.logical.scan import design_parse_sources
+
+        paths.extend(design_parse_sources(index))
+
+    seen_paths: Set[str] = set()
+    for fpath in paths:
+        if not fpath:
+            continue
+        resolved = str(Path(fpath).resolve())
+        for key in (fpath, resolved):
+            if key in seen_paths:
+                continue
+            seen_paths.add(key)
+            text = preprocessed.get(key, "")
+            if not text.strip():
+                text = index._source_text(fpath)
+            if not text.strip():
+                continue
+            _header, body = _module_header_body(text, name)
+            if body.strip():
+                if module_body_cache is not None:
+                    module_body_cache[cache_key] = body
+                return body
+
+    if module_body_cache is not None:
+        module_body_cache[cache_key] = ""
+    return ""
+
+
+def make_cell_module_body_lookup(
+    index: DesignIndex,
+    *,
+    module_body_cache: Optional[ModuleBodyCache] = None,
+    sources: Optional[Sequence[str]] = None,
+) -> Callable[[str], str]:
+    def _lookup(cell: str) -> str:
+        return lookup_cell_module_body(
+            index,
+            cell,
+            module_body_cache=module_body_cache,
+            sources=sources,
+        )
+
+    return _lookup
 
 
 def _module_body_cache_key(row: FlatRow) -> str:
@@ -879,7 +972,7 @@ def _empty_module_passthrough_ports(
     return None
 
 
-_CONNECT_INDEX_SIDECAR_VERSION = 3
+_CONNECT_INDEX_SIDECAR_VERSION = 5
 
 _ModuleIndexKeyMemoEntry = Tuple[str, str, ModuleIndexCacheKey, Tuple[BindRecord, ...]]
 _module_index_key_memo: Dict[
@@ -1076,6 +1169,8 @@ def _module_index(
     ff_barrier: bool = False,
     resolve_param_dims: bool = True,
     text_grep_cache: Optional[Dict[ModuleIndexCacheKey, object]] = None,
+    module_body_cache: Optional[ModuleBodyCache] = None,
+    sources: Optional[Sequence[str]] = None,
 ) -> ModuleConnectIndex:
     key, binds = _resolve_module_index_key(
         index,
@@ -1105,6 +1200,8 @@ def _module_index(
             ff_barrier=ff_barrier,
             resolve_param_dims=resolve_param_dims,
             text_grep_cache=text_grep_cache,
+            module_body_cache=module_body_cache,
+            sources=sources,
         )
         return built
 
@@ -1122,6 +1219,8 @@ def _build_module_index_entry(
     ff_barrier: bool = False,
     resolve_param_dims: bool = True,
     text_grep_cache: Optional[Dict[ModuleIndexCacheKey, object]] = None,
+    module_body_cache: Optional[ModuleBodyCache] = None,
+    sources: Optional[Sequence[str]] = None,
 ) -> ModuleConnectIndex:
     from hierwalk.connect.layer import find_text_grep_seed
     from hierwalk.connect.text.index import enrich_text_grep_to_logical_index
@@ -1187,6 +1286,12 @@ def _build_module_index_entry(
             if resolve_param_dims
             else None
         )
+        module_body_lookup = make_cell_module_body_lookup(
+            index,
+            module_body_cache=module_body_cache,
+            sources=sources,
+        )
+
         if text_seed is not None:
             base = enrich_text_grep_to_logical_index(
                 text_seed,
@@ -1199,6 +1304,7 @@ def _build_module_index_entry(
                 include_dirs=include_dirs,
                 port_decl_widths=port_widths,
                 port_decl_md_suffixes=port_md,
+                module_body_lookup=module_body_lookup,
             )
         else:
             base = build_module_connect_index(
@@ -1213,6 +1319,8 @@ def _build_module_index_entry(
                 port_decl_md_suffixes=port_md,
                 source_file=source_file,
                 include_dirs=include_dirs,
+                module_body_lookup=module_body_lookup,
+                design_index=index,
             )
         if bind_list:
             built = base.copy()

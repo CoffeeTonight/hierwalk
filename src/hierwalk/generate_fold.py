@@ -320,11 +320,15 @@ def _unroll_for_loops(
         count = hi - lo + 1
         if count > max_unroll:
             break
-        # Unroll nested generate (inner for/if) before substituting this loop index.
-        body = _fold_generate_inner(body, param_map, scope_prefix=scope_prefix)
+        raw_body = body
         parts: List[str] = []
         for i in range(lo, hi + 1):
-            part = _subst_index(body, var, i)
+            part = _subst_index(raw_body, var, i)
+            part = _fold_generate_inner(
+                part,
+                param_map,
+                scope_prefix=scope_prefix,
+            )
             if block_label:
                 part = _prefix_instance_names(
                     part, f"{scope_prefix}{block_label}[{i}]."

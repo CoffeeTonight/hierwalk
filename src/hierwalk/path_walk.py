@@ -2466,6 +2466,24 @@ def _extend_path_walk_for_specs(
     state.flush_pending_misses()
 
 
+def _seed_logical_hierarchy_from_text(state: PathWalkState) -> None:
+    """Carry text-phase hierarchy rows into the logical writer before re-flush."""
+    from hierwalk.connect.pipeline.artifacts import IncrementalHierarchyTsvWriter
+
+    src = state._hierarchy_text_writer
+    dst = state._hierarchy_logical_writer
+    if not isinstance(src, IncrementalHierarchyTsvWriter):
+        return
+    if not isinstance(dst, IncrementalHierarchyTsvWriter):
+        return
+    for row in src._rows:
+        key = (row.check_id, row.side, row.kind, row.path, row.status)
+        if key in dst._seen:
+            continue
+        dst._seen.add(key)
+        dst._rows.append(row)
+
+
 def _hierarchy_tsv_incremental_ready(state: PathWalkState, phase: str) -> bool:
     """True when incremental writer already materialized hierarchy rows on disk."""
     from hierwalk.connect.pipeline.artifacts import IncrementalHierarchyTsvWriter
@@ -2611,75 +2629,63 @@ def _pipeline_path_walk_text_conn(
         get_detail=lambda: f"hierarchy_ready={hierarchy_ready}/{total}",
         on_emit=state._emit_walk,
     ):
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            inflight: Dict = {}
-            for idx, chk in enumerate(request.checks):
-                t_walk = time.perf_counter()
-                _walk_hierarchy_for_check(
-                    state,
-                    chk,
-                    jobs=hierarchy_jobs,
-                    seen_lca=seen_lca,
-                )
-                hierarchy_ready += 1
-                walk_ms = (time.perf_counter() - t_walk) * 1000.0
-                state._emit_walk(
-                    f"connect-pipeline hierarchy-ready check={chk.check_id or idx} "
-                    f"ms={walk_ms:.1f}"
-                )
-                from hierwalk.models import ElabIndex
+        for idx, chk in enumerate(request.checks):
+            t_walk = time.perf_counter()
+            _walk_hierarchy_for_check(
+                state,
+                chk,
+                jobs=hierarchy_jobs,
+                seen_lca=seen_lca,
+            )
+            state.flush_pending_misses()
+            _drain_path_walk_workers(state.mod_db)
+            hierarchy_ready += 1
+            walk_ms = (time.perf_counter() - t_walk) * 1000.0
+            state._emit_walk(
+                f"connect-pipeline hierarchy-ready check={chk.check_id or idx} "
+                f"ms={walk_ms:.1f}"
+            )
+            from hierwalk.models import ElabIndex
 
-                walk_lookup = state.rows_by_path
-                walk_elab = state._connect_elab_index
-                if walk_elab is None:
-                    walk_rows = tuple(state.rows())
-                    walk_elab = ElabIndex.from_rows_by_path(
-                        walk_lookup,
-                        rows=list(walk_rows),
-                    )
-                    state._connect_elab_index = walk_elab
-                else:
-                    walk_elab.extend_rows(walk_lookup)
-                    walk_rows = tuple(walk_elab.rows)
-                t0 = time.perf_counter()
-
-                def _run_check(
-                    _chk=chk,
-                    _idx=idx,
-                    _t0=t0,
-                    _rows=walk_rows,
-                    _elab=walk_elab,
-                ):
-                    conn_session.resolve_param_dims = False
-                    result = conn_session.text_check_entry(
-                        _chk,
-                        trace=use_trace,
-                        dedup_cache=dedup_cache,
-                        dedup_stats=dedup_stats,
-                        dedup_lock=dedup_lock,
-                        rows=_rows,
-                        elab_index=_elab,
-                    )
-                    record_connect_check(
-                        check_id=_chk.check_id,
-                        endpoint_a=str(_chk.endpoint_a),
-                        endpoint_b=str(_chk.endpoint_b),
-                        elapsed_sec=time.perf_counter() - _t0,
-                    )
-                    return _idx, result
-
-                inflight[pool.submit(_run_check)] = idx
-                for fut in tuple(inflight):
-                    if not fut.done():
-                        continue
-                    done_idx, result = fut.result()
-                    results[done_idx] = result
-                    coi_done += 1
-                    del inflight[fut]
-            for fut in as_completed(inflight):
-                done_idx, result = fut.result()
-                results[done_idx] = result
-                coi_done += 1
+            walk_rows = tuple(state.rows_by_path.values())
+            # Rebuild from full walked hierarchy; incremental extend_rows cannot
+            # share state.rows_by_path dict (extend becomes a no-op).
+            worker_elab = ElabIndex.from_rows(list(walk_rows))
+            state._connect_elab_index = worker_elab
+            t0 = time.perf_counter()
+            local = ConnectivitySession(
+                rows=walk_rows,
+                index=conn_session.index,
+                top=conn_session.top,
+                defines=dict(conn_session.defines),
+                sources=conn_session.sources,
+                strict_generate=conn_session.strict_generate,
+                ff_barrier=conn_session.ff_barrier,
+                over_approximate_if=True,
+                mod_cache=conn_session.mod_cache,
+                param_ctx_cache=conn_session.param_ctx_cache,
+                text_grep_cache=conn_session.text_grep_cache,
+                decl_net_cache=conn_session.decl_net_cache,
+                module_body_cache=conn_session.module_body_cache,
+                elab_index=worker_elab,
+                resolve_param_dims=False,
+            )
+            results[idx] = local.text_check_entry(
+                chk,
+                trace=use_trace,
+                dedup_cache=dedup_cache,
+                dedup_stats=dedup_stats,
+                dedup_lock=dedup_lock,
+                rows=walk_rows,
+                elab_index=worker_elab,
+            )
+            record_connect_check(
+                check_id=chk.check_id,
+                endpoint_a=str(chk.endpoint_a),
+                endpoint_b=str(chk.endpoint_b),
+                elapsed_sec=time.perf_counter() - t0,
+            )
+            coi_done += 1
 
     state.flush_pending_misses()
     leaves, unique = dedup_stats[0], dedup_stats[1]
@@ -3555,6 +3561,8 @@ def run_path_walk_connect(
                 text_modules_cached: Optional[int] = None
                 coi_error = ""
                 conn_session.resolve_param_dims = False
+                # Text phase always blooms unresolved branches (phase policy).
+                conn_session.over_approximate_if = True
                 try:
                     state._emit_walk(
                         f"connect-coi begin checks={len(text_request.checks)} "
@@ -3605,6 +3613,8 @@ def run_path_walk_connect(
                             ),
                         )
                     snapshot_connect_text_phase(text_results)
+                    for chk in request.checks:
+                        _flush_hierarchy_tsv_for_check(state, chk)
                     coi_ms = (time.perf_counter() - t_coi) * 1000.0
                     state._emit_walk(
                         f"connect-coi done checks={len(text_results)} "
@@ -3644,6 +3654,7 @@ def run_path_walk_connect(
 
             if do_logical:
                 state._hierarchy_flush_phase = "logical"
+                _seed_logical_hierarchy_from_text(state)
                 if timing_rec is not None:
                     timing_rec.begin_step("logical-conn", "activation-audit")
                 t_act = time.perf_counter()
@@ -3652,6 +3663,8 @@ def run_path_walk_connect(
                 logical_modules_cached: Optional[int] = None
                 logical_coi_error = ""
                 conn_session.resolve_param_dims = True
+                # Logical phase always uses precise branch selection (phase policy).
+                conn_session.over_approximate_if = False
                 text_results_for_gate: Optional[List] = None
                 if do_text and batch is not None:
                     text_results_for_gate = list(batch.results)
@@ -3719,7 +3732,7 @@ def run_path_walk_connect(
                             do_text and bool(text_results_for_gate)
                         ),
                     )
-                    for chk in logical_request.checks:
+                    for chk in request.checks:
                         _flush_hierarchy_tsv_for_check(state, chk)
                     walk_rows = state.rows()
                     conn_session.rows = walk_rows

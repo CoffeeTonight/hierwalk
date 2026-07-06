@@ -1394,12 +1394,17 @@ class IncrementalHierarchyTsvWriter:
         keys = _check_id_keys(chk)
         preferred = _preferred_hierarchy_paths_for_check(chk)
         evidence = compact_hierarchy_evidence(
-            collect_hierarchy_evidence_for_check(
+            _supplement_topology_inst_rows(
+                collect_hierarchy_evidence_for_check(
+                    chk,
+                    rows_by_path,
+                    rows=rows,
+                    signal_tails=signal_tails,
+                    index=index,
+                    top=top,
+                ),
                 chk,
                 rows_by_path,
-                rows=rows,
-                signal_tails=signal_tails,
-                index=index,
                 top=top,
             ),
             preferred=preferred,
@@ -1558,18 +1563,126 @@ def _hierarchy_compact_row_rank(
     return (0, depth, signal_rank, row.path)
 
 
+def _supplement_topology_inst_rows(
+    evidence: Sequence[HierarchyEvidenceRow],
+    chk: ConnectivityCheck,
+    rows_by_path: Mapping[str, FlatRow],
+    *,
+    top: str = "",
+) -> List[HierarchyEvidenceRow]:
+    """Add inst hits for instances loaded under endpoint spine anchors."""
+    from hierwalk.connect.shared.expand import expand_check_to_pairs
+    from hierwalk.hierarchy_log import path_spine_prefixes
+
+    top_name = (top or "").strip()
+    anchors: Set[str] = set()
+    endpoint_insts: Set[str] = set()
+    check_ids: Set[str] = set()
+    preferred = _preferred_hierarchy_paths_for_check(chk)
+    for pair in expand_check_to_pairs(
+        chk.endpoint_a,
+        chk.endpoint_b,
+        check_id=chk.check_id,
+        expand=chk.expand,
+    ):
+        sub_id = (
+            f"{chk.check_id}{pair.sub_id}"
+            if chk.check_id and pair.sub_id
+            else (chk.check_id or pair.sub_id.strip("[]->"))
+        )
+        if sub_id:
+            check_ids.add(sub_id)
+        for endpoint in (pair.endpoint_a, pair.endpoint_b):
+            for spec_path in hierarchy_endpoint_specs(str(endpoint).strip()):
+                if spec_path in rows_by_path:
+                    endpoint_insts.add(spec_path)
+                for prefix in path_spine_prefixes(spec_path):
+                    if top_name and prefix == top_name:
+                        continue
+                    if prefix in rows_by_path:
+                        anchors.add(prefix)
+        pref_paths = set(preferred.get((sub_id, "a"), ())) | set(
+            preferred.get((sub_id, "b"), ())
+        )
+        for spec_path in pref_paths:
+            for prefix in path_spine_prefixes(spec_path):
+                if top_name and prefix == top_name:
+                    continue
+                if prefix in rows_by_path:
+                    anchors.add(prefix)
+    if not check_ids:
+        return list(evidence)
+
+    expanded_anchors: Set[str] = set(anchors)
+    for anchor in list(anchors):
+        if "." not in anchor:
+            continue
+        parent = anchor.rsplit(".", 1)[0]
+        if parent and parent in rows_by_path:
+            expanded_anchors.add(parent)
+        if not parent:
+            continue
+        prefix = f"{parent}."
+        for path in rows_by_path:
+            if not path.startswith(prefix):
+                continue
+            rest = path[len(prefix) :]
+            if rest and "." not in rest:
+                expanded_anchors.add(path)
+
+    out = list(evidence)
+    seen = {(r.check_id, r.side, r.kind, r.path, r.status) for r in out}
+
+    def _append_inst(
+        sub_id: str,
+        side: str,
+        path: str,
+        row: FlatRow,
+    ) -> None:
+        key = (sub_id, side, "inst", path, "hit")
+        if key in seen:
+            return
+        seen.add(key)
+        rtl, via_fl, fl_chain = _provenance_for_evidence_path(path, rows_by_path)
+        out.append(
+            HierarchyEvidenceRow(
+                check_id=sub_id,
+                side=side,
+                kind="inst",
+                path=path,
+                status="hit",
+                module=row.module,
+                rtl=rtl,
+                via_filelist=via_fl,
+                filelist_chain=fl_chain,
+            )
+        )
+
+    for sub_id in sorted(check_ids):
+        for side in ("a", "b"):
+            for path in sorted(endpoint_insts):
+                row = rows_by_path.get(path)
+                if row is not None:
+                    _append_inst(sub_id, side, path, row)
+            for anchor in sorted(expanded_anchors, key=len):
+                for path, row in rows_by_path.items():
+                    if path != anchor and not path.startswith(f"{anchor}."):
+                        continue
+                    _append_inst(sub_id, side, path, row)
+    return out
+
+
 def compact_hierarchy_evidence(
     evidence: Sequence[HierarchyEvidenceRow],
     *,
     preferred: Optional[Mapping[tuple[str, str], frozenset[str]]] = None,
 ) -> List[HierarchyEvidenceRow]:
     """
-    One row per ``(check_id, side)``: the endpoint's final hit/miss only.
+    Keep every inst row; compact non-inst rows to one endpoint row per side.
 
-    Intermediate inst spine prefixes (``top``, ``top.a``, …) are dropped when a
-    deeper port/wire/reg path exists for the same side.  When the endpoint is
-    inst-only, the deepest inst path is kept.  Rows matching suite endpoint
-    paths in *preferred* win over deeper walked paths.
+    Inst spine prefixes stay in the TSV so suite ``expect_hierarchy`` can match
+    multi-module RTL rows.  Port/wire/reg rows still collapse to the deepest
+    endpoint hit/miss per ``(check_id, side)`` (preferred paths win).
     """
     pref_map = preferred or {}
     by_group: dict[tuple[str, str], List[HierarchyEvidenceRow]] = {}
@@ -1578,27 +1691,51 @@ def compact_hierarchy_evidence(
         by_group.setdefault((row.check_id, side), []).append(row)
 
     compact: List[HierarchyEvidenceRow] = []
+    seen_inst: set[tuple[str, str, str, str, str]] = set()
     for key in sorted(by_group, key=lambda item: (item[0], item[1])):
         rows = by_group[key]
         if not rows:
             continue
+        for row in rows:
+            if row.kind != "inst":
+                continue
+            inst_key = (row.check_id, row.side, row.kind, row.path, row.status)
+            if inst_key in seen_inst:
+                continue
+            seen_inst.add(inst_key)
+            compact.append(row)
+
+        signal_rows = [row for row in rows if row.kind != "inst"]
+        if not signal_rows:
+            continue
         pref = pref_map.get(key, frozenset())
         if pref:
-            filtered = [row for row in rows if row.path in pref]
+            filtered = [row for row in signal_rows if row.path in pref]
             if filtered:
-                compact.append(
-                    max(
-                        filtered,
-                        key=lambda row: _hierarchy_compact_row_rank(
-                            row,
-                            preferred=pref,
-                        ),
+                seen_signal: set[tuple[str, str, str, str, str]] = set()
+                for row in sorted(
+                    filtered,
+                    key=lambda item: _hierarchy_compact_row_rank(
+                        item,
+                        preferred=pref,
+                    ),
+                    reverse=True,
+                ):
+                    sig_key = (
+                        row.check_id,
+                        row.side,
+                        row.kind,
+                        row.path,
+                        row.status,
                     )
-                )
+                    if sig_key in seen_signal:
+                        continue
+                    seen_signal.add(sig_key)
+                    compact.append(row)
                 continue
         compact.append(
             max(
-                rows,
+                signal_rows,
                 key=lambda row: _hierarchy_compact_row_rank(
                     row,
                     preferred=pref,

@@ -10,18 +10,23 @@ from typing import Callable, Dict, FrozenSet, List, Mapping, Optional, Sequence,
 from hierwalk.connect.layer import assign_adj_from_text_grep
 from hierwalk.connect.logical.scan import (
     ModuleConnectIndex,
+    apply_bind_connectivity,
+    apply_empty_module_passthrough,
     build_module_connect_index,
+    collect_bind_records_for_module,
     net_representative,
 )
 from hierwalk.connect.shared.endpoints import (
+    ModuleBodyCache,
     TextGrepIndexCacheKey,
+    _empty_module_passthrough_ports,
     _mod_cache_lock,
     _resolve_module_index_key,
+    make_cell_module_body_lookup,
 )
 from hierwalk.index import DesignIndex
 
 TextGrepCache = Dict[TextGrepIndexCacheKey, "TextGrepIndex"]
-ModuleBodyCache = Dict[str, str]
 
 
 def module_body_for_text_grep(
@@ -102,6 +107,7 @@ def enrich_text_grep_to_logical_index(
     include_dirs: Optional[Sequence[str]] = None,
     port_decl_widths: Optional[Mapping[str, List[int]]] = None,
     port_decl_md_suffixes: Optional[Mapping[str, List[str]]] = None,
+    module_body_lookup: Optional[Callable[[str], str]] = None,
 ) -> ModuleConnectIndex:
     """L3 logical COI: reuse L2 grep adjacency, add FF/param-dim enrichment."""
     return build_module_connect_index(
@@ -117,6 +123,7 @@ def enrich_text_grep_to_logical_index(
         port_decl_widths=port_decl_widths,
         port_decl_md_suffixes=port_decl_md_suffixes,
         text_seed_adj=assign_adj_from_text_grep(text_idx),
+        module_body_lookup=module_body_lookup,
     )
 
 
@@ -126,17 +133,31 @@ def build_text_grep_index(
     param_map: Optional[Mapping[str, str]] = None,
     defines: Optional[Mapping[str, str]] = None,
     over_approximate_if: bool = True,
+    ff_barrier: bool = True,
+    module_body_lookup: Optional[Callable[[str], str]] = None,
+    bind_records: Optional[Sequence[object]] = None,
+    bind_index: Optional[DesignIndex] = None,
 ) -> TextGrepIndex:
-    """Build grep-only adjacency (no FF scan, no generate-fold, no param dim resolve)."""
+    """Build grep-only adjacency (no generate-fold, no param dim resolve)."""
     mci = build_module_connect_index(
         body,
         param_map=param_map,
         defines=defines,
         over_approximate_if=over_approximate_if,
         fold_generate=False,
-        ff_barrier=True,
+        ff_barrier=ff_barrier,
         resolve_param_dims=False,
+        module_body_lookup=module_body_lookup,
     )
+    if bind_records and bind_index is not None:
+        apply_bind_connectivity(
+            mci,
+            bind_records,
+            bind_index,
+            param_map=param_map,
+            defines=defines,
+            over_approximate_if=over_approximate_if,
+        )
     return TextGrepIndex.from_module_index(mci)
 
 
@@ -148,7 +169,9 @@ def text_grep_index(
     defines: Mapping[str, str] | None = None,
     over_approximate_if: bool = True,
     *,
+    ff_barrier: bool = True,
     module_body_cache: Optional[ModuleBodyCache] = None,
+    sources: Optional[Sequence[str]] = None,
     on_cache_miss: Optional[Callable[[], None]] = None,
 ) -> TextGrepIndex:
     """Cached text grep index (separate from logical ``mod_cache``)."""
@@ -157,7 +180,7 @@ def text_grep_index(
         mod_name,
         param_ctx,
         defines,
-        ff_barrier=True,
+        ff_barrier=ff_barrier,
         over_approximate_if=over_approximate_if,
         resolve_param_dims=False,
     )
@@ -173,12 +196,43 @@ def text_grep_index(
             mod_name,
             module_body_cache=module_body_cache,
         )
-        built = build_text_grep_index(
-            body,
-            param_map=param_ctx,
-            defines=defines,
-            over_approximate_if=over_approximate_if,
+        binds = collect_bind_records_for_module(index, mod_name)
+        body_lookup = make_cell_module_body_lookup(
+            index,
+            module_body_cache=module_body_cache,
+            sources=sources,
         )
+        if not body.strip():
+            mci = ModuleConnectIndex()
+            passthrough = _empty_module_passthrough_ports(
+                index,
+                mod_name,
+                param_ctx,
+                defines=defines,
+            )
+            if passthrough:
+                apply_empty_module_passthrough(mci, passthrough[0], passthrough[1])
+            if binds:
+                apply_bind_connectivity(
+                    mci,
+                    binds,
+                    index,
+                    param_map=param_ctx,
+                    defines=defines,
+                    over_approximate_if=over_approximate_if,
+                )
+            built = TextGrepIndex.from_module_index(mci)
+        else:
+            built = build_text_grep_index(
+                body,
+                param_map=param_ctx,
+                defines=defines,
+                over_approximate_if=over_approximate_if,
+                ff_barrier=ff_barrier,
+                module_body_lookup=body_lookup,
+                bind_records=binds,
+                bind_index=index,
+            )
         cache[key] = built
         if on_cache_miss is not None:
             on_cache_miss()

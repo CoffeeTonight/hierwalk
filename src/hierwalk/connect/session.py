@@ -862,6 +862,7 @@ class ConnectivitySession:
                 walk_caches=self.text_walk_caches,
                 decl_net_cache=self.decl_net_cache,
                 module_body_cache=self.module_body_cache,
+                sources=self.sources,
             )
 
         fanout_mode = chk.expand.fanout_mode if chk.expand is not None else "all"
@@ -897,6 +898,7 @@ class ConnectivitySession:
                     walk_caches=self.text_walk_caches,
                     decl_net_cache=self.decl_net_cache,
                     module_body_cache=self.module_body_cache,
+                    sources=self.sources,
                 )
             )
         return aggregate_connect_results(
@@ -1062,7 +1064,9 @@ class ConnectivitySession:
             hit,
             defines=self.effective_defines(),
             over_approximate_if=over_approx,
+            ff_barrier=self.ff_barrier,
             module_body_cache=self.module_body_cache,
+            sources=self.sources,
             on_cache_miss=_on_grep_miss,
         )
         wc.scope_mod_idx[inst_path] = idx

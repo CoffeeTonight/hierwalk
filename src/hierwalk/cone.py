@@ -18,6 +18,9 @@ from hierwalk.path_refine import refine_param_ctx_for_path
 from hierwalk.port_scan import scan_ports_detail_from_module_text
 
 NetState = Tuple[str, str]
+ExpandStep = Tuple[NetState, str, str]
+ExpandCacheKey = Tuple[str, str, str, str]
+ExpandCache = Dict[ExpandCacheKey, List[ExpandStep]]
 
 
 @dataclass(frozen=True)
@@ -90,6 +93,7 @@ class _ConeCtx:
     comb_cache: Dict[Tuple[str, str, str, str, str, bool, bool], ModuleConnectIndex] = field(
         default_factory=dict
     )
+    expand_cache: ExpandCache = field(default_factory=dict)
     trace_stop: TraceStopPolicy = field(default_factory=TraceStopPolicy)
 
 
@@ -230,6 +234,17 @@ def _state_key(scope: str, net: str, mod_idx: ConeModuleIndex) -> NetState:
     return scope, rep
 
 
+def _port_rep_matches(comb: ModuleConnectIndex, port_name: str, rep: str) -> bool:
+    """True when *rep* is the port or a slice/select of the same declared port."""
+    port_rep = net_representative(comb, port_name)
+    if port_rep == rep:
+        return True
+    if rep.startswith(f"{port_rep}[") or port_rep.startswith(f"{rep}["):
+        return True
+    peers = comb.rep_adj.get(rep, ())
+    return port_rep in peers or rep in comb.rep_adj.get(port_rep, ())
+
+
 def _is_blackbox_instance(ctx: _ConeCtx, row: FlatRow) -> bool:
     rec = ctx.index.get_module(row.module)
     if rec is None:
@@ -311,10 +326,58 @@ def _boundary_at_state(
     return None
 
 
+def _expand_cache_key(ctx: _ConeCtx, state: NetState) -> ExpandCacheKey:
+    return (ctx.direction, ctx.path_kind, state[0], state[1])
+
+
+def _dedup_child_port_links(
+    comb: ModuleConnectIndex,
+    links: Sequence[Tuple[str, str]],
+) -> List[Tuple[str, str]]:
+    """One child port per (instance leaf, electrical port rep); drops slice aliases."""
+    chosen: Dict[Tuple[str, str], str] = {}
+    for inst_leaf, port in links:
+        port_rep = comb.net_rep.get(port, port)
+        key = (inst_leaf, port_rep)
+        prev = chosen.get(key)
+        if prev is None or ("[" not in port and "[" in prev):
+            chosen[key] = port
+    return [(inst_leaf, port_name) for (inst_leaf, _), port_name in chosen.items()]
+
+
+def _child_down_links(comb: ModuleConnectIndex, rep: str) -> List[Tuple[str, str]]:
+    """Child instance ports wired to parent net *rep* (inst_ports + deduped net_to_children)."""
+    chosen: Dict[Tuple[str, str], str] = {}
+    for inst_leaf, bindings in comb.inst_ports.items():
+        for child_port, parent_expr in bindings:
+            roots = comb.expr_roots.get(parent_expr) or frozenset()
+            if not roots and parent_expr.strip():
+                roots = frozenset({parent_expr.strip()})
+            if not any(net_representative(comb, root) == rep for root in roots):
+                continue
+            port_rep = comb.net_rep.get(child_port, child_port)
+            key = (inst_leaf, port_rep)
+            prev = chosen.get(key)
+            if prev is None or ("[" not in child_port and "[" in prev):
+                chosen[key] = child_port
+    for inst_leaf, port in _dedup_child_port_links(
+        comb, comb.net_to_children.get(rep, ())
+    ):
+        port_rep = comb.net_rep.get(port, port)
+        key = (inst_leaf, port_rep)
+        if key not in chosen:
+            chosen[key] = port
+    return [(inst_leaf, port_name) for (inst_leaf, _), port_name in chosen.items()]
+
+
 def _expand_fanout(
     state: NetState,
     ctx: _ConeCtx,
-) -> List[Tuple[NetState, str, str]]:
+) -> List[ExpandStep]:
+    cache_key = _expand_cache_key(ctx, state)
+    cached = ctx.expand_cache.get(cache_key)
+    if cached is not None:
+        return cached
     scope, net = state
     row = ctx.rows_by_path.get(scope)
     if row is None:
@@ -358,7 +421,7 @@ def _expand_fanout(
                 f"(always_ff Q in {mod_name})",
             )
 
-    for inst_leaf, port in comb.net_to_children.get(rep, ()):
+    for inst_leaf, port in _child_down_links(comb, rep):
         child_path = ctx.child_by_parent_leaf.get((scope, inst_leaf))
         if not child_path:
             continue
@@ -385,7 +448,7 @@ def _expand_fanout(
             target=child_mod,
         )
 
-    for inst_leaf, port in comb.hier_links.get(rep, ()):
+    for inst_leaf, port in _dedup_child_port_links(comb, comb.hier_links.get(rep, ())):
         child_path = ctx.child_by_parent_leaf.get((scope, inst_leaf))
         if not child_path:
             continue
@@ -410,21 +473,29 @@ def _expand_fanout(
         if parent_row is not None:
             parent_mod = _cached_cone_mod(ctx, parent_row)
             parent_comb = parent_mod.comb
+            seen_parent_up_reps: Set[str] = set()
             for port_name, expr in parent_comb.inst_ports.get(row.inst_leaf, ()):
-                if net_representative(comb, port_name) != rep:
+                if not _port_rep_matches(comb, port_name, rep):
                     continue
                 roots = parent_comb.expr_roots.get(expr) or frozenset()
                 child_lbl = _net_label(scope, port_name)
                 if not roots and expr.strip():
-                    push(
-                        parent_path,
-                        expr.strip(),
-                        "parent-up",
-                        f"{child_lbl} -> {_net_label(parent_path, expr.strip())} "
-                        f"(port map {row.inst_leaf}.{port_name}={expr})",
-                        target=parent_mod,
-                    )
+                    root_rep = net_representative(parent_comb, expr.strip())
+                    if root_rep not in seen_parent_up_reps:
+                        seen_parent_up_reps.add(root_rep)
+                        push(
+                            parent_path,
+                            expr.strip(),
+                            "parent-up",
+                            f"{child_lbl} -> {_net_label(parent_path, expr.strip())} "
+                            f"(port map {row.inst_leaf}.{port_name}={expr})",
+                            target=parent_mod,
+                        )
                 for root in roots:
+                    root_rep = net_representative(parent_comb, root)
+                    if root_rep in seen_parent_up_reps:
+                        continue
+                    seen_parent_up_reps.add(root_rep)
                     push(
                         parent_path,
                         root,
@@ -433,13 +504,18 @@ def _expand_fanout(
                         f"(port map {row.inst_leaf}.{port_name}={expr})",
                         target=parent_mod,
                     )
+    ctx.expand_cache[cache_key] = out
     return out
 
 
 def _expand_fanin(
     state: NetState,
     ctx: _ConeCtx,
-) -> List[Tuple[NetState, str, str]]:
+) -> List[ExpandStep]:
+    cache_key = _expand_cache_key(ctx, state)
+    cached = ctx.expand_cache.get(cache_key)
+    if cached is not None:
+        return cached
     scope, net = state
     row = ctx.rows_by_path.get(scope)
     if row is None:
@@ -482,7 +558,7 @@ def _expand_fanin(
                 f"{_net_label(scope, d_rep)} <- {here} (always_ff D in {mod_name})",
             )
 
-    for inst_leaf, port in comb.net_to_children.get(rep, ()):
+    for inst_leaf, port in _child_down_links(comb, rep):
         child_path = ctx.child_by_parent_leaf.get((scope, inst_leaf))
         if not child_path:
             continue
@@ -515,21 +591,29 @@ def _expand_fanin(
         if parent_row is not None:
             parent_mod = _cached_cone_mod(ctx, parent_row)
             parent_comb = parent_mod.comb
+            seen_parent_up_reps: Set[str] = set()
             for port_name, expr in parent_comb.inst_ports.get(row.inst_leaf, ()):
-                if net_representative(comb, port_name) != rep:
+                if not _port_rep_matches(comb, port_name, rep):
                     continue
                 roots = parent_comb.expr_roots.get(expr) or frozenset()
                 child_lbl = _net_label(scope, port_name)
                 if not roots and expr.strip():
-                    push(
-                        parent_path,
-                        expr.strip(),
-                        "parent-up",
-                        f"{_net_label(parent_path, expr.strip())} -> {child_lbl} "
-                        f"(port map {row.inst_leaf}.{port_name}={expr})",
-                        target=parent_mod,
-                    )
+                    root_rep = net_representative(parent_comb, expr.strip())
+                    if root_rep not in seen_parent_up_reps:
+                        seen_parent_up_reps.add(root_rep)
+                        push(
+                            parent_path,
+                            expr.strip(),
+                            "parent-up",
+                            f"{_net_label(parent_path, expr.strip())} -> {child_lbl} "
+                            f"(port map {row.inst_leaf}.{port_name}={expr})",
+                            target=parent_mod,
+                        )
                 for root in roots:
+                    root_rep = net_representative(parent_comb, root)
+                    if root_rep in seen_parent_up_reps:
+                        continue
+                    seen_parent_up_reps.add(root_rep)
                     push(
                         parent_path,
                         root,
@@ -538,19 +622,26 @@ def _expand_fanin(
                         f"(port map {row.inst_leaf}.{port_name}={expr})",
                         target=parent_mod,
                     )
-            for parent_rep, pairs in parent_comb.net_to_children.items():
-                for inst_leaf, port in pairs:
-                    if inst_leaf != row.inst_leaf:
+            # Parent-down via inst_ports expr roots only (avoids alias explosion from
+            # scanning all net_to_children keys on wide parent buses).
+            seen_parent_down_reps: Set[str] = set()
+            for port_name, expr in parent_comb.inst_ports.get(row.inst_leaf, ()):
+                if net_representative(comb, port_name) != rep:
+                    continue
+                roots = parent_comb.expr_roots.get(expr) or frozenset()
+                if not roots and expr.strip():
+                    roots = frozenset({expr.strip()})
+                for root in roots:
+                    parent_net_rep = net_representative(parent_comb, root)
+                    if parent_net_rep in seen_parent_down_reps:
                         continue
-                    child_rep = net_representative(comb, port)
-                    if child_rep != rep:
-                        continue
+                    seen_parent_down_reps.add(parent_net_rep)
                     push(
                         parent_path,
-                        parent_rep,
+                        root,
                         "parent-down",
-                        f"{_net_label(parent_path, parent_rep)} -> {here} "
-                        f"(instance {inst_leaf}.{port})",
+                        f"{_net_label(parent_path, root)} -> {here} "
+                        f"(port map {row.inst_leaf}.{port_name}={expr})",
                         target=parent_mod,
                     )
             if _is_blackbox_instance(ctx, row):
@@ -564,6 +655,7 @@ def _expand_fanin(
                             target=parent_mod,
                         )
 
+    ctx.expand_cache[cache_key] = out
     return out
 
 
@@ -580,6 +672,11 @@ def _run_cone(
     trace_stop: Optional[TraceStopPolicy] = None,
     ignore_hierarchy: Sequence[str] = (),
     trace_max_depth: Optional[int] = None,
+    mod_cache: Optional[Dict[Tuple[str, str], ConeModuleIndex]] = None,
+    comb_cache: Optional[
+        Dict[Tuple[str, str, str, str, str, bool, bool], ModuleConnectIndex]
+    ] = None,
+    expand_cache: Optional[ExpandCache] = None,
 ) -> ConeResult:
     stop_policy = trace_stop or TraceStopPolicy(
         ignore_hierarchy=tuple(ignore_hierarchy),
@@ -605,14 +702,34 @@ def _run_cone(
         child_by_parent_leaf=child_by_parent_leaf,
         index=index,
         top=top,
-        mod_cache={},
+        mod_cache=mod_cache if mod_cache is not None else {},
         defines=dict(defines or {}),
         over_approximate_if=over_approximate_if,
         direction=direction,
         path_kind=path_kind,
         trace_stop=stop_policy,
-        comb_cache={},
+        comb_cache=comb_cache if comb_cache is not None else {},
+        expand_cache=expand_cache if expand_cache is not None else {},
     )
+    cone_debug = __import__("os").environ.get("HIERWALK_CONE_DEBUG", "").strip()
+    seen_mods: Set[str] = set()
+    if cone_debug:
+        print(
+            f"[hier-walk cone] prewarm start modules={len({r.module for r in rows_by_path.values()})}",
+            file=sys.stderr,
+            flush=True,
+        )
+    for cone_row in rows_by_path.values():
+        if cone_row.module in seen_mods:
+            continue
+        seen_mods.add(cone_row.module)
+        _cached_cone_mod(ctx, cone_row)
+    if cone_debug:
+        print(
+            f"[hier-walk cone] prewarm done cached={len(ctx.mod_cache)}",
+            file=sys.stderr,
+            flush=True,
+        )
     row = rows_by_path.get(ep.inst_path)
     if row is None:
         return ConeResult(
@@ -630,8 +747,17 @@ def _run_cone(
     frontier: List[NetState] = [start]
     boundaries: Dict[Tuple[str, str, str], ConeBoundary] = {}
     edges: List[ConeEdge] = []
+    bfs_round = 0
 
     while frontier:
+        bfs_round += 1
+        if cone_debug and (bfs_round <= 25 or bfs_round % 50 == 0):
+            print(
+                f"[hier-walk cone] {direction} round={bfs_round} "
+                f"frontier={len(frontier)} visited={len(visited)}",
+                file=sys.stderr,
+                flush=True,
+            )
         next_front: List[NetState] = []
         for state in frontier:
             boundary = _boundary_at_state(
@@ -692,6 +818,11 @@ def fanout_cone(
     trace_stop: Optional[TraceStopPolicy] = None,
     ignore_hierarchy: Sequence[str] = (),
     trace_max_depth: Optional[int] = None,
+    mod_cache: Optional[Dict[Tuple[str, str], ConeModuleIndex]] = None,
+    comb_cache: Optional[
+        Dict[Tuple[str, str, str, str, str, bool, bool], ModuleConnectIndex]
+    ] = None,
+    expand_cache: Optional[ExpandCache] = None,
 ) -> ConeResult:
     return _run_cone(
         endpoint,
@@ -705,6 +836,9 @@ def fanout_cone(
         trace_stop=trace_stop,
         ignore_hierarchy=ignore_hierarchy,
         trace_max_depth=trace_max_depth,
+        mod_cache=mod_cache,
+        comb_cache=comb_cache,
+        expand_cache=expand_cache,
     )
 
 
@@ -720,6 +854,11 @@ def fanin_cone(
     trace_stop: Optional[TraceStopPolicy] = None,
     ignore_hierarchy: Sequence[str] = (),
     trace_max_depth: Optional[int] = None,
+    mod_cache: Optional[Dict[Tuple[str, str], ConeModuleIndex]] = None,
+    comb_cache: Optional[
+        Dict[Tuple[str, str, str, str, str, bool, bool], ModuleConnectIndex]
+    ] = None,
+    expand_cache: Optional[ExpandCache] = None,
 ) -> ConeResult:
     return _run_cone(
         endpoint,
@@ -733,6 +872,9 @@ def fanin_cone(
         trace_stop=trace_stop,
         ignore_hierarchy=ignore_hierarchy,
         trace_max_depth=trace_max_depth,
+        mod_cache=mod_cache,
+        comb_cache=comb_cache,
+        expand_cache=expand_cache,
     )
 
 

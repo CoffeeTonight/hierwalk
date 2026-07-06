@@ -8,7 +8,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, IO, List, Mapping, Optional, Sequence, Set, Tuple
 
-from hierwalk.cone import ConeBoundary, ConeResult, fanin_cone, fanout_cone
+from hierwalk.cone import (
+    ConeBoundary,
+    ConeModuleIndex,
+    ConeResult,
+    _build_cone_module_index,
+    fanin_cone,
+    fanout_cone,
+)
+from hierwalk.connect.logical.scan import ModuleConnectIndex, net_representative
 from hierwalk.connect.shared.endpoints import resolve_endpoint
 from hierwalk.index import DesignIndex
 from hierwalk.models import FlatRow, PortInfo
@@ -271,6 +279,95 @@ def _seed_ports(
     return seeds
 
 
+def _prefer_canonical_port_name(candidate: str, incumbent: str) -> bool:
+    """True when *candidate* is a better reporting label than *incumbent*."""
+    cand_base = "[" not in candidate
+    inc_base = "[" not in incumbent
+    if cand_base != inc_base:
+        return cand_base
+    if len(candidate) != len(incumbent):
+        return len(candidate) < len(incumbent)
+    return candidate < incumbent
+
+
+def _canonical_port_label(info: PortInfo, names: Sequence[str]) -> str:
+    base = (info.base_name or "").strip()
+    if base and base in names:
+        return base
+    ordered = sorted(names, key=lambda n: ("[" in n, len(n), n))
+    return ordered[0] if ordered else base
+
+
+def _seeds_from_port_declarations(
+    index: DesignIndex,
+    row: FlatRow,
+    top: str,
+    direction: str,
+) -> List[Tuple[str, str, str]]:
+    """One trace seed per declared port (not per slice alias expansion)."""
+    ctx = _param_ctx_for_row(index, row, top)
+    port_index = port_index_for_design_module(index, row.module, ctx)
+    seeds: List[Tuple[str, str, str]] = []
+    if port_index:
+        by_base: Dict[str, PortInfo] = {}
+        for info in port_index.values():
+            base = (info.base_name or "").strip() or _canonical_port_label(
+                info, info.names
+            )
+            prev = by_base.get(base)
+            if prev is None or _prefer_canonical_port_name(
+                _canonical_port_label(info, info.names),
+                _canonical_port_label(prev, prev.names),
+            ):
+                by_base[base] = info
+        for base, info in sorted(by_base.items()):
+            port_dir = _port_decl_direction(info)
+            if not info.names:
+                continue
+            label = _canonical_port_label(info, info.names) or base
+            if direction in ("driver", "both") and port_dir in ("input", "inout"):
+                seeds.append((label, port_dir, "driver"))
+            if direction in ("sinker", "both") and port_dir in ("output", "inout"):
+                seeds.append((label, port_dir, "sinker"))
+        return sorted(seeds, key=lambda item: (item[2], item[0]))
+    return _seed_ports(_ports_for_instance(index, row, top), direction)
+
+
+def _dedup_seeds_by_net_rep(
+    seeds: Sequence[Tuple[str, str, str]],
+    *,
+    index: DesignIndex,
+    row: FlatRow,
+    top: str,
+    defines: Mapping[str, str],
+    over_approximate_if: bool,
+    mod_cache: Dict[Tuple[str, str], ConeModuleIndex],
+    comb_cache: Dict[Tuple[str, str, str, str, str, bool, bool], ModuleConnectIndex],
+) -> List[Tuple[str, str, str]]:
+    """Keep one seed per (trace_direction, port net representative) at the instance."""
+    if not seeds:
+        return []
+    pmap = _param_ctx_for_row(index, row, top)
+    mod_idx = _build_cone_module_index(
+        index,
+        row.module,
+        pmap,
+        defines=defines,
+        over_approximate_if=over_approximate_if,
+        cache=mod_cache,
+        comb_cache=comb_cache,
+    )
+    comb = mod_idx.comb
+    chosen: Dict[Tuple[str, str], Tuple[str, str, str]] = {}
+    for name, port_dir, trace_dir in seeds:
+        rep = net_representative(comb, name)
+        key = (trace_dir, rep)
+        prev = chosen.get(key)
+        if prev is None or _prefer_canonical_port_name(name, prev[0]):
+            chosen[key] = (name, port_dir, trace_dir)
+    return sorted(chosen.values(), key=lambda item: (item[2], item[0]))
+
+
 def run_inst_trace(
     request: InstTraceRequest,
     *,
@@ -312,44 +409,60 @@ def run_inst_trace(
         result.errors.append(f"hierarchy not found: {ep.inst_path}")
         return result
 
-    ports = _ports_for_instance(index, row, top_name)
-    if not ports:
-        result.errors.append(
-            f"no ports parsed for instance {ep.inst_path} (module {row.module})"
-        )
-        return result
-
-    seeds = _seed_ports(ports, request.direction)
-    if not seeds:
+    raw_seeds = _seeds_from_port_declarations(
+        index,
+        row,
+        top_name,
+        request.direction,
+    )
+    if not raw_seeds:
         result.errors.append(
             f"no ports match direction={request.direction!r} on {ep.inst_path}"
         )
         return result
 
+    shared_mod_cache: Dict[Tuple[str, str], ConeModuleIndex] = {}
+    shared_comb_cache: Dict[
+        Tuple[str, str, str, str, str, bool, bool], ModuleConnectIndex
+    ] = {}
+    shared_expand_cache: Dict[
+        Tuple[str, str, str, str], List[Tuple[Tuple[str, str], str, str]]
+    ] = {}
+    seeds = _dedup_seeds_by_net_rep(
+        raw_seeds,
+        index=index,
+        row=row,
+        top=top_name,
+        defines=compile_defines,
+        over_approximate_if=over_approx,
+        mod_cache=shared_mod_cache,
+        comb_cache=shared_comb_cache,
+    )
+    if not seeds:
+        result.errors.append(
+            f"no electrical port groups match direction={request.direction!r} "
+            f"on {ep.inst_path}"
+        )
+        return result
+
     for port_name, port_dir, trace_dir in seeds:
         endpoint = f"{ep.inst_path}.{port_name}"
+        cone_kwargs = {
+            "rows": rows,
+            "index": index,
+            "top": top_name,
+            "defines": compile_defines,
+            "over_approximate_if": over_approx,
+            "path_kind": request.path_kind,
+            "trace_stop": request.trace_stop,
+            "mod_cache": shared_mod_cache,
+            "comb_cache": shared_comb_cache,
+            "expand_cache": shared_expand_cache,
+        }
         if trace_dir == "driver":
-            cone = fanin_cone(
-                endpoint,
-                rows=rows,
-                index=index,
-                top=top_name,
-                defines=compile_defines,
-                over_approximate_if=over_approx,
-                path_kind=request.path_kind,
-                trace_stop=request.trace_stop,
-            )
+            cone = fanin_cone(endpoint, **cone_kwargs)
         else:
-            cone = fanout_cone(
-                endpoint,
-                rows=rows,
-                index=index,
-                top=top_name,
-                defines=compile_defines,
-                over_approximate_if=over_approx,
-                path_kind=request.path_kind,
-                trace_stop=request.trace_stop,
-            )
+            cone = fanout_cone(endpoint, **cone_kwargs)
         if cone.errors:
             result.errors.extend(
                 f"{endpoint} ({trace_dir}): {err}" for err in cone.errors

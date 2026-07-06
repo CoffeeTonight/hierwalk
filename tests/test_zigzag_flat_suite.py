@@ -92,14 +92,25 @@ def test_flat_suite_document_has_text_and_logical_conn(suite_bundle):
     assert "zz_multi_g3_empty" in ids
     assert "zz_ifndef_define_mix" in ids
     assert "zz_scope_confident_b" in ids
+    assert "zz_ifdef_nested_u_b" in ids
+    assert "zz_scope_b_to_c" in ids
+    assert "zz_scope_c_to_b" in ids
+    for idx in range(10):
+        assert f"zz_ifdef_var_{idx:02d}" in ids
     assert "zz_dw_vendor_inst" not in ids
     multi_g3 = next(c for c in checks if c["id"] == "zz_multi_g3_empty")
     assert multi_g3.get("expect_connected") is False
     scope_chk = next(c for c in checks if c["id"] == "zz_scope_confident_b")
     assert scope_chk.get("expect_connected") is True
-    assert len(scope_chk["expect_hierarchy"]) == 2
-    assert len(checks) == 60
-    assert sum(1 for c in checks if c.get("expect_connected") is True) >= 45
+    assert len(scope_chk["expect_hierarchy"]) == 3
+    assert len(checks) == 119
+    assert sum(1 for c in checks if c.get("expect_connected") is True) >= 70
+    assert "zz_vuln_a1" in ids
+    assert "zz_vuln_b1" in ids
+    assert "zz_matrix_hier_batch" in ids
+    by_id = {c["id"]: c for c in checks}
+    assert by_id["zz_vuln_a1"]["expect_connected"] is False
+    assert by_id["zz_vuln_d3"]["expect_connected"] is True
     for step in conn_steps:
         assert step["ignore-path"] == ["DW_*"]
     batch = next(c for c in checks if c["id"] == "zz_common_inst_batch")
@@ -134,25 +145,49 @@ def test_round17_conn_check_shapes(suite_bundle):
         f"{DEEP_D2}.chain_in[1][2]",
         f"{DEEP_D2}.shallow_return[1][2]",
     )
-    assert xor_chk["b"] == f"{DEEP_D2}.bridge_expr_din[1][2]"
+    assert xor_chk["b"] == f"{DEEP_D2}.u_bridge_expr.din[1][2]"
     assert build_expand_meta(tuple(xor_chk["a"]), xor_chk["b"]).map_kind == "fanout"
     assert f"{DEEP_D4}.chain_in[1][2]" in fanin["a"]
 
 
 def test_round21_scope_rtl_and_filelist_order(suite_bundle):
     suite_path, design, root = suite_bundle
-    assert "u_scope" in design.files["zz_torture_top.v"]
+    assert "zz_scope_A u_a" in design.files["zz_torture_top.v"]
     assert "module zz_scope_A" in design.files[ZZ_SCOPE_DECOY_RTL]
-    assert "zz_scope_B u_b" in design.files[ZZ_SCOPE_A_RTL]
+    scope_a = design.files[ZZ_SCOPE_A_RTL]
+    assert "zz_scope_B u_b" in scope_a
+    assert "zz_scope_C u_c" in scope_a
+    assert "module zz_scope_B" not in scope_a
+    assert "zz_b_to_c" in scope_a
+    assert "////////" in scope_a
+    assert "`ifndef ZZ_SCOPE_NO_B" in scope_a
+    assert "`ifdef ZZ_SCOPE_USE_ALT" in scope_a
+    assert "/*" in scope_a and "ZZ_SCOPE_FAKE_BLK" in scope_a
+    assert "module zz_scope_B" in design.files["zz_scope_b.v"]
+    assert "module zz_scope_C" in design.files["zz_scope_c.v"]
+    assert "module zz_scope_v00" in design.files["zz_scope_v00.v"]
+    assert "module zz_scope_v09" in design.files["zz_scope_v09.v"]
+    assert "zz_scope_v00 u_av00" in design.files["zz_torture_top.v"]
     assert "module zz_scope_B;" in design.files[ZZ_SCOPE_STUB_RTL]
     fl_lines = (root / "filelist.f").read_text(encoding="utf-8").splitlines()
     decoy = str((root / ZZ_SCOPE_DECOY_RTL).resolve())
     real_a = str((root / ZZ_SCOPE_A_RTL).resolve())
+    real_b = str((root / "zz_scope_b.v").resolve())
+    real_c = str((root / "zz_scope_c.v").resolve())
+    real_v00 = str((root / "zz_scope_v00.v").resolve())
     assert fl_lines.index(decoy) < fl_lines.index(real_a)
-    parent_fl = str((root / "zz_scope_fl" / "parent.f").resolve())
+    assert real_b not in fl_lines
+    assert real_c not in fl_lines
+    assert real_v00 not in fl_lines
+    fl_dir = root / "zz_scope_fl"
+    parent_fl = str((fl_dir / "parent.f").resolve())
     assert any(line.strip() == f"-f {parent_fl}" for line in fl_lines)
-    grandchild = root / "zz_scope_fl" / "grandchild.f"
-    assert ZZ_SCOPE_STUB_RTL in grandchild.read_text(encoding="utf-8")
+    assert (fl_dir / "b.f").read_text(encoding="utf-8").splitlines()[0] == real_b
+    assert (fl_dir / "c.f").read_text(encoding="utf-8").splitlines()[0] == real_c
+    assert (fl_dir / "v00.f").read_text(encoding="utf-8").splitlines()[0] == real_v00
+    assert ZZ_SCOPE_STUB_RTL in (fl_dir / "stub.f").read_text(encoding="utf-8")
+    assert "-f" in (fl_dir / "b.f").read_text(encoding="utf-8")
+    assert "-f" in (fl_dir / "v09.f").read_text(encoding="utf-8")
 
 
 def test_round18_rtl_probes_in_generated_files(suite_bundle):
@@ -185,8 +220,8 @@ def test_parse_suite_expands_conn_phases_not_cone_io(suite_bundle):
     assert conn_phases == ["text", "logical"]
     cone_count = sum(1 for entry, _ in plan if entry and entry.kind == "run_cone_trace")
     io_count = sum(1 for entry, _ in plan if entry and entry.kind == "run_io_trace")
-    assert cone_count == 18
-    assert io_count == 13
+    assert cone_count == 20
+    assert io_count == 15
 
 
 def test_conn_ignore_path_dw_glob_merge_and_pw_db(suite_bundle):
@@ -344,7 +379,7 @@ def test_list_display_hierarchy_paths_not_bracket_blob(suite_bundle):
 
 
 def test_scope_confident_b_resolves_without_recovery(suite_bundle, monkeypatch):
-    """Regression anchor: nested child FL + co-list order must resolve ``u_scope.u_b``."""
+    """Regression anchor: nested child FL + co-list order must resolve ``u_a.u_b``."""
     suite_path, design, root = suite_bundle
     from hierwalk.connect.shared.request import ConnectivityCheck, ConnectivityRequest
     from hierwalk.filelist import parse_filelist
@@ -382,11 +417,14 @@ def test_scope_confident_b_resolves_without_recovery(suite_bundle, monkeypatch):
     assert row_b.module == "zz_scope_B"
     assert row_a is not None
     assert row_a.file.endswith(ZZ_SCOPE_A_RTL)
+    assert row_b.file.endswith("zz_scope_b.v")
     assert batch.results[0].connected is True
     assert state.mod_db.defer_count() == 0
     files_a = state.mod_db._module_to_files.get("zz_scope_A", ())
     assert any(str(f).endswith(ZZ_SCOPE_A_RTL) for f in files_a)
     assert any(str(f).endswith(ZZ_SCOPE_STUB_RTL) for f in files_a)
+    files_b = state.mod_db._module_to_files.get("zz_scope_B", ())
+    assert any(str(f).endswith("zz_scope_b.v") for f in files_b)
 
 
 def test_hierarchy_rtl_on_hit_nodes(suite_bundle):

@@ -23,6 +23,8 @@ from hierwalk.path_walk import (
     run_path_walk_connect,
     run_path_walk_index,
 )
+from hierwalk.suite_conn_policy import CONN_LOGICAL_ONLY_NEGATIVE_IDS
+from hierwalk.zigzag_annex_gen import VULN_PLAN_BY_CHECK_ID
 from hierwalk.zigzag_torture_gen import (
     COLLISION,
     DEEP_ARM,
@@ -33,10 +35,15 @@ from hierwalk.zigzag_torture_gen import (
     DEEP_DEPTH,
     DESIGN_SUITE_CHECK_ALIASES,
     DW_VENDOR_RTL,
+    SCOPE_B,
+    SCOPE_C,
     SHALLOW_ARM,
     SHALLOW_DEPTH,
     SHALLOW_R4,
     TOP,
+    ZZ_SCOPE_A_RTL,
+    ZZ_SCOPE_B_RTL,
+    ZZ_SCOPE_C_RTL,
     ZigzagTortureDesign,
     _suite_conn_checks,
     build_connect_request,
@@ -87,11 +94,25 @@ ROUND21_NEW_CHECK_IDS = (
     "zz_scope_confident_b",
 )
 
+ROUND22_NEW_CHECK_IDS = (
+    "zz_ifdef_nested_u_b",
+)
+
+ROUND23_NEW_CHECK_IDS = tuple(f"zz_ifdef_var_{idx:02d}" for idx in range(10))
+
+ROUND24_NEW_CHECK_IDS = (
+    "zz_scope_b_to_c",
+    "zz_scope_c_to_b",
+)
+
 # Must pass in isolated path-walk connect (regression anchors + fixed probes).
 ZIGZAG_MUST_PASS_CONNECT_IDS = frozenset(
     {
         "zz_src_deep_a00",
         "zz_scope_confident_b",
+        "zz_ifdef_nested_u_b",
+        "zz_scope_b_to_c",
+        *ROUND23_NEW_CHECK_IDS,
         "zz_ifdef_pass",
         "zz_gen_pass",
         "zz_gen_for_unroll",
@@ -128,6 +149,9 @@ ROUND18_NEW_CHECK_IDS = (
     *ROUND19_NEW_CHECK_IDS,
     *ROUND20_NEW_CHECK_IDS,
     *ROUND21_NEW_CHECK_IDS,
+    *ROUND22_NEW_CHECK_IDS,
+    *ROUND23_NEW_CHECK_IDS,
+    *ROUND24_NEW_CHECK_IDS,
 )
 
 
@@ -142,7 +166,7 @@ def test_torture_design_shape():
     assert design.top == TOP
     assert design.deep_path == DEEP_D5
     assert design.shallow_path == SHALLOW_R4
-    assert len(design.checks) == 48
+    assert len(design.checks) == 106
     check_ids = {c.check_id for c in design.checks}
     assert "zz_fanin_merge" in check_ids
     assert "zz_fanin_merge_decoy" in check_ids
@@ -161,6 +185,30 @@ def test_torture_design_shape():
     assert "u_ifndef_mix" in design.files["zz_deep_d2.v"]
     assert "`ifndef ZZ_IFNDEF_INST_" in design.files["zz_deep_d2.v"]
     assert "`ifndef ZZ_IFNDEF_PING_BODY_" in design.files["zz_common.v"]
+    scope_a = design.files[ZZ_SCOPE_A_RTL]
+    assert "////////" in scope_a
+    assert "/*" in scope_a and "ZZ_SCOPE_FAKE_BLK" in scope_a
+    assert "`ifndef ZZ_SCOPE_NO_B" in scope_a
+    assert "`ifdef ZZ_SCOPE_USE_ALT" in scope_a
+    assert "`ifndef ZZ_SCOPE_HIDE_PROBE" in scope_a
+    assert "zz_scope_B u_b" in scope_a
+    assert "zz_scope_C u_c" in scope_a
+    assert "module zz_scope_B" not in scope_a
+    assert "module zz_scope_C" not in scope_a
+    assert "zz_b_to_c" in scope_a
+    assert "zz_c_from_b" in scope_a
+    assert "ZZ_SCOPE_NO_BRIDGE" in scope_a
+    assert "module zz_scope_B" in design.files[ZZ_SCOPE_B_RTL]
+    assert "module zz_scope_C" in design.files[ZZ_SCOPE_C_RTL]
+    assert "zz_scope_A u_a" in design.files["zz_torture_top.v"]
+    assert "module zz_scope_v00" in design.files["zz_scope_v00.v"]
+    assert "module zz_scope_v09" in design.files["zz_scope_v09.v"]
+    assert "`ifndef ZZ_SCV06_IIOO" in design.files["zz_scope_v06.v"]
+    assert "/* `else block trap */" in design.files["zz_scope_v08.v"]
+    for idx in range(10):
+        assert f"zz_ifdef_var_{idx:02d}" in check_ids
+        assert f"u_av{idx:02d}" in design.files["zz_torture_top.v"]
+        assert f"zz_scope_v{idx:02d}.v" in design.files
     assert "chain_in ^ shallow_return" in design.files["zz_deep_d2.v"]
     assert "assign merge_tap" in design.files["zz_deep_d4.v"]
     assert "grep_zero_b * 0" in design.files["zz_deep_d4.v"]
@@ -176,6 +224,34 @@ def test_torture_design_shape():
     assert "casex" in design.files["zz_deep_d1.v"]
     assert "casez" in design.files["zz_deep_d3.v"]
     assert "STRB_MAX" in design.files["zz_torture_top.v"]
+    assert "zz_vuln_annex u_vuln" in design.files["zz_torture_top.v"]
+    assert "zz_matrix_soc u_matrix" in design.files["zz_torture_top.v"]
+    assert "bind zz_torture_top zz_v_b1_bind" in design.files["zz_torture_top.v"]
+    assert "module zz_v_over_if" in design.files["zz_vuln_annex.v"]
+    assert "module zz_matrix_soc" in design.files["zz_matrix_annex.v"]
+    assert "bind zz_matrix_soc ghost" in design.files["zz_matrix_annex.v"]
+    assert any(c.check_id == "zz_vuln_d1" for c in design.checks)
+    assert any(c.check_id == "zz_vuln_n9" for c in design.checks)
+
+
+def test_scope_rtl_each_in_separate_filelist(torture_bundle, tmp_path: Path):
+    """Split scope RTL bodies must appear only in dedicated nested filelists."""
+    fl_path, _design = torture_bundle
+    root = fl_path.parent
+    root_lines = fl_path.read_text(encoding="utf-8").splitlines()
+    for rtl in (
+        "zz_scope_b.v",
+        "zz_scope_c.v",
+        "zz_scope_v00.v",
+        "zz_scope_v09.v",
+    ):
+        assert str((root / rtl).resolve()) not in root_lines
+    fl_dir = root / "zz_scope_fl"
+    assert (fl_dir / "b.f").read_text(encoding="utf-8").count("\n") >= 1
+    assert (fl_dir / "c.f").read_text(encoding="utf-8").count("-f") == 1
+    assert (fl_dir / "v05.f").read_text(encoding="utf-8").splitlines()[0].endswith(
+        "zz_scope_v05.v"
+    )
 
 
 def test_dw_vendor_inst_design_only_not_in_suite():
@@ -311,6 +387,19 @@ def test_path_walk_connect_all_checks(torture_bundle, tmp_path: Path):
             no_cache=True,
         )
         result = batch.results[0]
+        if chk.check_id.startswith("zz_vuln_"):
+            spec = VULN_PLAN_BY_CHECK_ID[chk.check_id]
+            if (
+                not spec.expected_default
+                and chk.check_id in CONN_LOGICAL_ONLY_NEGATIVE_IDS
+            ):
+                continue
+            if result.connected is not spec.expected_default:
+                failures.append(
+                    f"{chk.check_id}: expected connected={spec.expected_default} "
+                    f"got {result.connected} note={result.note}"
+                )
+            continue
         if chk.check_id == "zz_missing_hierarchy":
             if result.connected:
                 failures.append(f"{chk.check_id}: expected disconnected")
@@ -355,8 +444,34 @@ def test_path_walk_connect_all_checks(torture_bundle, tmp_path: Path):
                 f"{result.endpoint_b.spec} errors={result.errors} note={result.note}"
             )
 
+    for chk in base.checks:
+        if chk.check_id not in CONN_LOGICAL_ONLY_NEGATIVE_IDS:
+            continue
+        req = ConnectivityRequest(
+            checks=(chk,),
+            top=design.top,
+            defines=base.defines,
+            include_ff=True,
+        )
+        batch, _index, _state = run_path_walk_connect(
+            req,
+            fl,
+            top=design.top,
+            no_cache=True,
+            connect_phase="logical",
+        )
+        result = batch.results[0]
+        if result.connected:
+            failures.append(
+                f"{chk.check_id} (logical): expected disconnected "
+                f"got connected note={result.note}"
+            )
+
     if failures:
-        pytest.fail("zigzag torture connect failures:\n" + "\n".join(failures[:12]))
+        pytest.fail(
+            "zigzag torture connect failures:\n"
+            + "\n".join(failures)
+        )
 
 
 def test_path_walk_connect_batch_preserves_check_ids(torture_bundle, tmp_path: Path):
@@ -377,6 +492,17 @@ def test_path_walk_connect_batch_preserves_check_ids(torture_bundle, tmp_path: P
         assert result.check_id == chk.check_id
         if chk.check_id in ROUND18_NEGATIVE_CHECK_IDS:
             assert result.connected is False
+            continue
+        if chk.check_id.startswith("zz_vuln_"):
+            spec = VULN_PLAN_BY_CHECK_ID[chk.check_id]
+            if (
+                not spec.expected_default
+                and chk.check_id in CONN_LOGICAL_ONLY_NEGATIVE_IDS
+            ):
+                continue
+            assert result.connected is spec.expected_default, (
+                f"{chk.check_id}: errors={result.errors} note={result.note}"
+            )
             continue
         if chk.check_id in ROUND18_EXPAND_CHECK_IDS:
             assert result.sub_results and all(sr.connected for sr in result.sub_results)
@@ -458,6 +584,38 @@ def test_check_connectivity_parametric_strb(torture_bundle, tmp_path: Path):
         f"{DEEP_D3}.strb_in[3]",
     )
     assert result.connected
+
+
+def test_scope_b_to_c_text_connect(torture_bundle, tmp_path: Path):
+    """``top.u_a.u_b`` → ``top.u_a.u_c`` sibling zigzag must pass text path-walk connect."""
+    fl_path, design = torture_bundle
+    fl = parse_filelist(str(fl_path), index_cwd=str(fl_path.parent))
+    req = ConnectivityRequest(
+        checks=(
+            ConnectivityCheck(
+                f"{SCOPE_B}.scope_probe",
+                f"{SCOPE_C}.din",
+                check_id="zz_scope_b_to_c",
+            ),
+        ),
+        top=design.top,
+        defines=build_connect_request(design).defines,
+        include_ff=True,
+    )
+    batch, _index, state = run_path_walk_connect(
+        req,
+        fl,
+        top=design.top,
+        no_cache=True,
+        connect_phase="text",
+    )
+    result = batch.results[0]
+    assert result.connected, result.errors
+    assert state.rows_by_path.get(SCOPE_B) is not None
+    assert state.rows_by_path.get(SCOPE_C) is not None
+    assert state.rows_by_path[SCOPE_C].module == "zz_scope_C"
+    assert str(state.rows_by_path[SCOPE_B].file).endswith(ZZ_SCOPE_B_RTL)
+    assert str(state.rows_by_path[SCOPE_C].file).endswith(ZZ_SCOPE_C_RTL)
 
 
 def test_zigzag_text_grep_bug_patterns(torture_bundle, tmp_path: Path):
