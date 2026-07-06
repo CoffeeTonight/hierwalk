@@ -22,7 +22,9 @@ from hierwalk.connect.shared.endpoints import (
     _module_body_for_row,
     _net_base_declared_fast,
     _net_exists_in_module,
+    _port_exists,
     _row_param_ctx_optional,
+    inst_leaf_exists_in_module,
     is_module_local_signal_name,
     net_exists_in_module_fast,
     wire_tail_exists_fast,
@@ -1637,15 +1639,26 @@ def _walk_target_from_spec(spec: str, state: PathWalkState) -> str:
         row = lookup.get(hier)
         if row is None:
             continue
-        port = parts[-1]
+        leaf = parts[-1]
+        body = state._cached_module_body(row)
+        if _port_exists(
+            state.index,
+            row,
+            leaf,
+            top=state.top,
+            param_ctx=_row_param_ctx_optional(row),
+        ):
+            return hier
+        if inst_leaf_exists_in_module(state.index, row, leaf, body=body):
+            return text
         if net_exists_in_module_fast(
             state.index,
             row,
-            port,
+            leaf,
             top=state.top,
             cache=state._decl_net_cache,
             param_ctx=_row_param_ctx_optional(row),
-            body=state._cached_module_body(row),
+            body=body,
         ):
             return hier
     return text
@@ -1705,6 +1718,22 @@ def _inst_path_from_spec(
         if nxt not in lookup:
             row = lookup.get(cur)
             if row is not None and "." not in remainder:
+                body = state._cached_module_body(row)
+                if _port_exists(
+                    state.index,
+                    row,
+                    remainder,
+                    top=state.top,
+                    param_ctx=_row_param_ctx_optional(row),
+                ):
+                    return cur
+                if inst_leaf_exists_in_module(
+                    state.index,
+                    row,
+                    remainder,
+                    body=body,
+                ):
+                    return nxt
                 if net_exists_in_module_fast(
                     state.index,
                     row,
@@ -1712,7 +1741,7 @@ def _inst_path_from_spec(
                     top=state.top,
                     cache=state._decl_net_cache,
                     param_ctx=_row_param_ctx_optional(row),
-                    body=state._cached_module_body(row),
+                    body=body,
                 ):
                     return cur
             return nxt

@@ -205,14 +205,18 @@ def parse_connect_endpoint(
         if not tail:
             return hier, None
         if index is not None:
+            body = _module_body_for_row(index, row)
             if _port_exists(index, row, tail, top=top):
                 return hier, tail
+            if inst_leaf_exists_in_module(index, row, tail, body=body):
+                return text, None
             if net_exists_in_module_fast(
                 index,
                 row,
                 tail,
                 top=top,
                 param_ctx=_row_param_ctx_optional(row),
+                body=body,
             ):
                 return hier, tail
         return hier, tail
@@ -421,6 +425,22 @@ def _module_body_for_row(index: DesignIndex, row: FlatRow) -> str:
     if rec.body:
         return rec.body
     return ""
+
+
+def inst_leaf_exists_in_module(
+    index: DesignIndex,
+    row: FlatRow,
+    inst_leaf: str,
+    *,
+    body: Optional[str] = None,
+) -> bool:
+    """True when *inst_leaf* names a child instance in *row*'s module RTL."""
+    from hierwalk.inst_scan import probe_inst_leaf_regex_fast
+
+    if not inst_leaf:
+        return False
+    text = body if body is not None else _module_body_for_row(index, row)
+    return probe_inst_leaf_regex_fast(text, inst_leaf)
 
 
 DeclNetCacheKey = Tuple[str, Tuple[Tuple[str, str], ...]]

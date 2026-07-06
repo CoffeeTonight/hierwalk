@@ -111,11 +111,16 @@ module leaf; endmodule
     _root, rows = elaborate(index, "top")
 
     hits = search("*niu*", rows=rows)
-    assert {h.full_path for h in hits} == {"top.u_niu0"}
-    assert hits[0].match_kind == "instance"
+    assert {h.full_path for h in hits} == {
+        "top.u_niu0",
+        "top.u_niu0.u_child",
+    }
+    kinds = {h.full_path: h.match_kind for h in hits}
+    assert kinds["top.u_niu0"] == "instance"
+    assert kinds["top.u_niu0.u_child"] == "hierarchy-under"
 
 
-def test_search_niu_subtree_includes_descendants(tmp_path):
+def test_search_niu_exact_anchor_when_subtree_off(tmp_path):
     rtl = tmp_path / "d.v"
     rtl.write_text(
         """
@@ -134,11 +139,6 @@ module leaf; endmodule
     index = DesignIndex.build({str(rtl): text})
     _root, rows = elaborate(index, "top")
 
-    hits = search("*niu*", rows=rows, include_subtree=True)
-    assert {h.full_path for h in hits} == {
-        "top.u_niu0",
-        "top.u_niu0.u_child",
-    }
-    kinds = {h.full_path: h.match_kind for h in hits}
-    assert kinds["top.u_niu0"] == "instance"
-    assert kinds["top.u_niu0.u_child"] == "hierarchy-under"
+    hits = search("*niu*", rows=rows, include_subtree=False)
+    assert {h.full_path for h in hits} == {"top.u_niu0"}
+    assert hits[0].match_kind == "instance"

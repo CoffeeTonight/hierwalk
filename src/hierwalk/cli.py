@@ -351,8 +351,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     srch.add_argument(
         "--search-subtree",
-        action="store_true",
-        help="with --search, include all instances under matched hierarchies",
+        dest="search_subtree",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "with --search, include all instances under matched hierarchies "
+            "(default: on; use --no-search-subtree for exact matches only)"
+        ),
     )
     srch.add_argument(
         "--search-path",

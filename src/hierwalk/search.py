@@ -344,7 +344,7 @@ def search_flat_rows(
     *,
     match_inst: bool = True,
     match_module: bool = False,
-    include_subtree: bool = False,
+    include_subtree: bool = True,
     pattern_kind: PatternKind = "auto",
     case_insensitive: bool = False,
 ) -> List[SearchHit]:
@@ -352,10 +352,11 @@ def search_flat_rows(
     Search flattened instance rows.
 
     Each :class:`FlatRow` already carries ``full_path`` (top→leaf). Multiple
-    patterns (comma-separated string or sequence) are combined with OR. With
-    ``include_subtree``, anchors are instance rows whose ``inst_leaf`` (or
-    module type) matches any pattern, then every descendant row under those
-    anchors is included.
+    patterns (comma-separated string or sequence) are combined with OR. By
+    default (``include_subtree=True``), anchors are instance rows whose
+    ``inst_leaf`` (or module type) matches any pattern, then every descendant
+    row under those anchors is included. Pass ``include_subtree=False`` for
+    exact anchor matches only.
     """
     patterns = normalize_search_patterns(pattern)
     anchors: set[str] = set()
@@ -505,7 +506,7 @@ def search(
     root: Optional[ElabNode] = None,
     match_inst: bool = True,
     match_module: bool = False,
-    include_subtree: bool = False,
+    include_subtree: bool = True,
     pattern_kind: PatternKind = "auto",
     case_insensitive: bool = False,
 ) -> List[SearchHit]:

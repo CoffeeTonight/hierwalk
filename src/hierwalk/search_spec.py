@@ -20,6 +20,14 @@ def _ci_get(block: Mapping[str, Any], *keys: str) -> Any:
     return None
 
 
+def _document_has_key(block: Mapping[str, Any], *keys: str) -> bool:
+    lower = {str(k).lower().replace("-", "_") for k in block}
+    for key in keys:
+        if key.lower().replace("-", "_") in lower:
+            return True
+    return False
+
+
 @dataclass(frozen=True)
 class SearchSpec:
     instance: Tuple[str, ...] = ()
@@ -27,7 +35,7 @@ class SearchSpec:
     hierarchy_path: Tuple[str, ...] = ()
     case_insensitive: bool = False
     search_module: bool = False
-    search_subtree: bool = False
+    search_subtree: bool = True
 
     def is_active(self) -> bool:
         return bool(self.instance or self.path or self.hierarchy_path)
@@ -62,7 +70,7 @@ def parse_search_spec_block(
     block: Mapping[str, Any],
     *,
     default_module: bool = False,
-    default_subtree: bool = False,
+    default_subtree: bool = True,
 ) -> SearchSpec:
     instance = _parse_pattern_list(
         _ci_get(block, "instance"),
@@ -79,12 +87,14 @@ def parse_search_spec_block(
     case_insensitive = bool(
         _ci_get(block, "case_insensitive", "case-insensitive") or False
     )
-    search_module = bool(
-        _ci_get(block, "search_module", "search-module") or default_module
-    )
-    search_subtree = bool(
-        _ci_get(block, "search_subtree", "search-subtree") or default_subtree
-    )
+    if _document_has_key(block, "search_module", "search-module"):
+        search_module = bool(_ci_get(block, "search_module", "search-module"))
+    else:
+        search_module = default_module
+    if _document_has_key(block, "search_subtree", "search-subtree"):
+        search_subtree = bool(_ci_get(block, "search_subtree", "search-subtree"))
+    else:
+        search_subtree = default_subtree
     return SearchSpec(
         instance=tuple(instance),
         path=tuple(path),
@@ -100,7 +110,7 @@ def build_search_spec_from_legacy(
     search: Optional[str] = None,
     search_path: Optional[str] = None,
     search_module: bool = False,
-    search_subtree: bool = False,
+    search_subtree: bool = True,
     case_insensitive: bool = False,
 ) -> Optional[SearchSpec]:
     instance: List[str] = []
@@ -135,9 +145,12 @@ def resolve_search_spec(
     default_module = bool(
         _ci_get(data, "search_module", "search-module") or False
     )
-    default_subtree = bool(
-        _ci_get(data, "search_subtree", "search-subtree") or False
-    )
+    if _document_has_key(data, "search_subtree", "search-subtree"):
+        default_subtree = bool(
+            _ci_get(data, "search_subtree", "search-subtree")
+        )
+    else:
+        default_subtree = True
     raw_search = _ci_get(data, "search")
     if isinstance(raw_search, Mapping):
         spec = parse_search_spec_block(
@@ -207,7 +220,7 @@ def effective_search_spec(cfg: Any) -> Optional[SearchSpec]:
             search=getattr(cfg, "search", None),
             search_path=getattr(cfg, "search_path", None),
             search_module=bool(getattr(cfg, "search_module", False)),
-            search_subtree=bool(getattr(cfg, "search_subtree", False)),
+            search_subtree=bool(getattr(cfg, "search_subtree", True)),
             case_insensitive=bool(getattr(cfg, "search_case_insensitive", False)),
         )
     if spec is None:

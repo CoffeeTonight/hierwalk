@@ -113,7 +113,9 @@ def test_parse_run_request_json_structured_search(tmp_path):
 def test_execute_search_spec_pattern_kinds(tmp_path):
     index, rows = _build_rows(tmp_path)
 
-    inst_spec = parse_search_spec_block({"instance": ["u_CPU0"]})
+    inst_spec = parse_search_spec_block(
+        {"instance": ["u_CPU0"], "search_subtree": False}
+    )
     inst_hits = execute_search_spec(rows, index, inst_spec)
     assert {h.full_path for h in inst_hits} == {"chip_top.u_CPU0"}
 
@@ -135,7 +137,11 @@ def test_execute_search_spec_pattern_kinds(tmp_path):
 def test_case_insensitive_instance_match(tmp_path):
     index, rows = _build_rows(tmp_path)
     spec = parse_search_spec_block(
-        {"instance": ["u_*cpu0"], "case_insensitive": True}
+        {
+            "instance": ["u_*cpu0"],
+            "case_insensitive": True,
+            "search_subtree": False,
+        }
     )
     hits = execute_search_spec(rows, index, spec)
     assert {h.full_path for h in hits} == {"chip_top.u_CPU0"}

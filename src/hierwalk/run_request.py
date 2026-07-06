@@ -200,7 +200,7 @@ class RunConfig:
     defines: Tuple[Tuple[str, str], ...] = ()
     max_depth: Optional[int] = None
     search: Optional[str] = None
-    search_subtree: bool = False
+    search_subtree: bool = True
     search_path: Optional[str] = None
     search_module: bool = False
     search_case_insensitive: bool = False
@@ -750,7 +750,7 @@ def parse_run_request_json(
         defines=tuple(defines.items()),
         max_depth=max_depth,
         search=search,
-        search_subtree=bool(data.get("search_subtree", False)),
+        search_subtree=bool(data.get("search_subtree", True)),
         search_path=search_path,
         search_module=bool(data.get("search_module", False)),
         search_case_insensitive=search_case_insensitive,
@@ -1503,8 +1503,8 @@ def merge_run_config(base: RunConfig, cli: RunConfig, args: Any) -> RunConfig:
         out = replace(out, max_depth=cli.max_depth)
     if _field_overridden(args, "search", None):
         out = replace(out, search=cli.search, search_spec=None)
-    if args.search_subtree:
-        out = replace(out, search_subtree=True)
+    if _field_overridden(args, "search_subtree", True):
+        out = replace(out, search_subtree=cli.search_subtree)
     if _field_overridden(args, "search_path", None):
         out = replace(out, search_path=cli.search_path, search_spec=None)
     if args.search_module:
