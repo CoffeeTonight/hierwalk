@@ -1509,6 +1509,48 @@ class PathWalkState:
                 remainder = ""
                 break
             if self._is_target_terminal_tail(cur, remainder, path):
+                row = self.rows_by_path.get(cur)
+                miss_leaf = self._inst_leaf_prefix(remainder)
+                port_first = (
+                    row is not None
+                    and miss_leaf
+                    and _port_exists(
+                        self.index,
+                        row,
+                        miss_leaf.split("[", 1)[0],
+                        top=self.top,
+                        param_ctx=_row_param_ctx_optional(row),
+                    )
+                )
+                if not port_first:
+                    inst_name, edge = self._resolve_child_step(
+                        cur,
+                        remainder,
+                        target_path=path,
+                        policy=policy,
+                    )
+                    if edge is not None and inst_name:
+                        attached = self._attach_child(
+                            cur,
+                            inst_name,
+                            edge,
+                            policy=policy,
+                        )
+                        if attached is None:
+                            child_mod = edge.child_module or "?"
+                            self._queue_walk_miss(
+                                cur,
+                                inst_name,
+                                reason=path_walk_child_miss_reason(
+                                    child_mod=child_mod,
+                                    child_rec=self.index.get_module(child_mod),
+                                ),
+                                target_path=path,
+                            )
+                            return False
+                        cur = attached
+                        remainder = remainder[len(inst_name) :].lstrip(".")
+                        continue
                 if self._resolve_signal_tail(
                     cur,
                     remainder,

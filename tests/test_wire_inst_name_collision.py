@@ -178,6 +178,28 @@ def test_text_grep_uses_per_module_body_cache(tmp_path: Path):
     assert "u_b u_b" in body
 
 
+def test_ensure_path_prefers_inst_over_wire_signal_tail(tmp_path: Path, monkeypatch):
+    """Terminal tail must resolve child inst before classifying a colliding ``wire``."""
+    v = _design()
+    rtl = tmp_path / "d.v"
+    rtl.write_text(v, encoding="utf-8")
+    fl = tmp_path / "design.f"
+    fl.write_text(str(rtl.resolve()) + "\n", encoding="utf-8")
+    flr = parse_filelist(str(fl), index_cwd=str(tmp_path))
+    index, mod_db = create_path_walk_index(flr, "top", defines={}, no_cache=True)
+    state = PathWalkState(index=index, top="top", mod_db=mod_db)
+    state.ensure_root()
+    state.ensure_path("top.u_a")
+
+    def _force_wire_tail(self, parent_path, signal_name, row):
+        return "wire", 0.0
+
+    monkeypatch.setattr(PathWalkState, "_classify_signal_tail", _force_wire_tail)
+
+    assert state.ensure_path("top.u_a.u_b")
+    assert "top.u_a.u_b" in state.rows_by_path
+
+
 def test_path_walk_same_cell_inst_after_top_body_cached(tmp_path: Path):
     v = _same_cell_design()
     rtl = tmp_path / "d.v"
