@@ -51,13 +51,9 @@ class ElabIndex:
         *,
         rows: Optional[List[FlatRow]] = None,
     ) -> "ElabIndex":
-        """Build index lookups; reuse *rows_by_path* dict when already materialized."""
+        """Build index lookups; copy *rows_by_path* so callers may keep walking."""
         rows_list = rows if rows is not None else list(rows_by_path.values())
-        shared_map = (
-            rows_by_path
-            if isinstance(rows_by_path, dict)
-            else dict(rows_by_path)
-        )
+        shared_map = dict(rows_by_path)
         child_by_parent_leaf: Dict[Tuple[str, str], str] = {}
         depth_by_path: Dict[str, int] = {}
         for row in rows_list:

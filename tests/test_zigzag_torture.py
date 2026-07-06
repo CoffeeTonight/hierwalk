@@ -174,6 +174,7 @@ def test_torture_design_shape():
     assert "zz_casex_route" in check_ids
     assert "zz_loop_range" in check_ids
     assert "zz_bb_through" in check_ids
+    assert "wire u_b" in design.files[ZZ_SCOPE_A_RTL]
     assert "u_bridge_concat" in design.files["zz_deep_d2.v"]
     assert "gen_pass_flat" in design.files["zz_deep_d5.v"]
     assert "gen_tap0" in design.files["zz_deep_d1.v"]
@@ -584,6 +585,63 @@ def test_check_connectivity_parametric_strb(torture_bundle, tmp_path: Path):
         f"{DEEP_D3}.strb_in[3]",
     )
     assert result.connected
+
+
+def test_scope_b_wire_inst_collision_text_walk(torture_bundle, tmp_path: Path):
+    """``zz_scope_A`` wire ``u_b`` decoy must not block child inst ``top.u_a.u_b``."""
+    from hierwalk.connect.shared.endpoints import parse_connect_endpoint, resolve_endpoint
+
+    fl_path, design = torture_bundle
+    assert "wire u_b" in design.files[ZZ_SCOPE_A_RTL]
+    fl = parse_filelist(str(fl_path), index_cwd=str(fl_path.parent))
+    req = ConnectivityRequest(
+        checks=(
+            ConnectivityCheck(
+                f"{SCOPE_B}.scope_probe",
+                f"{TOP}.clk",
+                check_id="zz_scope_b_wire_inst_collision",
+            ),
+        ),
+        top=design.top,
+        defines=build_connect_request(design).defines,
+        include_ff=True,
+    )
+    batch, index, state = run_path_walk_connect(
+        req,
+        fl,
+        top=design.top,
+        no_cache=True,
+        connect_phase="text",
+        connect_jobs=2,
+    )
+    assert SCOPE_B in state.rows_by_path, batch.results[0].errors
+    row_b = state.rows_by_path[SCOPE_B]
+    assert row_b.module == "zz_scope_B"
+    assert str(row_b.file).endswith(ZZ_SCOPE_B_RTL)
+
+    hier, tail = parse_connect_endpoint(
+        f"{SCOPE_B}.scope_probe",
+        state.rows_by_path,
+        index=index,
+        top=design.top,
+        module_body_cache=state._module_body_cache,
+    )
+    assert hier == SCOPE_B
+    assert tail == "scope_probe"
+
+    ep, errs = resolve_endpoint(
+        f"{SCOPE_B}.scope_probe",
+        state.rows(),
+        index,
+        top=design.top,
+        rows_by_path=state.rows_by_path,
+        module_body_cache=state._module_body_cache,
+    )
+    assert not errs
+    assert ep.inst_path == SCOPE_B
+    assert ep.port_name == "scope_probe"
+    assert ep.port_found
+    assert batch.results[0].connected, batch.results[0].errors
 
 
 def test_scope_b_to_c_text_connect(torture_bundle, tmp_path: Path):

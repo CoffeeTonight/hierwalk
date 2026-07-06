@@ -21,10 +21,12 @@ from hierwalk.connect.shared.endpoints import (
     TextGrepIndexCacheKey,
     _empty_module_passthrough_ports,
     _mod_cache_lock,
+    _module_body_cache_key,
     _resolve_module_index_key,
     make_cell_module_body_lookup,
 )
 from hierwalk.index import DesignIndex
+from hierwalk.models import FlatRow
 
 TextGrepCache = Dict[TextGrepIndexCacheKey, "TextGrepIndex"]
 
@@ -43,6 +45,19 @@ def module_body_for_text_grep(
         return rec.body
     if module_body_cache:
         file_path = rec.file_path or ""
+        row_key = _module_body_cache_key(
+            FlatRow(
+                full_path="",
+                inst_leaf="",
+                module=mod_name,
+                depth=0,
+                parent_path=None,
+                file=file_path,
+            )
+        )
+        hit = module_body_cache.get(row_key)
+        if hit:
+            return hit
         for key in (
             mod_name,
             file_path,

@@ -170,6 +170,7 @@ def parse_connect_endpoint(
     *,
     index: Optional[DesignIndex] = None,
     top: str = "",
+    module_body_cache: Optional[ModuleBodyCache] = None,
 ) -> Tuple[str, Optional[str]]:
     """
     Split *spec* into ``(inst_path, port_or_signal_tail)``.
@@ -193,22 +194,27 @@ def parse_connect_endpoint(
     if text in rows_by_path:
         return text, None
     # Only the final spec segment may be port/wire/reg; earlier segments are instances.
-    last_idx = len(parts) - 1
-    for i in range(last_idx, 0, -1):
-        if i != last_idx:
-            continue
-        hier = ".".join(parts[:i])
-        row = rows_by_path.get(hier)
-        if row is None:
-            continue
+    hier = ".".join(parts[:-1])
+    row = rows_by_path.get(hier)
+    if row is not None:
         tail = parts[-1]
         if not tail:
             return hier, None
         if index is not None:
-            body = _module_body_for_row(index, row)
+            body = _resolve_row_module_body(
+                index,
+                row,
+                module_body_cache=module_body_cache,
+            )
             if _port_exists(index, row, tail, top=top):
                 return hier, tail
-            if inst_leaf_exists_in_module(index, row, tail, body=body):
+            if inst_leaf_exists_in_module(
+                index,
+                row,
+                tail,
+                body=body,
+                module_body_cache=module_body_cache,
+            ):
                 return text, None
             if net_exists_in_module_fast(
                 index,
@@ -427,25 +433,45 @@ def _module_body_for_row(index: DesignIndex, row: FlatRow) -> str:
     return ""
 
 
+DeclNetCacheKey = Tuple[str, Tuple[Tuple[str, str], ...]]
+DeclNetCache = Dict[DeclNetCacheKey, Set[str]]
+ModuleBodyCache = Dict[str, str]
+
+
+def _resolve_row_module_body(
+    index: DesignIndex,
+    row: FlatRow,
+    *,
+    module_body_cache: Optional[ModuleBodyCache] = None,
+) -> str:
+    """Prefer path-walk preprocessed bodies from *module_body_cache*, then index."""
+    if module_body_cache is not None:
+        cached = _cached_module_body_for_row(index, row, cache=module_body_cache)
+        if cached.strip():
+            return cached
+    return _module_body_for_row(index, row)
+
+
 def inst_leaf_exists_in_module(
     index: DesignIndex,
     row: FlatRow,
     inst_leaf: str,
     *,
     body: Optional[str] = None,
+    module_body_cache: Optional[ModuleBodyCache] = None,
 ) -> bool:
     """True when *inst_leaf* names a child instance in *row*'s module RTL."""
     from hierwalk.inst_scan import probe_inst_leaf_regex_fast
 
     if not inst_leaf:
         return False
-    text = body if body is not None else _module_body_for_row(index, row)
-    return probe_inst_leaf_regex_fast(text, inst_leaf)
-
-
-DeclNetCacheKey = Tuple[str, Tuple[Tuple[str, str], ...]]
-DeclNetCache = Dict[DeclNetCacheKey, Set[str]]
-ModuleBodyCache = Dict[str, str]
+    if body is None:
+        body = _resolve_row_module_body(
+            index,
+            row,
+            module_body_cache=module_body_cache,
+        )
+    return probe_inst_leaf_regex_fast(body, inst_leaf)
 
 _CELL_MODULE_BODY_CACHE_PREFIX = "cell:"
 
@@ -542,7 +568,12 @@ def make_cell_module_body_lookup(
 
 
 def _module_body_cache_key(row: FlatRow) -> str:
-    return str(row.file or row.module)
+    """Per (file, module) — a single RTL file may declare many modules."""
+    file_part = str(row.file or "")
+    mod_part = str(row.module or "")
+    if file_part and mod_part:
+        return f"{file_part}|{mod_part}"
+    return file_part or mod_part
 
 
 def _cached_module_body_for_row(
@@ -889,6 +920,7 @@ def resolve_endpoint(
         lookup,
         index=index,
         top=top,
+        module_body_cache=module_body_cache,
     )
     errors: List[str] = []
     row = lookup.get(inst_path) if inst_path else None

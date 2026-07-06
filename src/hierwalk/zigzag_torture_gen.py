@@ -1060,6 +1060,8 @@ def _scope_a_module() -> str:
         module zz_scope_A (
           input logic clk
         );
+          // wire/inst leaf collision torture: net u_b vs child inst u_b
+          wire u_b;
           logic {SCOPE_B_TO_C_BRIDGE};
           logic {SCOPE_C_FROM_B};
           {_scope_nested_ifdef_u_b_inst(SCOPE_B_TO_C_BRIDGE)}

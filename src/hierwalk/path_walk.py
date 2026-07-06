@@ -831,7 +831,9 @@ class PathWalkState:
         return False
 
     def _cached_module_body(self, row: FlatRow) -> str:
-        key = str(row.file or row.module)
+        from hierwalk.connect.shared.endpoints import _module_body_cache_key
+
+        key = _module_body_cache_key(row)
         hit = self._module_body_cache.get(key)
         if hit is not None:
             return hit
@@ -949,6 +951,38 @@ class PathWalkState:
         row = self.rows_by_path.get(parent_path)
         if row is None:
             return False
+
+        stem = remainder.split("[", 1)[0].split(".", 1)[0]
+        if _port_exists(
+            self.index,
+            row,
+            stem,
+            top=self.top,
+            param_ctx=_row_param_ctx_optional(row),
+        ):
+            self._emit_signal_tail(
+                hit=True,
+                kind="port",
+                parent_path=parent_path,
+                tail=remainder,
+                target_path=target_path,
+                row=row,
+                check_ms=0.0,
+            )
+            return True
+
+        for name, _edge in self._expanded_inst_pairs(row):
+            if name == stem or name.startswith(stem + "["):
+                self._emit_signal_tail(
+                    hit=False,
+                    kind="inst-collision",
+                    parent_path=parent_path,
+                    tail=remainder,
+                    target_path=target_path,
+                    row=row,
+                    check_ms=0.0,
+                )
+                return False
 
         kind, check_ms = self._classify_signal_tail(parent_path, remainder, row)
         if kind is not None:
@@ -1631,14 +1665,9 @@ def _walk_target_from_spec(spec: str, state: PathWalkState) -> str:
     if text in lookup:
         return text
     parts = text.split(".")
-    last_idx = len(parts) - 1
-    for i in range(last_idx, 0, -1):
-        if i != last_idx:
-            continue
-        hier = ".".join(parts[:i])
-        row = lookup.get(hier)
-        if row is None:
-            continue
+    hier = ".".join(parts[:-1])
+    row = lookup.get(hier)
+    if row is not None:
         leaf = parts[-1]
         body = state._cached_module_body(row)
         if _port_exists(
