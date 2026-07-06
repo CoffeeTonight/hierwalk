@@ -40,10 +40,19 @@ from hierwalk.zigzag_torture_gen import (
     SCOPE_B,
     SHALLOW_R4,
     TOP,
-    ZZ_COMMON_RTL,
+    ZZ_ANNEX_FL_DIR,
+    ZZ_COLLISION_D_RTL,
+    ZZ_DECOY_RTL,
+    ZZ_IFNDEF_PING_RTL,
+    ZZ_LIB_FL_DIR,
     ZZ_SCOPE_A_RTL,
+    ZZ_SCOPE_FL_DIR,
+    ZZ_SPINE_FL_DIR,
+    ZZ_SCOPE_B_STUB_RTL,
+    ZZ_SCOPE_C_STUB_RTL,
+    ZZ_SCOPE_A_STUB_RTL,
     ZZ_SCOPE_DECOY_RTL,
-    ZZ_SCOPE_STUB_RTL,
+    ZZ_SCOPE_STUB_RTLS,
     build_flat_suite_document,
     write_flat_suite_artifacts,
 )
@@ -168,7 +177,9 @@ def test_round21_scope_rtl_and_filelist_order(suite_bundle):
     assert "module zz_scope_v00" in design.files["zz_scope_v00.v"]
     assert "module zz_scope_v09" in design.files["zz_scope_v09.v"]
     assert "zz_scope_v00 u_av00" in design.files["zz_torture_top.v"]
-    assert "module zz_scope_B;" in design.files[ZZ_SCOPE_STUB_RTL]
+    assert "module zz_scope_B;" in design.files[ZZ_SCOPE_B_STUB_RTL]
+    assert "module zz_scope_A;" in design.files[ZZ_SCOPE_A_STUB_RTL]
+    assert "module zz_scope_C;" in design.files[ZZ_SCOPE_C_STUB_RTL]
     fl_lines = (root / "filelist.f").read_text(encoding="utf-8").splitlines()
     decoy = str((root / ZZ_SCOPE_DECOY_RTL).resolve())
     real_a = str((root / ZZ_SCOPE_A_RTL).resolve())
@@ -179,13 +190,24 @@ def test_round21_scope_rtl_and_filelist_order(suite_bundle):
     assert real_b not in fl_lines
     assert real_c not in fl_lines
     assert real_v00 not in fl_lines
-    fl_dir = root / "zz_scope_fl"
+    assert str((root / "zz_deep_d2.v").resolve()) not in fl_lines
+    assert str((root / ZZ_DECOY_RTL).resolve()) not in fl_lines
+    fl_dir = root / ZZ_SCOPE_FL_DIR
     parent_fl = str((fl_dir / "parent.f").resolve())
+    nested_roots = [
+        str((root / ZZ_SCOPE_FL_DIR / "parent.f").resolve()),
+        str((root / ZZ_LIB_FL_DIR / "root.f").resolve()),
+        str((root / ZZ_SPINE_FL_DIR / "root.f").resolve()),
+        str((root / ZZ_ANNEX_FL_DIR / "root.f").resolve()),
+    ]
+    assert sum(1 for line in fl_lines if line.strip() in {f"-f {p}" for p in nested_roots}) == 4
     assert any(line.strip() == f"-f {parent_fl}" for line in fl_lines)
     assert (fl_dir / "b.f").read_text(encoding="utf-8").splitlines()[0] == real_b
     assert (fl_dir / "c.f").read_text(encoding="utf-8").splitlines()[0] == real_c
     assert (fl_dir / "v00.f").read_text(encoding="utf-8").splitlines()[0] == real_v00
-    assert ZZ_SCOPE_STUB_RTL in (fl_dir / "stub.f").read_text(encoding="utf-8")
+    stub_text = (fl_dir / "stub.f").read_text(encoding="utf-8")
+    for stub_rtl in ZZ_SCOPE_STUB_RTLS:
+        assert stub_rtl in stub_text
     assert "-f" in (fl_dir / "b.f").read_text(encoding="utf-8")
     assert "-f" in (fl_dir / "v09.f").read_text(encoding="utf-8")
 
@@ -195,14 +217,14 @@ def test_round18_rtl_probes_in_generated_files(suite_bundle):
     assert "u_bridge_expr" in design.files["zz_deep_d2.v"]
     assert "u_ifndef_mix" in design.files["zz_deep_d2.v"]
     assert "`ifndef ZZ_IFNDEF_INST_" in design.files["zz_deep_d2.v"]
-    assert "`ifndef ZZ_IFNDEF_PING_BODY_" in design.files["zz_common.v"]
+    assert "`ifndef ZZ_IFNDEF_PING_BODY_" in design.files[ZZ_IFNDEF_PING_RTL]
     assert "chain_in ^ shallow_return" in design.files["zz_deep_d2.v"]
     assert "assign merge_tap" in design.files["zz_deep_d4.v"]
     assert "u_bridge_concat" in design.files["zz_deep_d2.v"]
     assert "gen_pass_flat" in design.files["zz_deep_d5.v"]
     assert "gen_tap0" in design.files["zz_deep_d1.v"]
     assert "u_dw_vendor" in design.files["zz_torture_top.v"]
-    assert "assign dout = din" in design.files["zz_common.v"]
+    assert "assign dout = din" in design.files[ZZ_IFNDEF_PING_RTL]
 
 
 def test_parse_suite_expands_conn_phases_not_cone_io(suite_bundle):
@@ -317,16 +339,19 @@ def test_run_and_verify_zigzag_suite(suite_bundle):
         for line in hier_body.splitlines()[1:]
         if line.strip()
     ]
-    common_hits = {
+    library_rtl_hits = {
         (r["path"], r["module"])
         for r in parsed
         if r.get("status") == "hit"
-        and ZZ_COMMON_RTL in r.get("rtl", "")
+        and any(
+            rtl_name in r.get("rtl", "")
+            for rtl_name in (ZZ_DECOY_RTL, ZZ_COLLISION_D_RTL)
+        )
         and r.get("kind") == "inst"
     }
-    assert (D1_SHADOW, "zz_decoy") in common_hits
-    assert (COLLISION, "zz_collision_d") in common_hits
-    assert (R3_ALT, "zz_decoy") in common_hits
+    assert (D1_SHADOW, "zz_decoy") in library_rtl_hits
+    assert (COLLISION, "zz_collision_d") in library_rtl_hits
+    assert (R3_ALT, "zz_decoy") in library_rtl_hits
     multi_module_issues = [i for i in report.issues if i.kind == "multi_module"]
     assert not multi_module_issues, multi_module_issues
 
@@ -422,7 +447,7 @@ def test_scope_confident_b_resolves_without_recovery(suite_bundle, monkeypatch):
     assert state.mod_db.defer_count() == 0
     files_a = state.mod_db._module_to_files.get("zz_scope_A", ())
     assert any(str(f).endswith(ZZ_SCOPE_A_RTL) for f in files_a)
-    assert any(str(f).endswith(ZZ_SCOPE_STUB_RTL) for f in files_a)
+    assert any(str(f).endswith(ZZ_SCOPE_A_STUB_RTL) for f in files_a)
     files_b = state.mod_db._module_to_files.get("zz_scope_B", ())
     assert any(str(f).endswith("zz_scope_b.v") for f in files_b)
 

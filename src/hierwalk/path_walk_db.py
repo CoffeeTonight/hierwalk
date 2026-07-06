@@ -25,6 +25,12 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Set, Tuple, Union
 
 from hierwalk.ignore_path import source_path_matches
+from hierwalk.ubpat_debug import (
+    ubpat_enabled,
+    ubpat_log,
+    ubpat_relevant,
+    ubpat_search_relevant,
+)
 from hierwalk.index import _module_name_ignored
 from hierwalk.index import (
     DesignIndex,
@@ -490,6 +496,37 @@ class PathWalkModuleDb:
         self._defer_queue: List[DeferredResolve] = []
         self._defer_seen: Set[Tuple[str, str, str, str, Optional[Tuple[str, str]]]] = set()
         self._tier0_pp_scope: str = ""
+        self._ubpat_seek_module: str = ""
+        self._ubpat_seek_inst_leaf: str = ""
+        self._ubpat_seek_anchor: str = ""
+
+    def _ubpat_begin_search(
+        self,
+        *,
+        module_name: str = "",
+        target_module: str = "",
+        inst_leaf: str = "",
+        target_path: str = "",
+        scope_anchor: str = "",
+    ) -> bool:
+        seek = module_name or target_module
+        if not ubpat_search_relevant(
+            module_name=seek,
+            target_module=target_module or seek,
+            inst_leaf=inst_leaf,
+            target_path=target_path,
+            scope_anchor=scope_anchor,
+        ):
+            return False
+        self._ubpat_seek_module = seek
+        self._ubpat_seek_inst_leaf = inst_leaf
+        self._ubpat_seek_anchor = scope_anchor
+        return True
+
+    def _ubpat_end_search(self) -> None:
+        self._ubpat_seek_module = ""
+        self._ubpat_seek_inst_leaf = ""
+        self._ubpat_seek_anchor = ""
 
     @property
     def cache_root(self) -> Optional[Path]:
@@ -1066,14 +1103,30 @@ class PathWalkModuleDb:
     def _note_regex_modules(self, path: str, names: Iterable[str]) -> None:
         key = str(Path(path).resolve())
         file_names = self._file_to_modules.setdefault(key, [])
+        logged_seek = False
         for name in names:
             if not name or self._is_ignored_module(name):
                 continue
             if name not in file_names:
                 file_names.append(name)
             files = self._module_to_files.setdefault(name, [])
-            if key not in files:
+            newly_mapped = key not in files
+            if newly_mapped:
                 files.append(key)
+            if (
+                not logged_seek
+                and self._ubpat_seek_module
+                and name == self._ubpat_seek_module
+            ):
+                ubpat_log(
+                    "MAP-REG",
+                    module=name,
+                    candidate_file=key,
+                    newly=newly_mapped,
+                    map_count=len(files),
+                    scope=self._tier0_pp_scope,
+                )
+                logged_seek = True
 
     def _listing_for_rtl(self, rtl_file: str) -> str:
         if not rtl_file:
@@ -1082,6 +1135,18 @@ class PathWalkModuleDb:
         listing = self._file_via_filelist.get(anchor, "")
         if not listing:
             listing = self._index.filelist_for(anchor) or ""
+        if (
+            self._ubpat_seek_module
+            and self._ubpat_seek_anchor
+            and anchor == str(Path(self._ubpat_seek_anchor).resolve())
+        ):
+            chain = self._index.filelist_chain_for(anchor) or ""
+            ubpat_log(
+                "LISTING",
+                anchor_file=rtl_file,
+                listing=listing,
+                chain=chain,
+            )
         return listing
 
     def _scoped_sources_for_listings(
@@ -1128,7 +1193,17 @@ class PathWalkModuleDb:
                 if child_key not in reachable:
                     reachable.add(child_key)
                     queue.append(child_key)
-        return self._scoped_sources_for_listings(sorted(reachable))
+        pool = self._scoped_sources_for_listings(sorted(reachable))
+        if ubpat_enabled():
+            ubpat_log(
+                "SCOPED-CHILD-POOL",
+                anchor_file=rtl_file,
+                listing=listing or "-",
+                child_fl=len(child_listings),
+                pool=len(pool),
+                files=pool,
+            )
+        return pool
 
     def _scoped_pool_for_policy(
         self,
@@ -1149,6 +1224,14 @@ class PathWalkModuleDb:
             pool = self._scoped_sources_for_rtl(rtl_file)
         cached = tuple(pool)
         self._scoped_pool_cache[cache_key] = cached
+        if ubpat_enabled():
+            ubpat_log(
+                "SCOPED-POOL",
+                policy=policy,
+                anchor_file=rtl_file,
+                pool=len(cached),
+                files=cached,
+            )
         return cached
 
     def _scoped_sources_for_rtl(self, rtl_file: str) -> List[str]:
@@ -1522,6 +1605,22 @@ class PathWalkModuleDb:
                     f"shell={shell_idx} files={len(pending)} "
                     f"center={Path(center).name}"
                 )
+                self._ubpat_begin_search(
+                    module_name=module_name,
+                    inst_leaf=inst_leaf,
+                    scope_anchor=scope_anchor,
+                )
+                if self._ubpat_seek_module:
+                    ubpat_log(
+                        "SEARCH-PROGRESSIVE",
+                        policy=policy,
+                        seek=module_name,
+                        inst_leaf=inst_leaf,
+                        shell=shell_idx,
+                        listing=center,
+                        batch=len(pending),
+                        files=pending,
+                    )
                 self._tier0_scan_sources(
                     pending,
                     target_module=self._tier0_target_module(
@@ -1654,14 +1753,41 @@ class PathWalkModuleDb:
             and s not in conf_pool
         ]
         if not pending:
+            if ubpat_search_relevant(
+                module_name=module_name,
+                inst_leaf=inst_leaf,
+                scope_anchor=scope_anchor,
+            ):
+                ubpat_log(
+                    "SEARCH-RECOVERY-POOL",
+                    seek=module_name,
+                    inst_leaf=inst_leaf,
+                    anchor_file=scope_anchor,
+                    pool=0,
+                    reason="no-pending-expand",
+                )
             return []
-        return self._sort_files_by_resolve_rank(
+        ranked = self._sort_files_by_resolve_rank(
             pending,
             scope_anchor=scope_anchor,
             module_name=module_name,
             inst_leaf=inst_leaf,
             fl_center=fl_center,
         )
+        if ubpat_search_relevant(
+            module_name=module_name,
+            inst_leaf=inst_leaf,
+            scope_anchor=scope_anchor,
+        ):
+            ubpat_log(
+                "SEARCH-RECOVERY-POOL",
+                seek=module_name,
+                inst_leaf=inst_leaf,
+                anchor_file=scope_anchor,
+                pool=len(ranked),
+                files=ranked,
+            )
+        return ranked
 
     def _tier0_queue_seed_sources(
         self,
@@ -1676,9 +1802,31 @@ class PathWalkModuleDb:
         if scope_anchor:
             pool = list(self._scoped_pool_for_policy(scope_anchor, policy=policy))
             if pool:
+                if self._ubpat_seek_module or ubpat_search_relevant(scope_anchor=scope_anchor):
+                    ubpat_log(
+                        "SEARCH-SEED",
+                        via="scoped-pool",
+                        policy=policy,
+                        anchor_file=scope_anchor,
+                        pool=len(pool),
+                        files=pool,
+                        seek=self._ubpat_seek_module,
+                        inst_leaf=self._ubpat_seek_inst_leaf,
+                    )
                 return pool
             anchor = str(Path(scope_anchor).resolve())
             if anchor in self._sources:
+                if self._ubpat_seek_module or ubpat_search_relevant(scope_anchor=scope_anchor):
+                    ubpat_log(
+                        "SEARCH-SEED",
+                        via="anchor-only",
+                        policy=policy,
+                        anchor_file=scope_anchor,
+                        pool=1,
+                        files=[anchor],
+                        seek=self._ubpat_seek_module,
+                        inst_leaf=self._ubpat_seek_inst_leaf,
+                    )
                 return [anchor]
             return []
 
@@ -1686,10 +1834,31 @@ class PathWalkModuleDb:
         if center:
             scoped = self._scoped_sources_for_listings([center])
             if scoped:
+                if self._ubpat_seek_module:
+                    ubpat_log(
+                        "SEARCH-SEED",
+                        via="fl-center",
+                        policy=policy,
+                        listing=center,
+                        pool=len(scoped),
+                        files=scoped,
+                        seek=self._ubpat_seek_module,
+                        inst_leaf=self._ubpat_seek_inst_leaf,
+                    )
                 return scoped
 
         if policy == RESOLVE_RECOVERY and pw_tier0_global_enabled():
-            return list(self._sources)
+            pool = list(self._sources)
+            if self._ubpat_seek_module:
+                ubpat_log(
+                    "SEARCH-SEED",
+                    via="global-recovery",
+                    policy=policy,
+                    pool=len(pool),
+                    seek=self._ubpat_seek_module,
+                    inst_leaf=self._ubpat_seek_inst_leaf,
+                )
+            return pool
         return []
 
     def _tier0_regex_queue_scan(
@@ -1704,6 +1873,11 @@ class PathWalkModuleDb:
         """Proven tier-0 path: ranked scoped queue, batched parallel, early exit on hit."""
         from hierwalk.perf import pw_module_file_cap, pw_tier0_global_scan_max
 
+        self._ubpat_begin_search(
+            module_name=module_name,
+            inst_leaf=inst_leaf,
+            scope_anchor=scope_anchor,
+        )
         self._regex_queue = []
         pending = [
             s
@@ -1715,6 +1889,15 @@ class PathWalkModuleDb:
             if s not in self._regex_scanned and s not in self._tier0_inflight
         ]
         if not pending:
+            if self._ubpat_seek_module:
+                ubpat_log(
+                    "SEARCH-QUEUE-EMPTY",
+                    policy=policy,
+                    seek=module_name,
+                    inst_leaf=inst_leaf,
+                    anchor_file=scope_anchor,
+                )
+            self._ubpat_end_search()
             return
         pending = self._sort_files_by_resolve_rank(
             pending,
@@ -1724,6 +1907,21 @@ class PathWalkModuleDb:
             fl_center=fl_center,
         )
         self._regex_queue = pending
+        if self._ubpat_seek_module:
+            ubpat_log(
+                "SEARCH-QUEUE",
+                policy=policy,
+                seek=module_name,
+                inst_leaf=inst_leaf,
+                anchor_file=scope_anchor,
+                target_module=self._tier0_target_module(
+                    module_name,
+                    policy=policy,
+                    inst_leaf=inst_leaf,
+                ),
+                queued=len(pending),
+                files=pending,
+            )
 
         workers = _resolve_pw_db_jobs(self._jobs, len(self._sources))
         target = self._tier0_target_module(
@@ -1773,7 +1971,26 @@ class PathWalkModuleDb:
                 and policy == RESOLVE_CONFIDENT
                 and not inst_leaf
             ):
+                if self._ubpat_seek_module:
+                    ubpat_log(
+                        "TIER0-EARLY-STOP",
+                        seek=module_name,
+                        inst_leaf=inst_leaf,
+                        reason="first-map-confident",
+                    )
                 break
+        if self._ubpat_seek_module:
+            mapped = list(self._module_to_files.get(module_name, ()))
+            ubpat_log(
+                "SEARCH-QUEUE-DONE",
+                policy=policy,
+                seek=module_name,
+                inst_leaf=inst_leaf,
+                scanned=files_scanned,
+                mapped=len(mapped),
+                files=mapped,
+            )
+        self._ubpat_end_search()
 
     @staticmethod
     def _normalize_name_hint(name: str) -> str:
@@ -1850,7 +2067,25 @@ class PathWalkModuleDb:
             name_sc = self._rtl_name_similarity(f, hints) if hints else 0
             return (prox, -name_sc, f)
 
-        return sorted(ordered, key=rank)
+        ranked = sorted(ordered, key=rank)
+        if self._ubpat_seek_module and (
+            module_name == self._ubpat_seek_module
+            or inst_leaf == self._ubpat_seek_inst_leaf
+        ):
+            top = ranked[:8]
+            detail = ",".join(
+                f"{Path(f).name}:{rank(f)[0]}/{rank(f)[1]}"
+                for f in top
+            )
+            ubpat_log(
+                "RANK",
+                seek=module_name,
+                inst_leaf=inst_leaf,
+                anchor_file=scope_anchor,
+                center=fl_center,
+                order=detail,
+            )
+        return ranked
 
     def _sort_by_filelist_proximity(
         self,
@@ -1876,6 +2111,13 @@ class PathWalkModuleDb:
     ) -> str:
         """Recovery and instance disambiguation scan past the first decl hit."""
         if inst_leaf:
+            if ubpat_relevant(inst_leaf=inst_leaf, module_name=module_name):
+                ubpat_log(
+                    "TIER0-OPEN",
+                    seek=module_name,
+                    inst_leaf=inst_leaf,
+                    reason="scan-past-first-map",
+                )
             return ""
         if (
             policy == RESOLVE_RECOVERY
@@ -1909,34 +2151,41 @@ class PathWalkModuleDb:
             return cached
         conf = set(self._scoped_pool_for_policy(scope_anchor, policy=RESOLVE_CONFIDENT))
         rec = set(self._scoped_pool_for_policy(scope_anchor, policy=RESOLVE_RECOVERY))
+        result = False
         if rec != conf:
-            self._should_retry_cache[anchor_key] = True
-            return True
-        if len(self._sources) <= len(conf):
-            self._should_retry_cache[anchor_key] = False
-            return False
-        extra = set(self._sources) - conf
-        if not extra:
-            self._should_retry_cache[anchor_key] = False
-            return False
-        listing = self._listing_for_rtl(scope_anchor)
-        if not listing:
-            self._should_retry_cache[anchor_key] = False
-            return False
-        listing_key = str(Path(listing).resolve())
-        for anc in self._ancestor_listings(listing):
-            anc_key = str(Path(anc).resolve())
-            if anc_key == listing_key:
-                continue
-            if self._sources_for_listing(anc) & extra:
-                self._should_retry_cache[anchor_key] = True
-                return True
-        for sibling_key in self._listing_siblings.get(listing_key, ()):
-            if self._sources_for_listing(sibling_key) & extra:
-                self._should_retry_cache[anchor_key] = True
-                return True
-        self._should_retry_cache[anchor_key] = False
-        return False
+            result = True
+        elif len(self._sources) > len(conf):
+            extra = set(self._sources) - conf
+            if extra:
+                listing = self._listing_for_rtl(scope_anchor)
+                if listing:
+                    listing_key = str(Path(listing).resolve())
+                    for anc in self._ancestor_listings(listing):
+                        anc_key = str(Path(anc).resolve())
+                        if anc_key == listing_key:
+                            continue
+                        if self._sources_for_listing(anc) & extra:
+                            result = True
+                            break
+                    if not result:
+                        for sibling_key in self._listing_siblings.get(
+                            listing_key, ()
+                        ):
+                            if self._sources_for_listing(sibling_key) & extra:
+                                result = True
+                                break
+        self._should_retry_cache[anchor_key] = result
+        if self._ubpat_seek_anchor and anchor_key == str(
+            Path(self._ubpat_seek_anchor).resolve()
+        ):
+            ubpat_log(
+                "RECOVERY-GATE",
+                anchor_file=scope_anchor,
+                retry=result,
+                conf_pool=len(conf),
+                rec_pool=len(rec),
+            )
+        return result
 
     def _confident_tier0_extra_sources(
         self,
@@ -1967,6 +2216,15 @@ class PathWalkModuleDb:
             if src not in conf and src not in seen:
                 seen.add(src)
                 out.append(src)
+        if self._ubpat_seek_module and out:
+            ubpat_log(
+                "EXTRA-SOURCES",
+                anchor_file=scope_anchor,
+                seek=self._ubpat_seek_module,
+                inst_leaf=self._ubpat_seek_inst_leaf,
+                extra=len(out),
+                files=out,
+            )
         return out
 
     def _needs_confident_ancestor_tier0_expand(
@@ -1983,6 +2241,14 @@ class PathWalkModuleDb:
         mapped = {str(Path(f).resolve()) for f in self._module_to_files.get(module_name, ())}
         conf = {str(Path(s).resolve()) for s in scoped_pool}
         if mapped and not mapped <= conf:
+            if ubpat_relevant(inst_leaf=inst_leaf, module_name=module_name):
+                ubpat_log(
+                    "ANCESTOR-SKIP",
+                    seek=module_name,
+                    inst_leaf=inst_leaf,
+                    anchor_file=scope_anchor,
+                    reason="mapped-outside-conf-pool",
+                )
             return False
         return bool(self._confident_tier0_extra_sources(scope_anchor, scoped_pool))
 
@@ -2009,6 +2275,15 @@ class PathWalkModuleDb:
         ]
         if not extra:
             return
+        if ubpat_relevant(inst_leaf=inst_leaf, module_name=module_name):
+            ubpat_log(
+                "ANCESTOR-EXPAND",
+                module=module_name,
+                inst_leaf=inst_leaf,
+                anchor_file=scope_anchor,
+                extra=len(extra),
+                files=extra,
+            )
         saved_scope = self._tier0_pp_scope
         self._tier0_pp_scope = f"scoped:confident-ancestor:{scope_anchor}"
         # Scan every dup decl file; do not stop after child-FL stub already mapped.
@@ -2318,6 +2593,16 @@ class PathWalkModuleDb:
         if not pending:
             self._tier0_drain_completed(block=False)
             return 0
+        if self._ubpat_seek_module:
+            ubpat_log(
+                "SEARCH-SCAN",
+                seek=self._ubpat_seek_module,
+                inst_leaf=self._ubpat_seek_inst_leaf,
+                target_module=target_module,
+                batch=len(pending),
+                files=pending,
+                scope=self._tier0_pp_scope,
+            )
 
         if self._tier0_scan_one_at_a_time(target_module=target_module):
             added = 0
@@ -2371,6 +2656,16 @@ class PathWalkModuleDb:
                 names=len(names),
                 detail=f"disk {self._tier0_pp_scope}".strip(),
             )
+            if self._ubpat_seek_module:
+                ubpat_log(
+                    "SEARCH-FILE",
+                    seek=self._ubpat_seek_module,
+                    inst_leaf=self._ubpat_seek_inst_leaf,
+                    candidate_file=key,
+                    found=names or ["(none)"],
+                    scope=self._tier0_pp_scope,
+                    via="cache",
+                )
             return names
 
         t0 = time.perf_counter()
@@ -2392,6 +2687,15 @@ class PathWalkModuleDb:
             names=len(names),
             detail=f"sync {self._tier0_pp_scope}".strip(),
         )
+        if self._ubpat_seek_module:
+            ubpat_log(
+                "SEARCH-FILE",
+                seek=self._ubpat_seek_module,
+                inst_leaf=self._ubpat_seek_inst_leaf,
+                candidate_file=key,
+                found=names or ["(none)"],
+                scope=self._tier0_pp_scope,
+            )
         return names
 
     def _scan_remaining_sources_tier0(
@@ -2468,6 +2772,8 @@ class PathWalkModuleDb:
         preferred = self._prefer_file.get(module_name)
         if preferred and preferred in ordered:
             ordered = [preferred] + [f for f in ordered if f != preferred]
+        in_scope: List[str] = []
+        out_scope: List[str] = []
         if scope_anchor:
             if scope_pool is None:
                 scope_pool = self._scoped_pool_for_policy(scope_anchor, policy=policy)
@@ -2506,6 +2812,17 @@ class PathWalkModuleDb:
                 module_name=module_name,
                 inst_leaf=inst_leaf,
             )
+        if ubpat_relevant(inst_leaf=inst_leaf, module_name=module_name):
+            ubpat_log(
+                "SORT-PICK",
+                policy=policy,
+                module=module_name,
+                inst_leaf=inst_leaf,
+                anchor_file=scope_anchor,
+                in_scope=len(in_scope),
+                out_scope=len(out_scope),
+                pick=ordered[:6],
+            )
         return ordered
 
     def _ensure_regex_candidates(
@@ -2528,6 +2845,26 @@ class PathWalkModuleDb:
 
         if scope_anchor:
             scoped_pool = self._scoped_pool_for_policy(scope_anchor, policy=policy)
+            self._ubpat_begin_search(
+                module_name=module_name,
+                inst_leaf=inst_leaf,
+                scope_anchor=scope_anchor,
+            )
+            if self._ubpat_seek_module:
+                ubpat_log(
+                    "SEARCH-TIER0",
+                    policy=policy,
+                    seek=module_name,
+                    inst_leaf=inst_leaf,
+                    anchor_file=scope_anchor,
+                    target_module=self._tier0_target_module(
+                        module_name,
+                        policy=policy,
+                        inst_leaf=inst_leaf,
+                    ),
+                    pool=len(scoped_pool or ()),
+                    files=scoped_pool or (),
+                )
             if scoped_pool:
                 self._tier0_scan_sources(
                     scoped_pool,
@@ -2550,7 +2887,7 @@ class PathWalkModuleDb:
                         policy=policy,
                     )
                     files = list(self._module_to_files.get(module_name, []))
-                    return self._sort_module_files(
+                    ranked = self._sort_module_files(
                         module_name,
                         files,
                         scope_anchor=scope_anchor,
@@ -2558,6 +2895,29 @@ class PathWalkModuleDb:
                         scope_pool=scope_pool,
                         inst_leaf=inst_leaf,
                     )
+                    if ubpat_relevant(inst_leaf=inst_leaf, module_name=module_name):
+                        ubpat_log(
+                            "TIER0-MAP",
+                            policy=policy,
+                            module=module_name,
+                            inst_leaf=inst_leaf,
+                            anchor_file=scope_anchor,
+                            mapped=len(files),
+                            ranked=len(ranked),
+                            files=ranked,
+                        )
+                    self._ubpat_end_search()
+                    return ranked
+                if ubpat_relevant(inst_leaf=inst_leaf, module_name=module_name):
+                    ubpat_log(
+                        "TIER0-MISS",
+                        policy=policy,
+                        module=module_name,
+                        inst_leaf=inst_leaf,
+                        anchor_file=scope_anchor,
+                        reason="no-regex-map-after-scoped-scan",
+                    )
+                self._ubpat_end_search()
                 return []
 
         center_listing = self._infer_root_filelist()
@@ -2678,6 +3038,21 @@ class PathWalkModuleDb:
             policy=policy,
             inst_leaf=inst_leaf,
         )
+        if ubpat_search_relevant(
+            module_name=module_name,
+            inst_leaf=inst_leaf,
+            scope_anchor=scope_anchor,
+        ):
+            ubpat_log(
+                "SEARCH-CANDIDATES",
+                policy=policy,
+                seek=module_name,
+                inst_leaf=inst_leaf,
+                anchor_file=scope_anchor,
+                avoid_file=avoid_file,
+                count=len(candidates),
+                files=candidates,
+            )
         if not candidates:
             return []
         avoid = str(Path(avoid_file).resolve()) if avoid_file else ""
@@ -3066,6 +3441,14 @@ class PathWalkModuleDb:
         self._index._rebuild_file_modules()
         self._note_regex_modules(key, [parent_module, child])
         self._prefer_file[parent_module] = key
+        if ubpat_relevant(inst_leaf=edge.inst_name, module_name=parent_module):
+            ubpat_log(
+                "PREFER",
+                parent=parent_module,
+                inst_leaf=edge.inst_name,
+                rtl_file=key,
+                child=edge.child_module,
+            )
         self._register_inst_edges(parent_module, parent_ctx, instances)
         self._snapshot_dirty = True
 
@@ -3222,11 +3605,37 @@ class PathWalkModuleDb:
         if self._is_ignored_module(module_name):
             return False
 
+        inst_leaf = expect_inst[1] if expect_inst is not None else ""
+        self._ubpat_begin_search(
+            module_name=module_name,
+            inst_leaf=inst_leaf,
+            target_path=target_path,
+            scope_anchor=scope_anchor,
+        )
+        if self._ubpat_seek_module:
+            ubpat_log(
+                "SEARCH-MODULE",
+                policy=policy,
+                seek=module_name,
+                inst_leaf=inst_leaf,
+                target=target_path,
+                anchor_file=scope_anchor,
+                expect_inst=expect_inst,
+            )
+
         if self._index_has_resolved_module(
             module_name,
             expect_inst=expect_inst,
             parent_ctx=parent_ctx,
         ):
+            if self._ubpat_seek_module:
+                ubpat_log(
+                    "SEARCH-MODULE-HIT",
+                    via="index-cache",
+                    seek=module_name,
+                    inst_leaf=inst_leaf,
+                )
+            self._ubpat_end_search()
             return True
 
         rec = self._index.get_module(module_name)
@@ -3264,6 +3673,15 @@ class PathWalkModuleDb:
             + scope_note
         )
         if policy == RESOLVE_CONFIDENT and scope_anchor and not candidates:
+            if self._ubpat_seek_module:
+                ubpat_log(
+                    "SEARCH-MODULE-MISS",
+                    reason="no-tier0-in-child-fl",
+                    seek=module_name,
+                    inst_leaf=inst_leaf,
+                    target=target_path,
+                    anchor_file=scope_anchor,
+                )
             self._enqueue_defer(
                 DeferredResolve(
                     kind="module",
@@ -3276,6 +3694,7 @@ class PathWalkModuleDb:
                     reason="no-tier0-in-child-fl",
                 )
             )
+            self._ubpat_end_search()
             return False
 
         tried: Set[str] = set()
@@ -3288,6 +3707,14 @@ class PathWalkModuleDb:
                 modules = self.tier1_scan_file(fpath)
                 hit = modules.get(module_name)
                 if hit is None:
+                    if self._ubpat_seek_module:
+                        ubpat_log(
+                            "SEARCH-MODULE-TRY",
+                            result="no-module",
+                            seek=module_name,
+                            inst_leaf=inst_leaf,
+                            candidate_file=fpath,
+                        )
                     self._trace(
                         f"pw-db   miss {Path(fpath).name}: no module {module_name!r} after tier1"
                     )
@@ -3319,7 +3746,16 @@ class PathWalkModuleDb:
                 self._prefer_file[module_name] = fpath
                 self._trace(f"pw-db   hit {Path(fpath).name} for module {module_name!r}")
                 if self._index.get_module(module_name) is not None:
+                    if self._ubpat_seek_module:
+                        ubpat_log(
+                            "SEARCH-MODULE-HIT",
+                            via="tier1",
+                            seek=module_name,
+                            inst_leaf=inst_leaf,
+                            candidate_file=fpath,
+                        )
                     self.write_module_index_snapshot()
+                    self._ubpat_end_search()
                     return True
             if pass_idx == 0:
                 inst_leaf = expect_inst[1] if expect_inst is not None else ""
@@ -3389,6 +3825,15 @@ class PathWalkModuleDb:
             break
 
         if policy == RESOLVE_CONFIDENT and scope_anchor:
+            if self._ubpat_seek_module:
+                ubpat_log(
+                    "SEARCH-MODULE-MISS",
+                    reason="tier1-miss-child-fl",
+                    seek=module_name,
+                    inst_leaf=inst_leaf,
+                    target=target_path,
+                    anchor_file=scope_anchor,
+                )
             self._enqueue_defer(
                 DeferredResolve(
                     kind="module",
@@ -3401,13 +3846,17 @@ class PathWalkModuleDb:
                     reason="tier1-miss-child-fl",
                 )
             )
+            self._ubpat_end_search()
             return False
 
         if expect_inst is not None:
+            self._ubpat_end_search()
             return False
-        return self._index.get_module(module_name) is not None and not _is_placeholder_module(
+        ok = self._index.get_module(module_name) is not None and not _is_placeholder_module(
             self._index.get_module(module_name)
         )
+        self._ubpat_end_search()
+        return ok
 
     def resolve_child_edge(
         self,
@@ -3424,6 +3873,19 @@ class PathWalkModuleDb:
         avoid = current_file
         indexed = self.lookup_inst_edge(parent_module, parent_ctx, inst_leaf)
         if indexed is not None:
+            if ubpat_relevant(
+                inst_leaf=inst_leaf,
+                target_path=target_path,
+                module_name=parent_module,
+            ):
+                ubpat_log(
+                    "LOOKUP-EDGE",
+                    via="inst-index",
+                    parent=parent_module,
+                    inst_leaf=inst_leaf,
+                    child=indexed.child_module,
+                    target=target_path,
+                )
             return indexed
         if self._index_has_resolved_module(
             parent_module,
@@ -3444,6 +3906,20 @@ class PathWalkModuleDb:
                     if rec.file_path:
                         self._prefer_file[parent_module] = str(
                             Path(rec.file_path).resolve()
+                        )
+                    if ubpat_relevant(
+                        inst_leaf=inst_leaf,
+                        target_path=target_path,
+                        module_name=parent_module,
+                    ):
+                        ubpat_log(
+                            "LOOKUP-EDGE",
+                            via="index-resolved",
+                            parent=parent_module,
+                            inst_leaf=inst_leaf,
+                            child=edge.child_module,
+                            rtl_file=rec.file_path or "",
+                            target=target_path,
                         )
                     return edge
 
@@ -3468,6 +3944,21 @@ class PathWalkModuleDb:
             f"pw-db edge policy={policy} {parent_module}.{inst_leaf} "
             f"candidates={len(candidates)}{scope_note}"
         )
+        if ubpat_relevant(
+            inst_leaf=inst_leaf,
+            target_path=target_path,
+            module_name=parent_module,
+        ):
+            ubpat_log(
+                "EDGE-START",
+                policy=policy,
+                parent=parent_module,
+                inst_leaf=inst_leaf,
+                target=target_path,
+                anchor_file=scope_anchor,
+                candidates=len(candidates),
+                files=candidates,
+            )
         tried: Set[str] = set()
         if avoid:
             tried.add(avoid)
@@ -3492,6 +3983,19 @@ class PathWalkModuleDb:
                 self._warm_tier1_background(avoid)
                 return selective
         if policy == RESOLVE_CONFIDENT and scope_anchor and not candidates:
+            if ubpat_relevant(
+                inst_leaf=inst_leaf,
+                target_path=target_path,
+                module_name=parent_module,
+            ):
+                ubpat_log(
+                    "DEFER",
+                    reason="no-tier0-in-child-fl",
+                    parent=parent_module,
+                    inst_leaf=inst_leaf,
+                    target=target_path,
+                    anchor_file=scope_anchor,
+                )
             self._enqueue_defer(
                 DeferredResolve(
                     kind="edge",
@@ -3526,6 +4030,20 @@ class PathWalkModuleDb:
                         selective,
                         parent_ctx=parent_ctx,
                     )
+                    if ubpat_relevant(
+                        inst_leaf=inst_leaf,
+                        target_path=target_path,
+                        module_name=parent_module,
+                    ):
+                        ubpat_log(
+                            "EDGE-HIT",
+                            via="selective",
+                            parent=parent_module,
+                            inst_leaf=inst_leaf,
+                            candidate_file=fpath,
+                            child=selective.child_module,
+                            target=target_path,
+                        )
                     self._trace(
                         f"pw-db   edge selective hit {parent_module}.{inst_leaf} "
                         f"via {Path(fpath).name} -> child {selective.child_module!r}"
@@ -3537,6 +4055,18 @@ class PathWalkModuleDb:
                     parent_module,
                     inst_leaf,
                 ):
+                    if ubpat_relevant(
+                        inst_leaf=inst_leaf,
+                        target_path=target_path,
+                        module_name=parent_module,
+                    ):
+                        ubpat_log(
+                            "EDGE-SKIP",
+                            reason="inst-absent-regex",
+                            parent=parent_module,
+                            inst_leaf=inst_leaf,
+                            candidate_file=fpath,
+                        )
                     self._trace(
                         f"pw-db   edge skip tier1 {Path(fpath).name}: "
                         f"{parent_module}.{inst_leaf} absent (regex)"
@@ -3566,6 +4096,20 @@ class PathWalkModuleDb:
                 if edge is not None:
                     self._apply_file_modules(fpath, modules)
                     self._prefer_file[parent_module] = fpath
+                    if ubpat_relevant(
+                        inst_leaf=inst_leaf,
+                        target_path=target_path,
+                        module_name=parent_module,
+                    ):
+                        ubpat_log(
+                            "EDGE-HIT",
+                            via="tier1",
+                            parent=parent_module,
+                            inst_leaf=inst_leaf,
+                            candidate_file=fpath,
+                            child=edge.child_module,
+                            target=target_path,
+                        )
                     self._trace(
                         f"pw-db   edge hit {parent_module}.{inst_leaf} "
                         f"via {Path(fpath).name} -> child {edge.child_module!r}"
@@ -3575,6 +4119,19 @@ class PathWalkModuleDb:
                 insts = ", ".join(
                     f"{e.inst_name}->{e.child_module}" for e in tier_edges[:12]
                 )
+                if ubpat_relevant(
+                    inst_leaf=inst_leaf,
+                    target_path=target_path,
+                    module_name=parent_module,
+                ):
+                    ubpat_log(
+                        "EDGE-MISS",
+                        reason="no-inst-after-tier1",
+                        parent=parent_module,
+                        inst_leaf=inst_leaf,
+                        candidate_file=fpath,
+                        have=insts or "(none)",
+                    )
                 self._trace(
                     f"pw-db   edge miss {Path(fpath).name}: "
                     f"no inst {inst_leaf!r} (have: {insts or '(none)'})"
@@ -3647,6 +4204,19 @@ class PathWalkModuleDb:
             break
 
         if policy == RESOLVE_CONFIDENT and scope_anchor:
+            if ubpat_relevant(
+                inst_leaf=inst_leaf,
+                target_path=target_path,
+                module_name=parent_module,
+            ):
+                ubpat_log(
+                    "EDGE-DEFER",
+                    reason="no-edge-in-child-fl",
+                    parent=parent_module,
+                    inst_leaf=inst_leaf,
+                    target=target_path,
+                    anchor_file=scope_anchor,
+                )
             self._enqueue_defer(
                 DeferredResolve(
                     kind="edge",

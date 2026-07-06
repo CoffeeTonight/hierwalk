@@ -85,7 +85,34 @@ def vuln_annex_rtl(*, decoys: int = 4) -> str:
     return _rename_vuln_modules(body).strip()
 
 
-def matrix_annex_rtl() -> str:
+_MATRIX_CELL_MODULES: Tuple[str, ...] = (
+    "A",
+    "B",
+    "STUB",
+    "WRAP",
+    "CPUSYSTEM_TOP",
+    "BCD",
+    "TINY",
+    "LEAF",
+    "ALT",
+    "IFG_CHILD",
+    "NEST",
+    "DEF",
+    "ARR",
+)
+
+
+def _matrix_cell_rtl_name(cell: str) -> str:
+    return f"zz_mx_{cell}.v"
+
+
+def _matrix_cell_module(cell: str) -> str:
+    if cell == "DEF":
+        return "module DEF(input CLK, output QW); endmodule"
+    return f"module {cell}; endmodule"
+
+
+def _matrix_soc_module() -> str:
     return textwrap.dedent(
         """
         `define ZZ_MX_CELL LEAF
@@ -168,25 +195,35 @@ def matrix_annex_rtl() -> str:
             end
           endgenerate
         endmodule
-
-        module A; endmodule
-        module B; endmodule
-        module STUB; endmodule
-        module WRAP; endmodule
-        module CPUSYSTEM_TOP; endmodule
-        module BCD; endmodule
-        module TINY; endmodule
-        module LEAF; endmodule
-        module ALT; endmodule
-        module IFG_CHILD; endmodule
-        module NEST; endmodule
-        module DEF(input CLK, output QW); endmodule
-        module ARR; endmodule
-
-        bind zz_matrix_soc ghost u_ghost ();
-        module ghost; endmodule
         """
     ).strip()
+
+
+def matrix_annex_files() -> Dict[str, str]:
+    """Matrix annex RTL with one ``module`` per ``.v`` file."""
+    files: Dict[str, str] = {
+        ZZ_MATRIX_ANNEX_RTL: _matrix_soc_module(),
+        "zz_mx_ghost.v": textwrap.dedent(
+            """
+            module ghost;
+            endmodule
+
+            bind zz_matrix_soc ghost u_ghost ();
+            """
+        ).strip(),
+    }
+    for cell in _MATRIX_CELL_MODULES:
+        files[_matrix_cell_rtl_name(cell)] = _matrix_cell_module(cell)
+    return files
+
+
+def matrix_annex_rtl() -> str:
+    """Legacy single-file bundle (tests only); prefer :func:`matrix_annex_files`."""
+    parts = [matrix_annex_files()[ZZ_MATRIX_ANNEX_RTL]]
+    for cell in _MATRIX_CELL_MODULES:
+        parts.append(matrix_annex_files()[_matrix_cell_rtl_name(cell)])
+    parts.append(matrix_annex_files()["zz_mx_ghost.v"])
+    return "\n\n".join(parts)
 
 
 def torture_top_annex_insts(torture_top: str) -> str:

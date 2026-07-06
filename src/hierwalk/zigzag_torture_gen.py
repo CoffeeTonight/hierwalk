@@ -9,19 +9,20 @@ Topology: ``zz_torture_top.u_zigzag`` with sibling deep arm (d1..d5) and shallow
 from __future__ import annotations
 
 import json
+import re
 import textwrap
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from hierwalk.connect.shared.expand import build_expand_meta
 from hierwalk.connect.shared.request import ConnectivityCheck, ConnectivityRequest
 from hierwalk.suite_conn_policy import CONN_VERDICT_SKIP_IDS
 from hierwalk.zigzag_annex_gen import (
     ZZ_MATRIX_ANNEX_RTL,
+    matrix_annex_files,
     matrix_hierarchy_specs,
     ZZ_VULN_ANNEX_RTL,
-    matrix_annex_rtl,
     matrix_hierarchy_suite_spec,
     torture_top_annex_insts,
     vuln_annex_checks,
@@ -49,13 +50,36 @@ SCOPE_C = f"{SCOPE_ARM}.u_c"
 SCOPE_B_TO_C_BRIDGE = "zz_b_to_c"
 SCOPE_C_FROM_B = "zz_c_from_b"
 BLACKBOX = f"{HUB}.u_bb"
-ZZ_COMMON_RTL = "zz_common.v"
+ZZ_DECOY_LEAF_RTL = "zz_decoy_leaf.v"
+ZZ_DECOY_RTL = "zz_decoy.v"
+ZZ_IFNDEF_PING_RTL = "zz_ifndef_ping.v"
+ZZ_BRIDGE_PING_RTL = "zz_bridge_ping.v"
+ZZ_BRIDGE_PONG_RTL = "zz_bridge_pong.v"
+ZZ_Y_FORK_RTL = "zz_y_fork.v"
+ZZ_Y_MERGE_RTL = "zz_y_merge.v"
+ZZ_BRIDGE_NARROW_RTL = "zz_bridge_narrow.v"
+ZZ_EMPTY_MULTI_RTL = "zz_empty_multi.v"
+ZZ_BLACKBOX_RTL = "zz_blackbox.v"
+ZZ_LEAF_W_E_RTL = "zz_leaf_w_e.v"
+ZZ_COLLISION_D_RTL = "zz_collision_d.v"
+ZZ_FAKE_DEEP_ARM_RTL = "zz_fake_deep_arm.v"
+ZZ_FAKE_D1_RTL = "zz_fake_d1.v"
 ZZ_SCOPE_DECOY_RTL = "zz_scope_decoy.v"
 ZZ_SCOPE_A_RTL = "zz_scope_a.v"
 ZZ_SCOPE_B_RTL = "zz_scope_b.v"
 ZZ_SCOPE_C_RTL = "zz_scope_c.v"
-ZZ_SCOPE_STUB_RTL = "zz_scope_stub.v"
+ZZ_SCOPE_A_STUB_RTL = "zz_scope_a_child_stub.v"
+ZZ_SCOPE_B_STUB_RTL = "zz_scope_b_child_stub.v"
+ZZ_SCOPE_C_STUB_RTL = "zz_scope_c_child_stub.v"
+ZZ_SCOPE_STUB_RTLS = (
+    ZZ_SCOPE_A_STUB_RTL,
+    ZZ_SCOPE_B_STUB_RTL,
+    ZZ_SCOPE_C_STUB_RTL,
+)
 ZZ_SCOPE_FL_DIR = "zz_scope_fl"
+ZZ_LIB_FL_DIR = "zz_lib_fl"
+ZZ_SPINE_FL_DIR = "zz_spine_fl"
+ZZ_ANNEX_FL_DIR = "zz_annex_fl"
 SCOPE_VARIANT_COUNT = 10
 
 
@@ -69,7 +93,7 @@ ZZ_SCOPE_FL_RTL = frozenset(
         ZZ_SCOPE_A_RTL,
         ZZ_SCOPE_B_RTL,
         ZZ_SCOPE_C_RTL,
-        ZZ_SCOPE_STUB_RTL,
+        *ZZ_SCOPE_STUB_RTLS,
         *(_scope_variant_rtl_name(i) for i in range(SCOPE_VARIANT_COUNT)),
     }
 )
@@ -259,14 +283,20 @@ def _blackbox_module() -> str:
     ).strip()
 
 
-def _collision_module() -> str:
+def _collision_leaf_module() -> str:
     return textwrap.dedent(
         """
         module zz_leaf_w_e;
           wire stub;
           assign stub = 1'b0;
         endmodule
+        """
+    ).strip()
 
+
+def _collision_d_module() -> str:
+    return textwrap.dedent(
+        """
         module zz_collision_d (
           output logic w_e
         );
@@ -277,7 +307,7 @@ def _collision_module() -> str:
     ).strip()
 
 
-def _fake_deep_decoy_file() -> str:
+def _fake_deep_arm_module() -> str:
     """Looks like the real deep arm but is never instantiated."""
     return textwrap.dedent(
         """
@@ -290,7 +320,13 @@ def _fake_deep_decoy_file() -> str:
           zz_fake_d1 d1_shadow (.clk(clk), .a(a), .mid_tap(mid_tap));
           zz_fake_d1 u_next_decoy (.clk(clk), .a(a), .mid_tap());
         endmodule
+        """
+    ).strip()
 
+
+def _fake_d1_module() -> str:
+    return textwrap.dedent(
+        """
         module zz_fake_d1 (
           input  logic clk,
           input  logic [2:0][3:0] a,
@@ -300,6 +336,110 @@ def _fake_deep_decoy_file() -> str:
         endmodule
         """
     ).strip()
+
+
+def _zigzag_library_rtl_files() -> Dict[str, str]:
+    """Shared leaf cells — exactly one ``module`` per RTL file."""
+    return {
+        ZZ_DECOY_LEAF_RTL: _decoy_leaf(),
+        ZZ_DECOY_RTL: _decoy_module(),
+        ZZ_IFNDEF_PING_RTL: _ifndef_guard_ping_module(),
+        ZZ_BRIDGE_PING_RTL: textwrap.dedent(
+            """
+            module zz_bridge_ping (
+              input  logic [2:0][3:0] din,
+              output logic [2:0][3:0] dout
+            );
+              assign dout = din;
+            endmodule
+            """
+        ).strip(),
+        ZZ_BRIDGE_PONG_RTL: textwrap.dedent(
+            """
+            module zz_bridge_pong (
+              input  logic [2:0][3:0] din,
+              output logic [2:0][3:0] dout
+            );
+              assign dout = {3{4{din[1][2]}}}[11:0];
+            endmodule
+            """
+        ).strip(),
+        ZZ_Y_FORK_RTL: textwrap.dedent(
+            """
+            module zz_y_fork (
+              input  logic [2:0][3:0] din,
+              output logic [2:0][3:0] main_out,
+              output logic [2:0][3:0] decoy_out
+            );
+              assign main_out = din;
+              assign decoy_out = 12'b0;
+            endmodule
+            """
+        ).strip(),
+        ZZ_Y_MERGE_RTL: textwrap.dedent(
+            """
+            module zz_y_merge (
+              input  logic [2:0][3:0] main_in,
+              input  logic [2:0][3:0] side_in,
+              output logic [2:0][3:0] dout
+            );
+              assign dout = main_in ^ side_in ^ side_in;
+            endmodule
+            """
+        ).strip(),
+        ZZ_BRIDGE_NARROW_RTL: textwrap.dedent(
+            """
+            module zz_bridge_narrow (
+              input  logic [1:0] din,
+              output logic [1:0] dout
+            );
+              assign dout = din;
+            endmodule
+            """
+        ).strip(),
+        ZZ_EMPTY_MULTI_RTL: textwrap.dedent(
+            """
+            module zz_empty_multi (
+              input  logic a,
+              input  logic b,
+              output logic y
+            );
+            endmodule
+            """
+        ).strip(),
+        ZZ_BLACKBOX_RTL: _blackbox_module(),
+        ZZ_LEAF_W_E_RTL: _collision_leaf_module(),
+        ZZ_COLLISION_D_RTL: _collision_d_module(),
+        ZZ_FAKE_DEEP_ARM_RTL: _fake_deep_arm_module(),
+        ZZ_FAKE_D1_RTL: _fake_d1_module(),
+    }
+
+
+def _scope_child_fl_stub_files() -> Dict[str, str]:
+    """Child/grandchild FL only: empty dup decls without ``u_b`` inst."""
+    return {
+        ZZ_SCOPE_A_STUB_RTL: "module zz_scope_A;\nendmodule",
+        ZZ_SCOPE_B_STUB_RTL: "module zz_scope_B;\nendmodule",
+        ZZ_SCOPE_C_STUB_RTL: "module zz_scope_C;\nendmodule",
+    }
+
+
+def _count_module_decls(text: str) -> int:
+    return len(re.findall(r"(?m)^\s*module\s+\w+", text))
+
+
+_SKIP_ONE_MODULE_VALIDATE = frozenset({ZZ_VULN_ANNEX_RTL})
+
+
+def _validate_one_module_per_rtl_file(files: Mapping[str, str]) -> None:
+    for name, body in files.items():
+        if not name.endswith(".v") or name in _SKIP_ONE_MODULE_VALIDATE:
+            continue
+        count = _count_module_decls(body)
+        if count != 1:
+            raise ValueError(
+                f"zigzag RTL {name!r} must contain exactly one module, found {count}"
+            )
 
 
 def _deep_level_body(lvl: int) -> str:
@@ -1099,22 +1239,6 @@ def _scope_c_module() -> str:
     ).strip()
 
 
-def _scope_child_fl_stub() -> str:
-    """Child/grandchild FL only: empty dup decls without ``u_b`` inst."""
-    return textwrap.dedent(
-        """
-        module zz_scope_A;
-        endmodule
-
-        module zz_scope_B;
-        endmodule
-
-        module zz_scope_C;
-        endmodule
-        """
-    ).strip()
-
-
 def _scope_variant_arm(idx: int) -> str:
     return f"{TOP}.u_av{idx:02d}"
 
@@ -1849,35 +1973,26 @@ def generate_zigzag_torture_design() -> ZigzagTortureDesign:
     preamble = _defines_preamble()
     files: Dict[str, str] = {
         DW_VENDOR_RTL: _dw_vendor_module(),
-        "zz_common.v": "\n\n".join(
-            [
-                preamble,
-                _decoy_leaf(),
-                _decoy_module(),
-                _bridge_modules(),
-                _ifndef_guard_ping_module(),
-                _blackbox_module(),
-                _collision_module(),
-            ]
-        ),
-        "zz_fake_deep.v": _fake_deep_decoy_file(),
+        **_zigzag_library_rtl_files(),
         "zz_deep_arm.v": _deep_arm(),
         "zz_shallow_arm.v": _shallow_arm(),
         "zz_zigzag.v": _zigzag_hub(),
-        "zz_torture_top.v": _top_module(),
+        "zz_torture_top.v": preamble + "\n\n" + _top_module(),
         ZZ_SCOPE_DECOY_RTL: _scope_decoy_module(),
         ZZ_SCOPE_A_RTL: _scope_a_module(),
         ZZ_SCOPE_B_RTL: _scope_b_module(),
         ZZ_SCOPE_C_RTL: _scope_c_module(),
-        ZZ_SCOPE_STUB_RTL: _scope_child_fl_stub(),
+        **_scope_child_fl_stub_files(),
         **_scope_variant_rtl_files(),
         ZZ_VULN_ANNEX_RTL: vuln_annex_rtl(),
-        ZZ_MATRIX_ANNEX_RTL: matrix_annex_rtl(),
+        **matrix_annex_files(),
     }
     for lvl in range(1, DEEP_DEPTH + 1):
         files[f"zz_deep_d{lvl}.v"] = _deep_level_body(lvl)
     for lvl in range(1, SHALLOW_DEPTH + 1):
         files[f"zz_shallow_r{lvl}.v"] = _shallow_level_body(lvl)
+
+    _validate_one_module_per_rtl_file(files)
 
     return ZigzagTortureDesign(
         files=files,
@@ -2027,19 +2142,19 @@ def _suite_conn_checks() -> List[Dict[str, Any]]:
                     "side": "a",
                     "path": D1_SHADOW,
                     "module": "zz_decoy",
-                    "rtl_file": ZZ_COMMON_RTL,
+                    "rtl_file": ZZ_DECOY_RTL,
                 },
                 {
                     "side": "a",
                     "path": COLLISION,
                     "module": "zz_collision_d",
-                    "rtl_file": ZZ_COMMON_RTL,
+                    "rtl_file": ZZ_COLLISION_D_RTL,
                 },
                 {
                     "side": "a",
                     "path": R3_ALT,
                     "module": "zz_decoy",
-                    "rtl_file": ZZ_COMMON_RTL,
+                    "rtl_file": ZZ_DECOY_RTL,
                 },
             ],
         },
@@ -2052,13 +2167,13 @@ def _suite_conn_checks() -> List[Dict[str, Any]]:
                     "side": "a",
                     "path": D1_SHADOW,
                     "module": "zz_decoy",
-                    "rtl_file": ZZ_COMMON_RTL,
+                    "rtl_file": ZZ_DECOY_RTL,
                 },
                 {
                     "side": "a",
                     "path": COLLISION,
                     "module": "zz_collision_d",
-                    "rtl_file": ZZ_COMMON_RTL,
+                    "rtl_file": ZZ_COLLISION_D_RTL,
                 },
             ],
         },
@@ -2084,7 +2199,7 @@ def _suite_conn_checks() -> List[Dict[str, Any]]:
                     "side": "a",
                     "path": COLLISION,
                     "module": "zz_collision_d",
-                    "rtl_file": ZZ_COMMON_RTL,
+                    "rtl_file": ZZ_COLLISION_D_RTL,
                 },
             ],
         },
@@ -2609,6 +2724,53 @@ def write_flat_suite_artifacts(root: Path) -> Tuple[Path, Path, ZigzagTortureDes
     return fl, suite_path, design
 
 
+def _spine_rtl_names() -> Tuple[str, ...]:
+    return (
+        "zz_zigzag.v",
+        "zz_deep_arm.v",
+        *(f"zz_deep_d{lvl}.v" for lvl in range(1, DEEP_DEPTH + 1)),
+        "zz_shallow_arm.v",
+        *(f"zz_shallow_r{lvl}.v" for lvl in range(1, SHALLOW_DEPTH + 1)),
+    )
+
+
+def _annex_rtl_names() -> Tuple[str, ...]:
+    return (ZZ_VULN_ANNEX_RTL, *matrix_annex_files().keys())
+
+
+def _write_recursive_filelist_chain(
+    root: Path,
+    fl_dir: Path,
+    rtl_names: Sequence[str],
+    *,
+    entry_basename: str = "root.f",
+) -> Path:
+    """Chain RTL paths through nested ``-f`` filelists; entry is ``-f`` only."""
+    fl_dir.mkdir(parents=True, exist_ok=True)
+    names = tuple(rtl_names)
+    if not names:
+        raise ValueError("rtl_names must be non-empty")
+
+    next_ref: Optional[Path] = None
+    for offset, rtl in enumerate(reversed(names)):
+        rtl_path = (root / rtl).resolve()
+        if next_ref is None:
+            fl_path = fl_dir / "leaf.f"
+            fl_path.write_text(f"{rtl_path}\n", encoding="utf-8")
+        else:
+            step = len(names) - offset - 1
+            fl_path = fl_dir / f"chain_{step:02d}.f"
+            fl_path.write_text(
+                f"{rtl_path}\n-f {next_ref.resolve()}\n",
+                encoding="utf-8",
+            )
+        next_ref = fl_path
+
+    entry = fl_dir / entry_basename
+    entry.write_text(f"-f {next_ref.resolve()}\n", encoding="utf-8")
+    return entry
+
+
 def _write_scope_nested_filelists(root: Path) -> Path:
     """Each scope RTL body lives in its own filelist, chained via ``-f``.
 
@@ -2619,7 +2781,14 @@ def _write_scope_nested_filelists(root: Path) -> Path:
     fl_dir.mkdir(parents=True, exist_ok=True)
 
     stub_fl = fl_dir / "stub.f"
-    stub_fl.write_text(f"{(root / ZZ_SCOPE_STUB_RTL).resolve()}\n", encoding="utf-8")
+    stub_fl.write_text(
+        "\n".join(
+            str((root / rtl).resolve())
+            for rtl in (ZZ_SCOPE_A_STUB_RTL, ZZ_SCOPE_B_STUB_RTL, ZZ_SCOPE_C_STUB_RTL)
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     next_fl = stub_fl
     for idx in range(SCOPE_VARIANT_COUNT - 1, -1, -1):
@@ -2651,18 +2820,33 @@ def _write_scope_nested_filelists(root: Path) -> Path:
 def _build_adversarial_filelist_lines(
     root: Path, design: ZigzagTortureDesign
 ) -> List[str]:
-    """Co-list decoy before real RTL; scope bodies only via nested filelists."""
-    parent_fl = _write_scope_nested_filelists(root)
-    lines = [
+    """Co-list decoy before real RTL; all other bodies via multi-level ``-f`` chains."""
+    scope_parent = _write_scope_nested_filelists(root)
+    lib_entry = _write_recursive_filelist_chain(
+        root,
+        root / ZZ_LIB_FL_DIR,
+        sorted(_zigzag_library_rtl_files().keys()),
+    )
+    spine_entry = _write_recursive_filelist_chain(
+        root,
+        root / ZZ_SPINE_FL_DIR,
+        _spine_rtl_names(),
+    )
+    annex_entry = _write_recursive_filelist_chain(
+        root,
+        root / ZZ_ANNEX_FL_DIR,
+        _annex_rtl_names(),
+    )
+    return [
+        str((root / "zz_torture_top.v").resolve()),
         str((root / ZZ_SCOPE_DECOY_RTL).resolve()),
         str((root / ZZ_SCOPE_A_RTL).resolve()),
-        f"-f {parent_fl.resolve()}",
+        f"-f {scope_parent.resolve()}",
+        f"-f {lib_entry.resolve()}",
+        f"-f {spine_entry.resolve()}",
+        f"-f {annex_entry.resolve()}",
+        str((root / DW_VENDOR_RTL).resolve()),
     ]
-    for name in sorted(design.files):
-        if name in ZZ_SCOPE_FL_RTL:
-            continue
-        lines.append(str((root / name).resolve()))
-    return lines
 
 
 def write_stress_artifacts(root: Path) -> Tuple[Path, Path, ZigzagTortureDesign]:

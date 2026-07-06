@@ -61,6 +61,7 @@ from hierwalk.hierarchy_log import (
     path_walk_inst_miss_reason,
     path_walk_trace_show_message,
 )
+from hierwalk.ubpat_debug import ubpat_log, ubpat_relevant, ubpat_search_relevant
 from hierwalk.path_walk_db import (
     RESOLVE_CONFIDENT,
     RESOLVE_RECOVERY,
@@ -396,6 +397,21 @@ class PathWalkState:
                 target_path=target_path,
             )
         )
+        if ubpat_relevant(
+            inst_leaf=inst_leaf,
+            target_path=target_path,
+            parent_path=parent_path,
+        ):
+            parent = self.rows_by_path.get(parent_path)
+            ubpat_log(
+                "WALK-MISS",
+                parent=parent_path,
+                inst_leaf=inst_leaf,
+                target=target_path,
+                reason=reason,
+                parent_module=parent.module if parent else "?",
+                rtl_file=parent.file if parent else "",
+            )
 
     def _emit_walk_miss(
         self,
@@ -698,6 +714,20 @@ class PathWalkState:
         reset_path: str = "",
     ) -> bool:
         had = self.index.get_module(module_name)
+        if ubpat_search_relevant(
+            module_name=module_name,
+            inst_leaf=expect_inst[1] if expect_inst else "",
+            target_path=target_path,
+            scope_anchor=scope_anchor,
+        ):
+            ubpat_log(
+                "SEARCH-LOAD",
+                seek=module_name,
+                inst_leaf=expect_inst[1] if expect_inst else "",
+                target=target_path,
+                anchor_file=scope_anchor,
+                policy=policy,
+            )
         if not self.mod_db.ensure_module_in_index(
             module_name,
             expect_inst=expect_inst,
@@ -708,6 +738,18 @@ class PathWalkState:
             reset_path=reset_path,
         ):
             self._sync_db_stats()
+            if ubpat_search_relevant(
+                module_name=module_name,
+                inst_leaf=expect_inst[1] if expect_inst else "",
+                target_path=target_path,
+                scope_anchor=scope_anchor,
+            ):
+                ubpat_log(
+                    "SEARCH-LOAD-MISS",
+                    seek=module_name,
+                    target=target_path,
+                    anchor_file=scope_anchor,
+                )
             self._emit_walk(
                 f"pw-db load failed module={module_name!r} "
                 f"{self.mod_db.format_status_line()}"
@@ -720,6 +762,18 @@ class PathWalkState:
         if had is None or (had.file_path or "") != (rec.file_path or ""):
             self.stats.modules_loaded += 1
             self._invalidate_walk_caches(module_name=module_name)
+        if ubpat_search_relevant(
+            module_name=module_name,
+            inst_leaf=expect_inst[1] if expect_inst else "",
+            target_path=target_path,
+            scope_anchor=scope_anchor,
+        ):
+            ubpat_log(
+                "SEARCH-LOAD-HIT",
+                seek=module_name,
+                target=target_path,
+                rtl_file=rec.file_path or "",
+            )
         self._sync_db_stats()
         return True
 
@@ -769,10 +823,34 @@ class PathWalkState:
             policy=policy,
             reset_path=parent_path,
         ):
+            if ubpat_relevant(
+                inst_leaf=inst_leaf,
+                target_path=child_path,
+                parent_path=parent_path,
+            ):
+                ubpat_log(
+                    "ATTACH-MISS",
+                    parent=parent_path,
+                    inst_leaf=inst_leaf,
+                    child=edge.child_module,
+                    anchor_file=parent.file,
+                )
             return None
         rec = self.index.get_module(edge.child_module)
         if rec is None:
             return None
+        if ubpat_relevant(
+            inst_leaf=inst_leaf,
+            target_path=child_path,
+            parent_path=parent_path,
+        ):
+            ubpat_log(
+                "ATTACH-HIT",
+                parent=parent_path,
+                inst_leaf=inst_leaf,
+                child=edge.child_module,
+                rtl_file=rec.file_path or "",
+            )
         pmap = resolve_param_map(
             rec.raw_params,
             overrides=edge.param_overrides,
@@ -892,6 +970,21 @@ class PathWalkState:
             top=self.top,
             body=body,
         )
+        if ubpat_relevant(
+            remainder=signal_name,
+            parent_path=parent_path,
+        ):
+            from hierwalk.connect.shared.endpoints import _module_body_cache_key
+
+            ubpat_log(
+                "SIGNAL-CLASS",
+                parent=parent_path,
+                tail=signal_name,
+                kind=kind or "none",
+                module=row.module,
+                rtl_file=row.file,
+                cache_key=_module_body_cache_key(row),
+            )
         return kind, _elapsed()
 
     def _emit_signal_tail(
@@ -973,6 +1066,19 @@ class PathWalkState:
 
         for name, _edge in self._expanded_inst_pairs(row):
             if name == stem or name.startswith(stem + "["):
+                if ubpat_relevant(
+                    remainder=remainder,
+                    target_path=target_path,
+                    parent_path=parent_path,
+                ):
+                    ubpat_log(
+                        "WIRE-COLLISION",
+                        parent=parent_path,
+                        tail=remainder,
+                        target=target_path,
+                        inst_name=stem,
+                        rtl_file=row.file,
+                    )
                 self._emit_signal_tail(
                     hit=False,
                     kind="inst-collision",
@@ -986,6 +1092,19 @@ class PathWalkState:
 
         kind, check_ms = self._classify_signal_tail(parent_path, remainder, row)
         if kind is not None:
+            if ubpat_relevant(
+                remainder=remainder,
+                target_path=target_path,
+                parent_path=parent_path,
+            ):
+                ubpat_log(
+                    "WIRE-HIT",
+                    kind=kind,
+                    parent=parent_path,
+                    tail=remainder,
+                    target=target_path,
+                    rtl_file=row.file,
+                )
             self._emit_signal_tail(
                 hit=True,
                 kind=kind,
@@ -1127,6 +1246,20 @@ class PathWalkState:
                     best_edge = edge
         if best_edge is not None:
             out = (best_name, best_edge)
+            if ubpat_relevant(
+                inst_leaf=best_name,
+                remainder=remainder,
+                target_path=target_path,
+                parent_path=parent_path,
+            ):
+                ubpat_log(
+                    "CHILD-STEP",
+                    via="expanded-pairs",
+                    parent=parent_path,
+                    inst_leaf=best_name,
+                    child=best_edge.child_module,
+                    target=target_path,
+                )
             self._set_resolve_step_cache(step_key, out)
             return out
         seg = self._inst_leaf_prefix(remainder)
@@ -1147,8 +1280,35 @@ class PathWalkState:
         if edge is not None:
             self._clear_failed_edge(parent_path, seg)
             out = (seg, edge)
+            if ubpat_relevant(
+                inst_leaf=seg,
+                remainder=remainder,
+                target_path=target_path,
+                parent_path=parent_path,
+            ):
+                ubpat_log(
+                    "CHILD-STEP",
+                    via="child-edge",
+                    parent=parent_path,
+                    inst_leaf=seg,
+                    child=edge.child_module,
+                    target=target_path,
+                )
             self._set_resolve_step_cache(step_key, out)
             return out
+        if ubpat_relevant(
+            inst_leaf=seg,
+            remainder=remainder,
+            target_path=target_path,
+            parent_path=parent_path,
+        ):
+            ubpat_log(
+                "CHILD-MISS",
+                parent=parent_path,
+                inst_leaf=seg,
+                target=target_path,
+                policy=policy,
+            )
         self._mark_failed_edge(parent_path, seg)
         out = ("", None)
         self._set_resolve_step_cache(step_key, out)
@@ -1523,6 +1683,18 @@ class PathWalkState:
                     )
                 )
                 if not port_first:
+                    if ubpat_relevant(
+                        remainder=remainder,
+                        target_path=path,
+                        parent_path=cur,
+                    ):
+                        ubpat_log(
+                            "ENSURE-INST-FIRST",
+                            parent=cur,
+                            remainder=remainder,
+                            target=path,
+                            port_first=port_first,
+                        )
                     inst_name, edge = self._resolve_child_step(
                         cur,
                         remainder,
@@ -1551,6 +1723,18 @@ class PathWalkState:
                         cur = attached
                         remainder = remainder[len(inst_name) :].lstrip(".")
                         continue
+                if ubpat_relevant(
+                    remainder=remainder,
+                    target_path=path,
+                    parent_path=cur,
+                ):
+                    ubpat_log(
+                        "ENSURE-WIRE-FALLBACK",
+                        parent=cur,
+                        remainder=remainder,
+                        target=path,
+                        port_first=port_first,
+                    )
                 if self._resolve_signal_tail(
                     cur,
                     remainder,
@@ -1607,6 +1791,21 @@ class PathWalkState:
                         raw_source_has_inst = probe_inst_leaf_regex_fast(
                             body, miss_leaf
                         )
+                if ubpat_relevant(
+                    inst_leaf=miss_leaf,
+                    target_path=path,
+                    parent_path=cur,
+                ):
+                    ubpat_log(
+                        "MISS-PROBE",
+                        parent=cur,
+                        inst_leaf=miss_leaf,
+                        target=path,
+                        parent_module=parent_mod,
+                        raw_has_inst=raw_source_has_inst,
+                        candidates=snap[:6],
+                        edge_count=len(edges),
+                    )
                 self._queue_walk_miss(
                     cur,
                     miss_leaf,

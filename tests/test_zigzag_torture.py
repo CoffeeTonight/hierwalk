@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -24,7 +25,7 @@ from hierwalk.path_walk import (
     run_path_walk_index,
 )
 from hierwalk.suite_conn_policy import CONN_LOGICAL_ONLY_NEGATIVE_IDS
-from hierwalk.zigzag_annex_gen import VULN_PLAN_BY_CHECK_ID
+from hierwalk.zigzag_annex_gen import VULN_PLAN_BY_CHECK_ID, ZZ_VULN_ANNEX_RTL
 from hierwalk.zigzag_torture_gen import (
     COLLISION,
     DEEP_ARM,
@@ -41,7 +42,13 @@ from hierwalk.zigzag_torture_gen import (
     SHALLOW_DEPTH,
     SHALLOW_R4,
     TOP,
+    ZZ_ANNEX_FL_DIR,
+    ZZ_FAKE_DEEP_ARM_RTL,
+    ZZ_IFNDEF_PING_RTL,
+    ZZ_LIB_FL_DIR,
     ZZ_SCOPE_A_RTL,
+    ZZ_SCOPE_FL_DIR,
+    ZZ_SPINE_FL_DIR,
     ZZ_SCOPE_B_RTL,
     ZZ_SCOPE_C_RTL,
     ZigzagTortureDesign,
@@ -185,7 +192,7 @@ def test_torture_design_shape():
     assert "u_bridge_expr" in design.files["zz_deep_d2.v"]
     assert "u_ifndef_mix" in design.files["zz_deep_d2.v"]
     assert "`ifndef ZZ_IFNDEF_INST_" in design.files["zz_deep_d2.v"]
-    assert "`ifndef ZZ_IFNDEF_PING_BODY_" in design.files["zz_common.v"]
+    assert "`ifndef ZZ_IFNDEF_PING_BODY_" in design.files[ZZ_IFNDEF_PING_RTL]
     scope_a = design.files[ZZ_SCOPE_A_RTL]
     assert "////////" in scope_a
     assert "/*" in scope_a and "ZZ_SCOPE_FAKE_BLK" in scope_a
@@ -215,7 +222,7 @@ def test_torture_design_shape():
     assert "grep_zero_b * 0" in design.files["zz_deep_d4.v"]
     assert "grep_mask_src & 1'b0" in design.files["zz_deep_d4.v"]
     assert len(design.files) >= DEEP_DEPTH + SHALLOW_DEPTH + 6
-    assert "zz_fake_deep.v" in design.files
+    assert ZZ_FAKE_DEEP_ARM_RTL in design.files
     assert DW_VENDOR_RTL in design.files
     assert "zz_torture_top.v" in design.files
     assert "d1_shadow" in design.files["zz_deep_d1.v"]
@@ -230,29 +237,49 @@ def test_torture_design_shape():
     assert "bind zz_torture_top zz_v_b1_bind" in design.files["zz_torture_top.v"]
     assert "module zz_v_over_if" in design.files["zz_vuln_annex.v"]
     assert "module zz_matrix_soc" in design.files["zz_matrix_annex.v"]
-    assert "bind zz_matrix_soc ghost" in design.files["zz_matrix_annex.v"]
+    assert "bind zz_matrix_soc ghost" in design.files["zz_mx_ghost.v"]
     assert any(c.check_id == "zz_vuln_d1" for c in design.checks)
     assert any(c.check_id == "zz_vuln_n9" for c in design.checks)
+    for rtl_name, body in design.files.items():
+        if not rtl_name.endswith(".v") or rtl_name == ZZ_VULN_ANNEX_RTL:
+            continue
+        module_count = len(re.findall(r"(?m)^\s*module\s+\w+", body))
+        assert module_count == 1, rtl_name
 
 
 def test_scope_rtl_each_in_separate_filelist(torture_bundle, tmp_path: Path):
-    """Split scope RTL bodies must appear only in dedicated nested filelists."""
+    """RTL bodies must live only in dedicated multi-level nested filelists."""
     fl_path, _design = torture_bundle
     root = fl_path.parent
     root_lines = fl_path.read_text(encoding="utf-8").splitlines()
-    for rtl in (
+    nested_only = (
         "zz_scope_b.v",
         "zz_scope_c.v",
         "zz_scope_v00.v",
         "zz_scope_v09.v",
-    ):
+        "zz_deep_d2.v",
+        "zz_shallow_r3.v",
+        "zz_decoy.v",
+        "zz_matrix_annex.v",
+    )
+    for rtl in nested_only:
         assert str((root / rtl).resolve()) not in root_lines
-    fl_dir = root / "zz_scope_fl"
-    assert (fl_dir / "b.f").read_text(encoding="utf-8").count("\n") >= 1
-    assert (fl_dir / "c.f").read_text(encoding="utf-8").count("-f") == 1
-    assert (fl_dir / "v05.f").read_text(encoding="utf-8").splitlines()[0].endswith(
+
+    scope_dir = root / ZZ_SCOPE_FL_DIR
+    assert (scope_dir / "b.f").read_text(encoding="utf-8").count("\n") >= 1
+    assert (scope_dir / "c.f").read_text(encoding="utf-8").count("-f") == 1
+    assert (scope_dir / "v05.f").read_text(encoding="utf-8").splitlines()[0].endswith(
         "zz_scope_v05.v"
     )
+
+    for fl_dir in (ZZ_LIB_FL_DIR, ZZ_SPINE_FL_DIR, ZZ_ANNEX_FL_DIR):
+        nested_root = root / fl_dir / "root.f"
+        assert nested_root.is_file()
+        assert nested_root.read_text(encoding="utf-8").strip().startswith("-f ")
+        assert (root / fl_dir / "leaf.f").is_file()
+
+    root_fl_refs = [line.strip() for line in root_lines if line.strip().startswith("-f ")]
+    assert len(root_fl_refs) == 4
 
 
 def test_dw_vendor_inst_design_only_not_in_suite():

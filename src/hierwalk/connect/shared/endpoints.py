@@ -190,6 +190,16 @@ def parse_connect_endpoint(
             leaf,
             top=top,
         ):
+            from hierwalk.ubpat_debug import ubpat_log, ubpat_relevant
+
+            if ubpat_relevant(target_path=text, parent_path=parent, remainder=leaf):
+                ubpat_log(
+                    "PARSE-EP",
+                    spec=text,
+                    decision="port",
+                    hier=parent,
+                    tail=leaf,
+                )
             return parent, leaf
     if text in rows_by_path:
         return text, None
@@ -207,14 +217,29 @@ def parse_connect_endpoint(
                 module_body_cache=module_body_cache,
             )
             if _port_exists(index, row, tail, top=top):
+                from hierwalk.ubpat_debug import ubpat_log, ubpat_relevant
+
+                if ubpat_relevant(target_path=text, parent_path=hier, remainder=tail):
+                    ubpat_log("PARSE-EP", spec=text, decision="port", hier=hier, tail=tail)
                 return hier, tail
-            if inst_leaf_exists_in_module(
+            has_inst = inst_leaf_exists_in_module(
                 index,
                 row,
                 tail,
                 body=body,
                 module_body_cache=module_body_cache,
-            ):
+            )
+            if has_inst:
+                from hierwalk.ubpat_debug import ubpat_log, ubpat_relevant
+
+                if ubpat_relevant(target_path=text, parent_path=hier, remainder=tail):
+                    ubpat_log(
+                        "PARSE-EP",
+                        spec=text,
+                        decision="inst-extend",
+                        hier=text,
+                        tail=None,
+                    )
                 return text, None
             if net_exists_in_module_fast(
                 index,
@@ -224,7 +249,22 @@ def parse_connect_endpoint(
                 param_ctx=_row_param_ctx_optional(row),
                 body=body,
             ):
+                from hierwalk.ubpat_debug import ubpat_log, ubpat_relevant
+
+                if ubpat_relevant(target_path=text, parent_path=hier, remainder=tail):
+                    ubpat_log("PARSE-EP", spec=text, decision="net", hier=hier, tail=tail)
                 return hier, tail
+            from hierwalk.ubpat_debug import ubpat_log, ubpat_relevant
+
+            if ubpat_relevant(target_path=text, parent_path=hier, remainder=tail):
+                ubpat_log(
+                    "PARSE-EP",
+                    spec=text,
+                    decision="fallback-tail",
+                    hier=hier,
+                    tail=tail,
+                    has_inst=has_inst,
+                )
         return hier, tail
     return text, None
 
@@ -471,7 +511,20 @@ def inst_leaf_exists_in_module(
             row,
             module_body_cache=module_body_cache,
         )
-    return probe_inst_leaf_regex_fast(body, inst_leaf)
+    found = probe_inst_leaf_regex_fast(body, inst_leaf)
+    from hierwalk.ubpat_debug import ubpat_log, ubpat_relevant
+
+    if ubpat_relevant(inst_leaf=inst_leaf, parent_path=row.full_path):
+        ubpat_log(
+            "INST-PROBE",
+            parent=row.full_path,
+            inst_leaf=inst_leaf,
+            module=row.module,
+            rtl_file=row.file,
+            found=found,
+            cache_key=_module_body_cache_key(row),
+        )
+    return found
 
 _CELL_MODULE_BODY_CACHE_PREFIX = "cell:"
 
