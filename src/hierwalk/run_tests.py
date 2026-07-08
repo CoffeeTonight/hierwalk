@@ -120,7 +120,9 @@ def normalize_index_strategy_mode(mode: str) -> str:
 
 
 def _parse_connect_phase(spec: Mapping[str, Any]) -> str:
-    """Parse ``connect_phase`` / ``verification_phase`` for text vs logical conn."""
+    """Parse ``connect_phase`` / ``verification_phase`` for connect phase selection."""
+    from hierwalk.run_request import parse_connect_phase_value
+
     raw = _first_ci(
         spec,
         "connect_phase",
@@ -129,12 +131,7 @@ def _parse_connect_phase(spec: Mapping[str, Any]) -> str:
         "verification-phase",
         "phase",
     )
-    phase = str(raw or "both").strip().lower()
-    if phase in ("text", "logical", "both"):
-        return phase
-    raise ValueError(
-        f"connect_phase must be text, logical, or both (got {raw!r})"
-    )
+    return parse_connect_phase_value(raw)
 
 
 def _validate_conn_check_spec(spec: Mapping[str, Any], *, label: str) -> None:

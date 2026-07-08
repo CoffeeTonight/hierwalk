@@ -294,7 +294,8 @@ def format_connect_artifact_help(cfg: RunConfig, *, top: str = "") -> str:
     paths = connect_output_paths(work, cfg.output)
     return (
         f"work-dir={work.resolve()} "
-        f"text={paths.text_tsv.name} logical={paths.logical_tsv.name}"
+        f"text={paths.text_tsv.name} logical={paths.logical_tsv.name} "
+        f"hgrep_gate={paths.hgrep_gate_report.name}"
     )
 
 
@@ -373,6 +374,9 @@ def expected_verification_artifact_paths(
     )
     if is_connect:
         conn_paths = connect_output_paths(work_dir, cfg.output)
+        if phase == "hgrep":
+            paths.append(conn_paths.hgrep_gate_report)
+            return paths
         if phase in ("text", "both"):
             paths.append(conn_paths.text_tsv)
         if phase in ("logical", "both"):

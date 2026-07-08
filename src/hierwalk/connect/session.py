@@ -958,6 +958,34 @@ class ConnectivitySession:
         dedup_lock = threading.Lock() if workers > 1 else None
         checks_done = 0
         checks_done_lock = threading.Lock() if workers > 1 else None
+        pre_gates: Dict[str, Any] = {}
+        if self.hgrep_session is not None:
+            from hierwalk.connect.hierarchy_grep_gate import (
+                announce_hgrep_gate_report_path,
+                gate_connect_check,
+            )
+
+            announce_hgrep_gate_report_path(
+                self.hgrep_gate_report_path,
+                on_emit=on_heartbeat,
+            )
+            for chk in checks:
+                gate = gate_connect_check(
+                    chk,
+                    self.hgrep_session,
+                    top=self.top,
+                    index=self.index,
+                    report_path=self.hgrep_gate_report_path,
+                )
+                key = str(chk.check_id or id(chk))
+                pre_gates[key] = gate
+                if on_heartbeat is not None:
+                    on_heartbeat(gate.log_line)
+            if on_heartbeat is not None:
+                on_heartbeat(
+                    f"connect-coi begin checks={len(checks)} "
+                    f"hgrep_gated={len(pre_gates)} connect_jobs={workers}"
+                )
 
         def _bump_checks_done() -> None:
             nonlocal checks_done
@@ -970,20 +998,19 @@ class ConnectivitySession:
         def _one(chk: ConnectivityCheck) -> ConnectResult:
             t0 = time.perf_counter()
             if self.hgrep_session is not None:
-                from hierwalk.connect.hierarchy_grep_gate import (
-                    gate_connect_check,
-                    text_check_from_gate,
-                )
+                from hierwalk.connect.hierarchy_grep_gate import text_check_from_gate
 
-                gate = gate_connect_check(
-                    chk,
-                    self.hgrep_session,
-                    top=self.top,
-                    index=self.index,
-                    report_path=self.hgrep_gate_report_path,
-                )
-                if on_heartbeat is not None:
-                    on_heartbeat(gate.log_line)
+                gate = pre_gates.get(str(chk.check_id or id(chk)))
+                if gate is None:
+                    from hierwalk.connect.hierarchy_grep_gate import gate_connect_check
+
+                    gate = gate_connect_check(
+                        chk,
+                        self.hgrep_session,
+                        top=self.top,
+                        index=self.index,
+                        report_path=self.hgrep_gate_report_path,
+                    )
                 if gate.fast_fail_result is not None:
                     if record_timing:
                         from hierwalk.verification_timing import record_connect_check

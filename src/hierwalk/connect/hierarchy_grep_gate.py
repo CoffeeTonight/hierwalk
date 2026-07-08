@@ -36,6 +36,22 @@ def emit_hgrep_gate_log(log_line: str) -> None:
     print(log_line, file=sys.stderr, flush=True)
 
 
+def announce_hgrep_gate_report_path(
+    report_path: Optional[str | Path],
+    *,
+    on_emit: Optional[Any] = None,
+) -> None:
+    """Log resolved gate report destination before connect-coi starts."""
+    if report_path is not None:
+        path = Path(report_path).expanduser().resolve()
+        line = f"connect-pipeline hgrep-gate-report path={path}"
+    else:
+        line = "connect-pipeline hgrep-gate-report disabled"
+    emit_hgrep_gate_log(line)
+    if on_emit is not None:
+        on_emit(line)
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
@@ -931,3 +947,100 @@ def text_check_from_gate(
         hgrep_scoped_sources=scoped_sources,
     )
     return result
+
+
+def connect_result_from_hgrep_gate(
+    chk: ConnectivityCheck,
+    gate: HierarchyGrepCheckGate,
+) -> ConnectResult:
+    """Map a tier0 gate outcome to a connect TSV row (hgrep-only phase)."""
+    if gate.fast_fail_result is not None:
+        return gate.fast_fail_result
+    ep_a = ConnectEndpoint(
+        spec=str(chk.endpoint_a),
+        inst_path="",
+        port_name="",
+        module="",
+    )
+    ep_b = ConnectEndpoint(
+        spec=str(chk.endpoint_b),
+        inst_path="",
+        port_name="",
+        module="",
+    )
+    ok = gate.status == "pass"
+    return ConnectResult(
+        ep_a,
+        ep_b,
+        ok,
+        "hgrep",
+        errors=() if ok else (f"hgrep-gate status={gate.status}",),
+        check_id=chk.check_id,
+        note=(
+            f"hgrep-gate {gate.status}; "
+            f"scoped_files={len(gate.scoped_files)}; "
+            f"fast_path={gate.use_grep_fast_path}"
+        ),
+    )
+
+
+def run_hgrep_connect_batch(
+    request: ConnectivityRequest,
+    sources: Sequence[str],
+    *,
+    top: str,
+    connect_output_dir: Optional[Path] = None,
+    connect_output_name: str = "conn.tsv",
+    on_emit: Optional[Any] = None,
+) -> Tuple[Any, DesignIndex]:
+    """
+    Run hierarchy_grep gate for every check — no path-walk, no connect-coi.
+
+    Used when JSON sets ``connect_phase: hgrep``.
+    """
+    from hierwalk.connect.session import ConnectivityBatchResult
+
+    top_name = (request.top or top or "").strip()
+    if not top_name:
+        raise ValueError("top module required for connect_phase=hgrep")
+    paths = [abs_rtl_path(p) for p in sources if p]
+    if not paths:
+        raise ValueError("no RTL sources for connect_phase=hgrep")
+
+    index = DesignIndex.build(
+        {
+            p: Path(p).read_text(encoding="utf-8", errors="ignore")
+            for p in paths
+        }
+    )
+    session = prepare_hierarchy_grep_session(paths, top=top_name)
+    session.file_grep_index(wait=True)
+    report_path = resolve_hgrep_gate_report_path(
+        connect_output_dir=connect_output_dir,
+        connect_output_name=connect_output_name,
+    )
+    announce_hgrep_gate_report_path(report_path, on_emit=on_emit)
+
+    results: List[ConnectResult] = []
+    for chk in request.checks:
+        gate = gate_connect_check(
+            chk,
+            session,
+            top=top_name,
+            index=index,
+            report_path=report_path,
+        )
+        if on_emit is not None:
+            on_emit(gate.log_line)
+        results.append(connect_result_from_hgrep_gate(chk, gate))
+
+    if on_emit is not None:
+        on_emit(
+            f"connect-hgrep done checks={len(results)} "
+            f"pass={sum(1 for r in results if r.connected)} "
+            f"report={report_path}"
+        )
+    return (
+        ConnectivityBatchResult(results=tuple(results), modules_cached=0),
+        index,
+    )

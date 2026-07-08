@@ -516,6 +516,10 @@ Text-conn vs logical-conn (path-walk / suite)
   ``connected`` (logical) are independent; logical runs only for text passes
   when gating is enabled.
 
+  ``connect_phase: hgrep`` runs hierarchy_grep gate only (no connect-coi).
+  Writes ``conn.hgrep_gate.report`` under ``.db_{TOP}/``; stdout TSV rows
+  use ``mode=hgrep`` with gate pass/fail in ``connected``.
+
 Path evidence kinds (hops / connect-log)
 ----------------------------------------
   intra-module    assign/alias/ff within one module

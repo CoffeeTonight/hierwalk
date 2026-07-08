@@ -251,6 +251,16 @@ class RunConfig:
         return [f"{k}={v}" if v != "1" else k for k, v in self.defines]
 
 
+def parse_connect_phase_value(raw: Any) -> str:
+    """Parse connect/verification phase (text, logical, both, or hgrep-only gate)."""
+    phase = str(raw or "both").strip().lower()
+    if phase in ("text", "logical", "both", "hgrep"):
+        return phase
+    raise ValueError(
+        f"connect_phase must be text, logical, both, or hgrep (got {raw!r})"
+    )
+
+
 def _resolve_path(base: Path, value: Optional[str]) -> Optional[str]:
     if value is None or value == "-":
         return value
@@ -1155,6 +1165,23 @@ def _apply_run_document_fields(
         graph = _mapping_get_ci(data, "cone_graph") or _mapping_get_ci(data, "cone-graph")
         if graph:
             out = replace(out, cone_graph=_resolve_path(base_dir, str(graph)))
+
+    phase_keys = (
+        "connect_phase",
+        "connect-phase",
+        "verification_phase",
+        "verification-phase",
+        "phase",
+    )
+    if any(_document_has_key(data, key) for key in phase_keys):
+        raw = None
+        for key in phase_keys:
+            hit = _mapping_get_ci(data, key)
+            if hit is not None and str(hit).strip():
+                raw = hit
+                break
+        if raw is not None:
+            out = replace(out, verification_phase=parse_connect_phase_value(raw))
 
     return out, jobs_source
 

@@ -178,6 +178,98 @@ def test_gate_miss_rejects_without_fallback(tmp_path: Path):
     assert not gate.fast_fail_result.connected
 
 
+def test_connect_phase_hgrep_only_skips_connect_coi(tmp_path: Path):
+    """JSON connect_phase=hgrep runs gate only; no connect-coi in log."""
+    from hierwalk.connect.shared.request import ConnectivityRequest
+    from hierwalk.filelist import parse_filelist
+    from hierwalk.path_walk import run_path_walk_connect
+
+    top_v = _write(
+        tmp_path,
+        "top.v",
+        """
+        module child (output logic out);
+          assign out = 1'b0;
+        endmodule
+        module top (input logic clk);
+          child u_a ();
+        endmodule
+        """,
+    )
+    fl = tmp_path / "fl.f"
+    fl.write_text(f"{top_v}\n", encoding="utf-8")
+    fl_result = parse_filelist(str(fl))
+    out_dir = tmp_path / "out"
+    log_path = tmp_path / "walk.log"
+    request = ConnectivityRequest(
+        checks=(ConnectivityCheck("top.u_a.out", "top.u_a.out", check_id="hg_only"),),
+        top="top",
+    )
+    batch, _index, _state = run_path_walk_connect(
+        request,
+        fl_result,
+        top="top",
+        no_cache=True,
+        connect_phase="hgrep",
+        connect_output_dir=out_dir,
+        trace_log_path=log_path,
+    )
+    assert batch.results[0].connected
+    assert batch.results[0].mode == "hgrep"
+    report = out_dir / "conn.hgrep_gate.report"
+    assert report.is_file()
+    log_text = log_path.read_text(encoding="utf-8")
+    assert "connect-coi begin" not in log_text
+    assert "connect-coi done" not in log_text
+    assert "hgrep-gate check=hg_only" in log_text
+    assert "connect-hgrep done" in log_text
+
+
+def test_connect_pipeline_hgrep_before_connect_coi(tmp_path: Path):
+    from hierwalk.connect.shared.request import ConnectivityRequest
+    from hierwalk.filelist import parse_filelist
+    from hierwalk.path_walk import run_path_walk_connect
+
+    top_v = _write(
+        tmp_path,
+        "top.v",
+        """
+        module child (output logic out);
+          assign out = 1'b0;
+        endmodule
+        module top (input logic clk);
+          child u_a ();
+        endmodule
+        """,
+    )
+    fl = tmp_path / "fl.f"
+    fl.write_text(f"{top_v}\n", encoding="utf-8")
+    fl_result = parse_filelist(str(fl))
+    log_path = tmp_path / "walk.log"
+    request = ConnectivityRequest(
+        checks=(ConnectivityCheck("top.u_a.out", "top.u_a.out", check_id="ord1"),),
+        top="top",
+    )
+    run_path_walk_connect(
+        request,
+        fl_result,
+        top="top",
+        no_cache=True,
+        connect_phase="text",
+        trace_log_path=log_path,
+        connect_output_dir=tmp_path / "out",
+    )
+    log_text = log_path.read_text(encoding="utf-8")
+    gate_pos = log_text.find("hgrep-gate check=ord1")
+    report_pos = log_text.find("connect-pipeline hgrep-gate-report path=")
+    coi_pos = log_text.find("connect-coi begin")
+    assert gate_pos >= 0, log_text
+    assert report_pos >= 0, log_text
+    assert coi_pos >= 0, log_text
+    assert gate_pos < coi_pos, "hgrep-gate must precede connect-coi begin"
+    assert report_pos < coi_pos, "report path must precede connect-coi begin"
+
+
 def test_connect_pipeline_writes_hgrep_gate_report(tmp_path: Path):
     from hierwalk.connect.shared.request import ConnectivityRequest
     from hierwalk.filelist import parse_filelist

@@ -2901,6 +2901,7 @@ def _pipeline_path_walk_text_conn(
 ) -> ConnectivityBatchResult:
     """Interleave per-check hierarchy walk with parallel text-COI workers (J-003/J-004)."""
     from hierwalk.connect.hierarchy_grep_gate import (
+        announce_hgrep_gate_report_path,
         emit_hgrep_gate_log,
         gate_connect_check,
         prepare_hierarchy_grep_session,
@@ -2935,6 +2936,29 @@ def _pipeline_path_walk_text_conn(
         f"connect-pipeline begin checks={total} "
         f"hierarchy_jobs={hierarchy_jobs} connect_jobs={workers}"
     )
+    announce_hgrep_gate_report_path(
+        conn_session.hgrep_gate_report_path,
+        on_emit=state._emit_walk,
+    )
+
+    pre_gates: List[Optional[Any]] = [None] * total
+    if hgrep_session is not None:
+        for idx, chk in enumerate(request.checks):
+            gate = gate_connect_check(
+                chk,
+                hgrep_session,
+                top=conn_session.top,
+                index=conn_session.index,
+                report_path=conn_session.hgrep_gate_report_path,
+            )
+            pre_gates[idx] = gate
+            state._emit_walk(gate.log_line)
+
+    state._emit_walk(
+        f"connect-coi begin checks={total} "
+        f"hgrep_gated={sum(1 for g in pre_gates if g is not None)} "
+        f"connect_jobs={workers}"
+    )
 
     with _ConnectCoiHeartbeat(
         total_checks=total,
@@ -2945,16 +2969,8 @@ def _pipeline_path_walk_text_conn(
     ):
         for idx, chk in enumerate(request.checks):
             t_walk = time.perf_counter()
-            gate = None
-            if hgrep_session is not None:
-                gate = gate_connect_check(
-                    chk,
-                    hgrep_session,
-                    top=conn_session.top,
-                    index=conn_session.index,
-                    report_path=conn_session.hgrep_gate_report_path,
-                )
-                state._emit_walk(gate.log_line)
+            gate = pre_gates[idx]
+            if gate is not None:
                 gate_result = text_check_from_gate(
                     gate,
                     chk,
@@ -3750,7 +3766,12 @@ def run_path_walk_connect(
     defines = dict(fl.defines)
     defines.update(extra_defines or {})
     defines.update(request.defines)
-    phase = connect_phase if connect_phase in ("text", "logical", "both") else "both"
+    phase = (
+        connect_phase
+        if connect_phase in ("text", "logical", "both", "hgrep")
+        else "both"
+    )
+    do_hgrep = phase == "hgrep"
     do_text = phase in ("text", "both")
     do_logical = phase in ("logical", "both")
     effective_connect_jobs = connect_jobs if connect_jobs != 0 else connect_jobs_from_env()
@@ -3766,6 +3787,55 @@ def run_path_walk_connect(
             reuse_suite_session=reuse_suite_session,
         )
     try:
+        if do_hgrep:
+            from hierwalk.connect.hierarchy_grep_gate import run_hgrep_connect_batch
+            from hierwalk.connect.pipeline.artifacts import resolve_connect_output_dir
+            from hierwalk.index import DesignIndex
+            from hierwalk.path_walk_db import PathWalkModuleDb
+
+            top_name = (request.top or top or "").strip()
+            if not top_name and fl.top_modules:
+                top_name = str(fl.top_modules[0]).strip()
+            if not top_name:
+                top_name = "top"
+            resolved_output_dir = resolve_connect_output_dir(
+                connect_output_dir,
+                top=top_name,
+                cache_dir=cache_dir,
+            )
+            sources = [str(p) for p in fl.source_files]
+
+            def _emit_hgrep(msg: str) -> None:
+                _path_walk_trace_emit(
+                    msg,
+                    trace_stream=trace_stream,
+                    trace_log_fh=trace_log_fh,
+                )
+
+            batch, index = run_hgrep_connect_batch(
+                request,
+                sources,
+                top=top_name,
+                connect_output_dir=resolved_output_dir,
+                connect_output_name=connect_output_name,
+                on_emit=_emit_hgrep,
+            )
+            mod_db = PathWalkModuleDb(
+                sources,
+                index,
+                defines=defines,
+                cache_dir=cache_dir,
+                no_cache=no_cache,
+            )
+            state = PathWalkState(
+                index=index,
+                top=top_name,
+                mod_db=mod_db,
+                trace_stream=trace_stream,
+                _trace_log=trace_log_fh,
+            )
+            return batch, index, state
+
         if reuse_suite_session:
             session_extra = dict(extra_defines or {})
             session_extra.update(request.defines)
@@ -3948,11 +4018,12 @@ def run_path_walk_connect(
                 # Text phase always blooms unresolved branches (phase policy).
                 conn_session.over_approximate_if = True
                 try:
-                    state._emit_walk(
-                        f"connect-coi begin checks={len(text_request.checks)} "
-                        f"rows={len(walk_rows)} resolve_param_dims=0 "
-                        f"connect_jobs={conn_workers}"
-                    )
+                    if not use_connect_pipeline:
+                        state._emit_walk(
+                            f"connect-coi begin checks={len(text_request.checks)} "
+                            f"rows={len(walk_rows)} resolve_param_dims=0 "
+                            f"connect_jobs={conn_workers}"
+                        )
                     try:
                         if use_connect_pipeline:
                             batch = _pipeline_path_walk_text_conn(

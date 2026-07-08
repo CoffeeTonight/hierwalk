@@ -570,6 +570,8 @@ def path_walk_trace_show_message(message: str) -> bool:
         return True
     if msg.startswith("connect-pipeline "):
         return True
+    if msg.startswith("hgrep-gate"):
+        return True
     if msg.startswith("walk target="):
         return False
     if msg.startswith("pw-db v"):

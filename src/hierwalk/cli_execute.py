@@ -77,7 +77,7 @@ from hierwalk.verification_timing import (
 
 def _verification_phase(cfg: RunConfig) -> str:
     phase = (cfg.verification_phase or "both").strip().lower()
-    return phase if phase in ("text", "logical", "both") else "both"
+    return phase if phase in ("text", "logical", "both", "hgrep") else "both"
 
 
 def _fail_if_missing_verification_artifacts(
@@ -469,6 +469,7 @@ def execute_run(cfg: RunConfig, ap) -> int:
                         over_approximate_if=connect_request.over_approximate_if,
                     )
             phase = _verification_phase(cfg)
+            do_hgrep = phase == "hgrep"
             do_text = phase in ("text", "both")
             do_logical = phase in ("logical", "both")
             try:
@@ -491,13 +492,22 @@ def execute_run(cfg: RunConfig, ap) -> int:
             connect_results = batch.results
             endpoint_rows = pw_state.rows_by_path
             conn_paths = connect_output_paths(work_dir, cfg.output)
-            artifact_rc = _fail_if_missing_verification_artifacts(
-                cfg,
-                work_dir,
-                label="connect",
-            )
-            if artifact_rc:
-                return artifact_rc
+            if do_hgrep:
+                if not conn_paths.hgrep_gate_report.is_file():
+                    print(
+                        f"connect: missing hgrep gate report "
+                        f"{conn_paths.hgrep_gate_report}",
+                        file=sys.stderr,
+                    )
+                    return 2
+            else:
+                artifact_rc = _fail_if_missing_verification_artifacts(
+                    cfg,
+                    work_dir,
+                    label="connect",
+                )
+                if artifact_rc:
+                    return artifact_rc
             stdout_phase = "logical" if do_logical else "text"
             body = format_connect_results_tsv(
                 connect_results,
