@@ -1632,3 +1632,25 @@ def merge_run_config(base: RunConfig, cli: RunConfig, args: Any) -> RunConfig:
     if args.no_log_file:
         out = replace(out, no_log_file=True)
     return out
+
+
+_SUITE_SHARED_STEP_FIELDS = (
+    "refresh_cache",
+    "no_cache",
+    "cache_dir",
+    "quiet",
+    "log_file",
+    "no_log_file",
+    "jobs",
+    "low_memory",
+    "index_cwd",
+)
+
+
+def inherit_shared_run_fields(step: RunConfig, shared: RunConfig) -> RunConfig:
+    """Apply merged top-level / CLI settings onto a flat-suite step RunConfig."""
+    updates = {name: getattr(shared, name) for name in _SUITE_SHARED_STEP_FIELDS}
+    merged_defines = dict(step.defines_map)
+    merged_defines.update(shared.defines_map)
+    updates["defines"] = tuple(merged_defines.items())
+    return replace(step, **updates)

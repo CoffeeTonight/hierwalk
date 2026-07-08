@@ -76,6 +76,7 @@ from hierwalk.run_request import (
     load_run_request_with_jobs_source,
     loads_json_document,
     merge_options_from_connect_batch_json,
+    inherit_shared_run_fields,
     merge_run_config,
     normalize_run_mode,
     resolve_connectivity_request,
@@ -595,6 +596,11 @@ def main(argv=None) -> int:
         if suite_plan:
             test_plan = [(entry, run_cfg) for entry, run_cfg in suite_plan]
         cfg = merge_run_config(base_cfg, cli_cfg, args)
+        if test_plan:
+            test_plan = [
+                (entry, inherit_shared_run_fields(run_cfg, cfg))
+                for entry, run_cfg in test_plan
+            ]
         config_env_document = test_document
 
     connect_batch_jobs_source: Optional[str] = None

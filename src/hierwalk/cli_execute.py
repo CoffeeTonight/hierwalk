@@ -183,7 +183,6 @@ def execute_run(cfg: RunConfig, ap) -> int:
 
     fl = None
     if hgrep_mode and not cfg.refresh_cache:
-        from hierwalk.cache import resolve_run_work_dir, work_base_dir
         from hierwalk.filelist import filelist_result_from_grep_hie
         from hierwalk.hierarchy_grep import load_grep_hie, resolve_grep_hie_path
 

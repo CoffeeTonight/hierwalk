@@ -6,7 +6,11 @@ import json
 import subprocess
 from pathlib import Path
 
+from dataclasses import replace
+
 from hierwalk.run_request import (
+    RunConfig,
+    inherit_shared_run_fields,
     load_run_request_with_jobs_source,
     loads_json_document,
     resolve_connectivity_request,
@@ -402,3 +406,39 @@ def test_cli_runs_flat_suite(tmp_path: Path):
     assert "mode=path-walk" in proc.stderr
     assert "kind=run_io_trace" in proc.stderr
     assert "kind=run_cone_trace" in proc.stderr
+
+
+def test_inherit_shared_run_fields_propagates_refresh_cache():
+    shared = RunConfig(
+        filelist="fl.f",
+        refresh_cache=True,
+        no_cache=True,
+        jobs=4,
+    )
+    step = RunConfig(filelist="fl.f", refresh_cache=False, flat_suite_step=True)
+    merged = inherit_shared_run_fields(step, shared)
+    assert merged.refresh_cache is True
+    assert merged.no_cache is True
+    assert merged.jobs == 4
+    assert merged.flat_suite_step is True
+
+
+def test_build_test_run_configs_inherits_cli_refresh_cache(tmp_path: Path):
+    doc = {
+        "filelist": "fl.f",
+        "top": "top",
+        "run_on_full_index": {"enable": 0},
+        "run_conn_check": {
+            "enable": 1,
+            "connect_phase": "hgrep",
+            "checks": [{"id": "hg1", "a": "top.a", "b": "top.b"}],
+        },
+    }
+    suite = parse_flat_run_suite(doc, base_dir=tmp_path)
+    shared = replace(suite.shared, refresh_cache=True)
+    _, cfg = build_test_run_configs(
+        replace(suite, shared=shared),
+        doc,
+        base_dir=tmp_path,
+    )[0]
+    assert cfg.refresh_cache is True
