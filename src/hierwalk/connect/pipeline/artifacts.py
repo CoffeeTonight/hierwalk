@@ -137,6 +137,7 @@ class ConnectOutputPaths:
     logical_tsv: Path
     hierarchy_text_tsv: Path
     hierarchy_logical_tsv: Path
+    hgrep_gate_report: Path
 
 
 def default_verification_artifact_name(kind: str) -> str:
@@ -179,6 +180,22 @@ def hierarchy_output_basename(output: str = "conn.tsv") -> str:
     return f"{hier_stem}{suffix}"
 
 
+def hgrep_gate_report_basename(output: str = "conn.tsv") -> str:
+    """Per-check hierarchy_grep gate report paired with a connect output name."""
+    logical_name = connect_output_basename(output)
+    stem = Path(logical_name).stem
+    suffix = Path(logical_name).suffix or ".tsv"
+    if stem.endswith("_conn"):
+        report_stem = f"{stem[:-5]}_hgrep_gate"
+    elif stem == "conn":
+        report_stem = "conn.hgrep_gate"
+    else:
+        report_stem = f"{stem}_hgrep_gate"
+    if suffix == ".tsv":
+        return f"{report_stem}.report"
+    return f"{report_stem}{suffix}.report"
+
+
 def work_dir_artifact_path(
     work_dir: Path,
     output: str,
@@ -217,6 +234,7 @@ def connect_output_paths(
         logical_tsv=root / logical_name,
         hierarchy_text_tsv=root / hier_text,
         hierarchy_logical_tsv=root / hier_logical,
+        hgrep_gate_report=root / hgrep_gate_report_basename(output),
     )
 
 

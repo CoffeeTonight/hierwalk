@@ -8,6 +8,7 @@ import pytest
 
 from hierwalk.connect.hierarchy_grep_gate import (
     flat_rows_from_resolve,
+    format_hierarchy_grep_gate_report,
     gate_connect_check,
     prepare_hierarchy_grep_session,
 )
@@ -43,6 +44,54 @@ def test_gate_strips_port_tail_for_hierarchy_resolve(tmp_path: Path):
     assert ep_a.hierarchy == "top.u_a"
     assert ep_a.port_tail == "probe"
     assert ep_a.ok
+
+
+def test_gate_connect_check_writes_report_on_finish(tmp_path: Path):
+    top_v = _write(
+        tmp_path,
+        "top.v",
+        """
+        module child (output logic out);
+          assign out = 1'b0;
+        endmodule
+        module top;
+          child u_a ();
+        endmodule
+        """,
+    )
+    session = prepare_hierarchy_grep_session([top_v], top="top")
+    session.file_grep_index(wait=True)
+    report_path = tmp_path / "conn.hgrep_gate.report"
+    chk = ConnectivityCheck("top.u_a.out", "top.u_a.out", check_id="rep1")
+    gate = gate_connect_check(
+        chk,
+        session,
+        top="top",
+        index=DesignIndex({}),
+        report_path=report_path,
+    )
+    assert gate.status == "pass"
+    text = report_path.read_text(encoding="utf-8")
+    assert "Hierarchy grep gate batch report" in text
+    assert "--- check rep1 ---" in text
+    assert '"status": "pass"' in text
+    assert "hgrep-gate-report" not in text  # file only; stderr line checked separately
+
+
+def test_format_hierarchy_grep_gate_report_contains_json(tmp_path: Path):
+    top_v = _write(tmp_path, "top.v", "module top; endmodule\n")
+    session = prepare_hierarchy_grep_session([top_v], top="top")
+    chk = ConnectivityCheck("top.x", "top.x", check_id="fmt1")
+    gate = gate_connect_check(chk, session, top="top", index=DesignIndex({}))
+    report = format_hierarchy_grep_gate_report(
+        gate,
+        check_id="fmt1",
+        endpoint_a=chk.endpoint_a,
+        endpoint_b=chk.endpoint_b,
+        top="top",
+    )
+    assert "json:" in report
+    assert '"check_id": "fmt1"' in report
 
 
 def test_gate_pass_builds_rows_and_scoped_files(tmp_path: Path):
@@ -127,6 +176,47 @@ def test_gate_miss_rejects_without_fallback(tmp_path: Path):
     assert gate.status == "reject"
     assert gate.fast_fail_result is not None
     assert not gate.fast_fail_result.connected
+
+
+def test_connect_pipeline_writes_hgrep_gate_report(tmp_path: Path):
+    from hierwalk.connect.shared.request import ConnectivityRequest
+    from hierwalk.filelist import parse_filelist
+    from hierwalk.path_walk import run_path_walk_connect
+
+    top_v = _write(
+        tmp_path,
+        "top.v",
+        """
+        module child (output logic out);
+          assign out = 1'b0;
+        endmodule
+        module top (input logic clk);
+          child u_a ();
+        endmodule
+        """,
+    )
+    fl = tmp_path / "fl.f"
+    fl.write_text(f"{top_v}\n", encoding="utf-8")
+    fl_result = parse_filelist(str(fl))
+    out_dir = tmp_path / "out"
+    request = ConnectivityRequest(
+        checks=(ConnectivityCheck("top.u_a.out", "top.u_a.out", check_id="hg1"),),
+        top="top",
+    )
+    batch, _index, _state = run_path_walk_connect(
+        request,
+        fl_result,
+        top="top",
+        no_cache=True,
+        connect_phase="text",
+        connect_output_dir=out_dir,
+    )
+    assert batch.results[0].connected, batch.results[0].errors
+    report_path = out_dir / "conn.hgrep_gate.report"
+    assert report_path.is_file(), f"missing gate report under {out_dir}"
+    text = report_path.read_text(encoding="utf-8")
+    assert "--- check hg1 ---" in text
+    assert '"status": "pass"' in text
 
 
 def test_connect_both_phase_emits_hgrep_gate_log(tmp_path: Path):

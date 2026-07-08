@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import json
+import os
 import sys
 import threading
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple, TYPE_CHECKING
 
 from hierwalk.connect.shared.endpoints import _port_exists, inst_leaf_exists_in_module
@@ -21,11 +25,172 @@ if TYPE_CHECKING:
     from hierwalk.path_walk import PathWalkState
 
 
+_GATE_REPORT_LOCK = threading.Lock()
+_GATE_REPORT_HEADERS: Set[str] = set()
+
+
 def emit_hgrep_gate_log(log_line: str) -> None:
     """Always emit tier0 gate lines to stderr for captured connect logs."""
     if not log_line:
         return
     print(log_line, file=sys.stderr, flush=True)
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+
+def resolve_hgrep_gate_report_path(
+    *,
+    connect_output_dir: Optional[Path] = None,
+    connect_output_name: str = "conn.tsv",
+) -> Optional[Path]:
+    """Resolve per-run hierarchy_grep gate report path (or ``None`` when disabled)."""
+    raw = os.environ.get("HIERWALK_HGREP_GATE_REPORT", "").strip()
+    if raw.lower() in ("0", "false", "no", "off"):
+        return None
+    if raw:
+        return Path(raw).expanduser()
+    if connect_output_dir is None:
+        return None
+    from hierwalk.connect.pipeline.artifacts import connect_output_paths
+
+    return connect_output_paths(connect_output_dir, connect_output_name).hgrep_gate_report
+
+
+def _gate_report_payload(
+    gate: "HierarchyGrepCheckGate",
+    *,
+    check_id: str,
+    endpoint_a: Any,
+    endpoint_b: Any,
+    top: str,
+) -> Dict[str, Any]:
+    return {
+        "resolved_at": _utc_now_iso(),
+        "check_id": check_id,
+        "top": top,
+        "endpoint_a": str(endpoint_a),
+        "endpoint_b": str(endpoint_b),
+        "status": gate.status,
+        "use_grep_fast_path": gate.use_grep_fast_path,
+        "scoped_files": list(gate.scoped_files),
+        "endpoints": [
+            {
+                "spec": g.spec,
+                "hierarchy_input": g.hierarchy_input,
+                "hierarchy": g.hierarchy,
+                "port_tail": g.port_tail,
+                "ok": g.ok,
+                "ambiguous": g.ambiguous,
+                "error": g.error,
+                "scoped_files": list(g.scoped_files),
+            }
+            for g in gate.endpoint_gates
+        ],
+        "rows": [
+            {
+                "full_path": r.full_path,
+                "module": r.module,
+                "file": r.file,
+                "parent_path": r.parent_path,
+            }
+            for r in gate.rows
+        ],
+    }
+
+
+def format_hierarchy_grep_gate_report(
+    gate: "HierarchyGrepCheckGate",
+    *,
+    check_id: str = "",
+    endpoint_a: Any = "",
+    endpoint_b: Any = "",
+    top: str = "",
+) -> str:
+    """Human-readable per-check gate report with embedded JSON."""
+    cid = check_id or "-"
+    lines = [
+        "Hierarchy grep gate report",
+        f"  resolved_at: {_utc_now_iso()}",
+        f"  check_id: {cid}",
+        f"  top: {top}",
+        f"  endpoint_a: {endpoint_a}",
+        f"  endpoint_b: {endpoint_b}",
+        f"  status: {gate.status}",
+        f"  use_grep_fast_path: {gate.use_grep_fast_path}",
+        f"  scoped_files: {len(gate.scoped_files)}",
+    ]
+    for fpath in gate.scoped_files:
+        lines.append(f"    - {fpath}")
+    lines.append("  endpoints:")
+    for g in gate.endpoint_gates:
+        flag = "OK" if g.ok else "MISS"
+        amb = " ambiguous" if g.ambiguous else ""
+        tail = f" port_tail={g.port_tail!r}" if g.port_tail else ""
+        lines.append(
+            f"    [{flag}{amb}] {g.spec!r} hier={g.hierarchy!r}{tail} "
+            f"files={len(g.scoped_files)}"
+        )
+        if g.hierarchy_input != g.hierarchy:
+            lines.append(f"         hierarchy_input={g.hierarchy_input!r}")
+        if g.error:
+            lines.append(f"         error={g.error}")
+    if gate.rows:
+        lines.append("  rows:")
+        for row in gate.rows:
+            lines.append(
+                f"    {row.full_path} module={row.module!r} file={row.file}"
+            )
+    payload = _gate_report_payload(
+        gate,
+        check_id=cid,
+        endpoint_a=endpoint_a,
+        endpoint_b=endpoint_b,
+        top=top,
+    )
+    lines.append("json:")
+    lines.append(json.dumps(payload, indent=2, ensure_ascii=False))
+    return "\n".join(lines)
+
+
+def write_hierarchy_grep_gate_report(
+    gate: "HierarchyGrepCheckGate",
+    *,
+    report_path: str | Path,
+    check_id: str = "",
+    endpoint_a: Any = "",
+    endpoint_b: Any = "",
+    top: str = "",
+) -> Path:
+    """Append one gate report block to *report_path* as soon as the check finishes."""
+    path = Path(report_path).expanduser()
+    text = format_hierarchy_grep_gate_report(
+        gate,
+        check_id=check_id,
+        endpoint_a=endpoint_a,
+        endpoint_b=endpoint_b,
+        top=top,
+    )
+    with _GATE_REPORT_LOCK:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        key = str(path.resolve())
+        write_header = key not in _GATE_REPORT_HEADERS
+        if write_header:
+            _GATE_REPORT_HEADERS.add(key)
+        with path.open("a", encoding="utf-8") as fh:
+            if write_header:
+                fh.write(
+                    "Hierarchy grep gate batch report\n"
+                    f"  started_at: {_utc_now_iso()}\n"
+                    f"  report_path: {path}\n"
+                    "\n"
+                )
+            fh.write(f"--- check {check_id or '-'} ---\n")
+            fh.write(text)
+            fh.write("\n\n")
+    emit_hgrep_gate_log(f"hgrep-gate-report check={check_id or '-'} path={path}")
+    return path
 
 
 def hydrate_gate_scoped_rtl(
@@ -546,6 +711,7 @@ def gate_connect_check(
     top: str,
     index: DesignIndex,
     hard_fail_on_miss: bool = False,
+    report_path: Optional[str | Path] = None,
 ) -> HierarchyGrepCheckGate:
     """
     Tier0 gate for one connect check.
@@ -555,6 +721,15 @@ def gate_connect_check(
     """
     def _finish(gate: HierarchyGrepCheckGate) -> HierarchyGrepCheckGate:
         emit_hgrep_gate_log(gate.log_line)
+        if report_path is not None:
+            write_hierarchy_grep_gate_report(
+                gate,
+                report_path=report_path,
+                check_id=str(chk.check_id or ""),
+                endpoint_a=chk.endpoint_a,
+                endpoint_b=chk.endpoint_b,
+                top=top,
+            )
         return gate
 
     if chk.expand is not None:

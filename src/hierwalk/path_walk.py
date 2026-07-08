@@ -2952,6 +2952,7 @@ def _pipeline_path_walk_text_conn(
                     hgrep_session,
                     top=conn_session.top,
                     index=conn_session.index,
+                    report_path=conn_session.hgrep_gate_report_path,
                 )
                 state._emit_walk(gate.log_line)
                 gate_result = text_check_from_gate(
@@ -3915,6 +3916,12 @@ def run_path_walk_connect(
             connect_output_dir,
             top=top_name,
             cache_dir=cache_dir,
+        )
+        from hierwalk.connect.hierarchy_grep_gate import resolve_hgrep_gate_report_path
+
+        conn_session.hgrep_gate_report_path = resolve_hgrep_gate_report_path(
+            connect_output_dir=resolved_output_dir,
+            connect_output_name=connect_output_name,
         )
         out_paths = connect_output_paths(resolved_output_dir, connect_output_name)
         _init_hierarchy_tsv_writers(

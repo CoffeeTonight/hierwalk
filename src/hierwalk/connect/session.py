@@ -7,6 +7,7 @@ import os
 import sys
 import threading
 import time
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, Dict, IO, List, Mapping, Optional, Sequence, Tuple, Union
@@ -434,6 +435,7 @@ class ConnectivitySession:
     elab_index: Optional[ElabIndex] = None
     resolve_param_dims: bool = True
     hgrep_session: Optional[Any] = field(default=None, repr=False)
+    hgrep_gate_report_path: Optional[Path] = field(default=None, repr=False)
     _effective_defines_cache: Dict[str, str] = field(default_factory=dict, repr=False)
     _effective_defines_stamp: Tuple[
         Tuple[str, ...],
@@ -978,6 +980,7 @@ class ConnectivitySession:
                     self.hgrep_session,
                     top=self.top,
                     index=self.index,
+                    report_path=self.hgrep_gate_report_path,
                 )
                 if on_heartbeat is not None:
                     on_heartbeat(gate.log_line)
