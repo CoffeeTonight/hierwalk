@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import time
 from pathlib import Path
@@ -102,11 +103,12 @@ def _fail_if_missing_verification_artifacts(
 
 def execute_run(cfg: RunConfig, ap) -> int:
     connect_request: Optional[ConnectivityRequest] = None
-    if cfg.check_connect_batch or cfg.connect_inline:
+    if cfg.check_connect_batch or cfg.connect_inline or cfg.check_hgrep:
         connect_request = resolve_connectivity_request(cfg)
 
     effective_mode = resolve_effective_run_mode(cfg, connect_request)
     index_strategy = resolve_effective_index_strategy(cfg, effective_mode)
+    hgrep_mode = index_strategy == "hgrep"
     path_walk_mode = index_strategy == "path-walk"
     cone_mode = effective_mode == "cone"
     inst_trace_mode = effective_mode == "inst-trace"
@@ -122,6 +124,7 @@ def execute_run(cfg: RunConfig, ap) -> int:
         ap.error("use either fanin_cone or fanout_cone, not both")
     if (
         path_walk_mode
+        and not hgrep_mode
         and connect_run_mode
         and connect_request is None
         and not cfg.check_connect
@@ -178,14 +181,48 @@ def execute_run(cfg: RunConfig, ap) -> int:
             f"HIERWALK_LAZY=0 to disable)"
         )
 
-    fl = parse_filelist(
-        cfg.filelist,
-        index_cwd=cfg.index_cwd,
-        extra_defines=extra_defines,
-        on_progress=on_progress,
-        ignore_filelists=list(cfg.ignore_filelist),
-        defer_source_exists=lazy_filelist_defer_exists(),
-    )
+    fl = None
+    if hgrep_mode and not cfg.refresh_cache:
+        from hierwalk.cache import resolve_run_work_dir, work_base_dir
+        from hierwalk.filelist import filelist_result_from_grep_hie
+        from hierwalk.hierarchy_grep import load_grep_hie, resolve_grep_hie_path
+
+        top_guess = (
+            cfg.top
+            or (connect_request.top if connect_request else "")
+            or ""
+        ).strip()
+        if top_guess:
+            work_early = resolve_run_work_dir(
+                top_guess,
+                base=work_base_dir(cfg.index_cwd),
+                explicit_cache_dir=cfg.cache_dir,
+            )
+            cache_path = resolve_grep_hie_path(work_early)
+            if cache_path.is_file():
+                try:
+                    cached = load_grep_hie(cache_path)
+                    fl = filelist_result_from_grep_hie(
+                        cached,
+                        top=top_guess,
+                        defines=extra_defines,
+                    )
+                    if on_progress:
+                        on_progress(
+                            f"hgrep: skip filelist expand "
+                            f"(grep_hie.json sources={len(fl.source_files)})"
+                        )
+                except (OSError, ValueError, json.JSONDecodeError):
+                    fl = None
+    if fl is None:
+        fl = parse_filelist(
+            cfg.filelist,
+            index_cwd=cfg.index_cwd,
+            extra_defines=extra_defines,
+            on_progress=on_progress,
+            ignore_filelists=list(cfg.ignore_filelist),
+            defer_source_exists=lazy_filelist_defer_exists(),
+        )
     if not fl.source_files:
         print("No sources in filelist", file=sys.stderr)
         return 1
@@ -243,7 +280,7 @@ def execute_run(cfg: RunConfig, ap) -> int:
         audit_extra = dict(cfg.defines_map or {})
         if connect_request is not None:
             audit_extra.update(connect_request.defines)
-        if path_walk_mode:
+        if path_walk_mode or hgrep_mode:
             audit_defines = dict(fl.defines)
             audit_defines.update(audit_extra)
         else:
@@ -272,15 +309,24 @@ def execute_run(cfg: RunConfig, ap) -> int:
             ),
             stream=sys.stderr,
         )
-        loader = "path-walk" if path_walk_mode else "load_or_build_index"
+        if hgrep_mode:
+            loader = "hgrep(grep_hie.json)"
+        elif path_walk_mode:
+            loader = "path-walk"
+        else:
+            loader = "load_or_build_index"
         print(
             f"run: enable-trace: stage=execute_run effective_mode={effective_mode} "
             f"index_strategy={index_strategy} index_loader={loader}",
             file=sys.stderr,
         )
 
-    if path_walk_mode:
-        if on_progress:
+    if hgrep_mode or path_walk_mode:
+        if hgrep_mode and on_progress:
+            on_progress(
+                "hgrep: hierarchy_grep gate only (no path-walk index; grep_hie.json)"
+            )
+        elif path_walk_mode and on_progress:
             on_progress("path-walk: on-demand index (endpoint paths only)")
         top_for_walk = (
             cfg.top
@@ -307,7 +353,7 @@ def execute_run(cfg: RunConfig, ap) -> int:
         compile_defines.update(extra_defines)
         elapsed = time.perf_counter() - t0
 
-        if inst_trace_mode:
+        if inst_trace_mode and path_walk_mode:
             assert cfg.inst_trace is not None
             try:
                 index, pw_state, top_name = run_path_walk_index(
@@ -362,7 +408,7 @@ def execute_run(cfg: RunConfig, ap) -> int:
             )
             report_mode = "inst-trace"
             search_pattern = cfg.inst_trace.instance
-        elif cone_mode:
+        elif cone_mode and path_walk_mode:
             cone_label = cfg.fanout_cone or cfg.fanin_cone or ""
             try:
                 index, pw_state, top_name = run_path_walk_index(

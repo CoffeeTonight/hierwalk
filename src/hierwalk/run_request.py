@@ -510,7 +510,13 @@ def resolve_effective_index_strategy(
     Verification modes (connect, inst-trace, cone) default to path-walk so RTL is
     preprocessed on-demand along endpoint hierarchy paths, not across the full filelist.
     Set ``index_strategy: full-index`` to force the legacy whole-design index.
+
+    ``connect_phase: hgrep`` uses ``hgrep`` strategy — no path-walk index, only
+    hierarchy_grep gate + ``grep_hie.json`` cache.
     """
+    phase = (cfg.verification_phase or "").strip().lower()
+    if phase == "hgrep" or effective_mode == "check-hgrep":
+        return "hgrep"
     explicit = normalize_index_strategy(cfg.index_strategy)
     if explicit:
         return explicit

@@ -512,6 +512,32 @@ def test_prepare_hierarchy_grep_session_refresh_cache_rebuilds(tmp_path: Path):
     assert "module_index" in cache.read_text(encoding="utf-8")
 
 
+def test_run_hgrep_connect_batch_skips_full_design_index(tmp_path: Path, monkeypatch):
+    from hierwalk.connect.hierarchy_grep_gate import run_hgrep_connect_batch
+    from hierwalk.connect.shared.request import ConnectivityRequest
+    from hierwalk.index import DesignIndex
+
+    top_v = _write(tmp_path, "top.v", "module top; wire x; endmodule\n")
+    other_v = _write(tmp_path, "other.v", "module other; wire y; endmodule\n")
+    request = ConnectivityRequest(
+        checks=(ConnectivityCheck("top.x", "top.x", check_id="hg1"),),
+        top="top",
+    )
+
+    def _boom(_sources):
+        raise AssertionError("DesignIndex.build must not run for hgrep-only batch")
+
+    monkeypatch.setattr(DesignIndex, "build", staticmethod(_boom))
+    batch, _index = run_hgrep_connect_batch(
+        request,
+        [top_v, other_v],
+        top="top",
+        connect_output_dir=tmp_path / "out",
+    )
+    assert batch.results[0].connected
+    assert batch.results[0].mode == "hgrep"
+
+
 def test_connect_phase_hgrep_uses_grep_hie_cache(tmp_path: Path):
     from hierwalk.connect.shared.request import ConnectivityRequest
     from hierwalk.filelist import parse_filelist

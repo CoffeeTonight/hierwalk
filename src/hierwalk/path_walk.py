@@ -3823,7 +3823,7 @@ def run_path_walk_connect(
                 on_emit=_emit_hgrep,
             )
             mod_db = PathWalkModuleDb(
-                sources,
+                [],
                 index,
                 defines=defines,
                 cache_dir=cache_dir,

@@ -602,6 +602,20 @@ def _row_body_for_gate_probe(
 ) -> str:
     from hierwalk.connect.shared.endpoints import _resolve_row_module_body
 
+    if row.file:
+        key = abs_rtl_path(row.file)
+        if module_body_cache is not None:
+            cached = module_body_cache.get(key)
+            if cached is not None and cached.strip():
+                return cached
+        try:
+            body = Path(key).read_text(encoding="utf-8", errors="ignore")
+            if body.strip():
+                if module_body_cache is not None:
+                    module_body_cache[key] = body  # type: ignore[index]
+                return body
+        except OSError:
+            pass
     body = _resolve_row_module_body(
         index,
         row,
@@ -620,6 +634,7 @@ def _peel_grep_wire_tail(
     *,
     index: DesignIndex,
     scoped_files: Sequence[str] = (),
+    module_body_cache: Optional[Mapping[str, str]] = None,
 ) -> HierarchyGrepEndpointGate:
     """When grep labels a module-local wire as an inst leaf, peel it as port_tail."""
     from hierwalk.connect.shared.endpoints import wire_tail_exists_fast
@@ -633,7 +648,11 @@ def _peel_grep_wire_tail(
     parent_row = next((r for r in gate.rows if r.full_path == parent), None)
     if parent_row is None:
         return gate
-    body = _row_body_for_gate_probe(index, parent_row)
+    body = _row_body_for_gate_probe(
+        index,
+        parent_row,
+        module_body_cache=module_body_cache,
+    )
     if inst_leaf_exists_in_module(index, parent_row, leaf, body=body):
         return gate
     if not wire_tail_exists_fast(body, leaf) and not _port_exists(
@@ -777,6 +796,7 @@ def gate_connect_check(
     index: DesignIndex,
     hard_fail_on_miss: bool = False,
     report_path: Optional[str | Path] = None,
+    module_body_cache: Optional[Mapping[str, str]] = None,
 ) -> HierarchyGrepCheckGate:
     """
     Tier0 gate for one connect check.
@@ -830,7 +850,12 @@ def gate_connect_check(
         sorted({abs_rtl_path(f) for g in raw_gates for f in g.scoped_files if f})
     )
     gates = tuple(
-        _peel_grep_wire_tail(g, index=index, scoped_files=peel_scoped)
+        _peel_grep_wire_tail(
+            g,
+            index=index,
+            scoped_files=peel_scoped,
+            module_body_cache=module_body_cache,
+        )
         for g in raw_gates
     )
 
@@ -903,6 +928,7 @@ def gate_connect_check(
         merged,
         index=index,
         scoped_files=tuple(sorted(scoped)),
+        module_body_cache=module_body_cache,
     ):
         return _finish(
             HierarchyGrepCheckGate(
@@ -1057,12 +1083,14 @@ def run_hgrep_connect_batch(
     if not paths:
         raise ValueError("no RTL sources for connect_phase=hgrep")
 
-    index = DesignIndex.build(
-        {
-            p: Path(p).read_text(encoding="utf-8", errors="ignore")
-            for p in paths
-        }
-    )
+    if on_emit is not None:
+        on_emit(
+            "connect-hgrep begin "
+            f"checks={len(request.checks)} sources={len(paths)} "
+            "(no path-walk index; grep_hie gate only)"
+        )
+    index = DesignIndex({})
+    module_body_cache: Dict[str, str] = {}
     session = prepare_hierarchy_grep_session(
         paths,
         top=top_name,
@@ -1084,6 +1112,7 @@ def run_hgrep_connect_batch(
             top=top_name,
             index=index,
             report_path=report_path,
+            module_body_cache=module_body_cache,
         )
         if on_emit is not None:
             on_emit(gate.log_line)

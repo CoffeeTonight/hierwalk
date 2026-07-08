@@ -529,6 +529,10 @@ def run_config_for_test(
             else:
                 raise ValueError(f"{entry.kind} requires checks")
 
+        conn_phase = _parse_connect_phase(spec)
+        if conn_phase == "hgrep":
+            exec_mode = "check-hgrep"
+            index_strategy = "hgrep"
         return replace(
             cfg,
             mode=exec_mode,
@@ -548,7 +552,7 @@ def run_config_for_test(
             flat_suite_step=True,
             verification_step_kind=entry.kind,
             verification_step_name=entry.name or f"{entry.kind}[{entry.index}]",
-            verification_phase=_parse_connect_phase(spec),
+            verification_phase=conn_phase,
         )
 
     if entry.kind == RUN_IO_TRACE:
@@ -833,14 +837,12 @@ def format_suite_enable_trace(
             and suite.full_index_spec is not None
             and suite.full_index_enabled
         )
-        index_path = (
-            "path-walk"
-            if (
-                cfg.index_strategy == "path-walk"
-                or cfg.mode == "path-walk"
-            )
-            else "full-index(load_or_build_index)"
-        )
+        if cfg.index_strategy == "hgrep" or cfg.mode == "check-hgrep":
+            index_path = "hgrep(grep_hie.json)"
+        elif cfg.index_strategy == "path-walk" or cfg.mode == "path-walk":
+            index_path = "path-walk"
+        else:
+            index_path = "full-index(load_or_build_index)"
         if entry.kind == RUN_ON_FULL_INDEX:
             index_path = f"hierarchy-step(mode={cfg.mode})"
         lines.append(

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from hierwalk.hch_compat.filelist_preprocess import FilelistResult as HchFilelistResult
 from hierwalk.hch_compat.filelist_preprocess import expand_filelist
@@ -104,6 +104,23 @@ def filelist_status_map(fl: FilelistResult) -> Dict[str, str]:
         flag = "True" if rec.exists else "False"
         out[path] = f"{flag}: {rec.chain}"
     return out
+
+
+def filelist_result_from_grep_hie(
+    cached: Mapping[str, Any],
+    *,
+    top: str = "",
+    defines: Optional[Mapping[str, str]] = None,
+) -> FilelistResult:
+    """Build a minimal filelist view from ``grep_hie.json`` (skip full expand)."""
+    paths = [Path(p) for p in cached.get("rtl_paths", ()) if p]
+    top_name = (top or str(cached.get("top") or "")).strip()
+    tops = [top_name] if top_name else []
+    return FilelistResult(
+        source_files=paths,
+        defines=dict(defines or {}),
+        top_modules=tops,
+    )
 
 
 def parse_filelist(
