@@ -433,6 +433,7 @@ class ConnectivitySession:
     )
     elab_index: Optional[ElabIndex] = None
     resolve_param_dims: bool = True
+    hgrep_session: Optional[Any] = field(default=None, repr=False)
     _effective_defines_cache: Dict[str, str] = field(default_factory=dict, repr=False)
     _effective_defines_stamp: Tuple[
         Tuple[str, ...],
@@ -814,10 +815,19 @@ class ConnectivitySession:
         dedup_lock: Optional[threading.Lock] = None,
         rows: Optional[Sequence[FlatRow]] = None,
         elab_index: Optional[ElabIndex] = None,
+        hgrep_gate_rows: Optional[Sequence[FlatRow]] = None,
+        hgrep_scoped_sources: Optional[Sequence[str]] = None,
     ) -> ConnectResult:
         """Single text-phase check with shared coarse grep dedup cache."""
-        active_rows = self.rows if rows is None else rows
-        if elab_index is not None:
+        active_rows = list(self.rows if rows is None else rows)
+        if hgrep_gate_rows:
+            merged: Dict[str, FlatRow] = {r.full_path: r for r in hgrep_gate_rows}
+            for row in active_rows:
+                merged.setdefault(row.full_path, row)
+            active_rows = list(merged.values())
+            active_elab = ElabIndex.from_rows(active_rows)
+            lookup = active_elab.rows_by_path
+        elif elab_index is not None:
             active_elab = elab_index
             lookup = elab_index.rows_by_path
         elif rows is not None:
@@ -826,6 +836,11 @@ class ConnectivitySession:
         else:
             active_elab = self.elab_index
             lookup = self.rows_by_path
+        active_sources = (
+            list(hgrep_scoped_sources)
+            if hgrep_scoped_sources
+            else self.sources
+        )
         if chk.expand is not None and chk.expand.map_kind == "waypoint-fanout":
             return self.check_entry(chk, trace=trace)
 
@@ -862,7 +877,7 @@ class ConnectivitySession:
                 walk_caches=self.text_walk_caches,
                 decl_net_cache=self.decl_net_cache,
                 module_body_cache=self.module_body_cache,
-                sources=self.sources,
+                sources=active_sources,
             )
 
         fanout_mode = chk.expand.fanout_mode if chk.expand is not None else "all"
@@ -898,7 +913,7 @@ class ConnectivitySession:
                     walk_caches=self.text_walk_caches,
                     decl_net_cache=self.decl_net_cache,
                     module_body_cache=self.module_body_cache,
-                    sources=self.sources,
+                    sources=active_sources,
                 )
             )
         return aggregate_connect_results(
@@ -952,6 +967,72 @@ class ConnectivitySession:
 
         def _one(chk: ConnectivityCheck) -> ConnectResult:
             t0 = time.perf_counter()
+            if self.hgrep_session is not None:
+                from hierwalk.connect.hierarchy_grep_gate import (
+                    gate_connect_check,
+                    text_check_from_gate,
+                )
+
+                gate = gate_connect_check(
+                    chk,
+                    self.hgrep_session,
+                    top=self.top,
+                    index=self.index,
+                )
+                if on_heartbeat is not None:
+                    on_heartbeat(gate.log_line)
+                if gate.fast_fail_result is not None:
+                    if record_timing:
+                        from hierwalk.verification_timing import record_connect_check
+
+                        record_connect_check(
+                            check_id=chk.check_id,
+                            endpoint_a=str(chk.endpoint_a),
+                            endpoint_b=str(chk.endpoint_b),
+                            elapsed_sec=time.perf_counter() - t0,
+                        )
+                    _bump_checks_done()
+                    return gate.fast_fail_result
+                if gate.use_grep_fast_path:
+                    from hierwalk.connect.hierarchy_grep_gate import (
+                        fold_gate_rows_with_param_ctx,
+                        scoped_sources_for_gate,
+                    )
+                    from hierwalk.models import ElabIndex
+
+                    folded = fold_gate_rows_with_param_ctx(
+                        gate.rows,
+                        index=self.index,
+                        top=self.top,
+                    )
+                    scoped = scoped_sources_for_gate(
+                        gate,
+                        self.sources or (),
+                        index=self.index,
+                    )
+                    worker_elab = ElabIndex.from_rows(list(folded))
+                    result = self.text_check_entry(
+                        chk,
+                        trace=use_trace,
+                        dedup_cache=dedup_cache,
+                        dedup_stats=dedup_stats,
+                        dedup_lock=dedup_lock,
+                        rows=folded,
+                        elab_index=worker_elab,
+                        hgrep_gate_rows=folded,
+                        hgrep_scoped_sources=scoped,
+                    )
+                    if record_timing:
+                        from hierwalk.verification_timing import record_connect_check
+
+                        record_connect_check(
+                            check_id=chk.check_id,
+                            endpoint_a=str(chk.endpoint_a),
+                            endpoint_b=str(chk.endpoint_b),
+                            elapsed_sec=time.perf_counter() - t0,
+                        )
+                    _bump_checks_done()
+                    return result
             result = self.text_check_entry(
                 chk,
                 trace=use_trace,

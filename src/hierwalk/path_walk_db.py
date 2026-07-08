@@ -1799,6 +1799,22 @@ class PathWalkModuleDb:
         """RTL pool for tier-0 regex queue seeding (never the whole design by default)."""
         from hierwalk.perf import pw_tier0_global_enabled
 
+        override = getattr(self, "_override_queue_pool", None)
+        if override:
+            pool = list(override)
+            if self._ubpat_seek_module or ubpat_search_relevant(scope_anchor=scope_anchor):
+                ubpat_log(
+                    "SEARCH-SEED",
+                    via="gate-scoped-pool",
+                    policy=policy,
+                    anchor_file=scope_anchor,
+                    pool=len(pool),
+                    files=pool,
+                    seek=self._ubpat_seek_module,
+                    inst_leaf=self._ubpat_seek_inst_leaf,
+                )
+            return pool
+
         if scope_anchor:
             pool = list(self._scoped_pool_for_policy(scope_anchor, policy=policy))
             if pool:

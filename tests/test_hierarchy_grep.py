@@ -1,0 +1,256 @@
+"""Grep-first hierarchy resolution."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from hierwalk.inst_scan import coarse_hierarchy_path
+from hierwalk.hierarchy_grep import (
+    HierarchyGrepSession,
+    build_file_grep_index,
+    build_module_index,
+    dump_file_grep_index,
+    format_hierarchy_grep_report,
+    grep_modules_in_file,
+    hierarchy_grep_report,
+    load_file_grep_index,
+    resolve_hierarchy_grep,
+)
+
+
+def _write(tmp_path: Path, name: str, text: str) -> str:
+    p = tmp_path / name
+    p.write_text(text, encoding="utf-8")
+    return str(p.resolve())
+
+
+def test_grep_modules_and_duplicate_index(tmp_path: Path):
+    a = _write(
+        tmp_path,
+        "a.v",
+        "module dup (); endmodule\nmodule only_a (); endmodule\n",
+    )
+    b = _write(tmp_path, "b.v", "module dup (); endmodule\n")
+    assert grep_modules_in_file(a) == ["dup", "only_a"]
+    index = build_module_index([a, b])
+    assert index["dup"] == [a, b]
+    assert index["only_a"] == [a]
+
+
+def test_resolve_inst_chain_and_leaf_signal(tmp_path: Path):
+    top_v = _write(
+        tmp_path,
+        "top.v",
+        """
+        module child (input clk);
+          wire inner;
+        endmodule
+        module top;
+          child u_a ();
+        endmodule
+        """,
+    )
+    result = resolve_hierarchy_grep("top.u_a.inner", top="top", rtl_paths=[top_v])
+    assert result["ok"] is True
+    assert result["nodes"][-1]["kind"] == "signal"
+    assert result["nodes"][-1]["file"] == top_v
+    assert result["nodes"][1]["child_module"] == "child"
+
+
+def test_last_segment_can_be_inst(tmp_path: Path):
+    top_v = _write(
+        tmp_path,
+        "top.v",
+        """
+        module leaf (); endmodule
+        module top;
+          leaf u_b ();
+        endmodule
+        """,
+    )
+    result = resolve_hierarchy_grep("top.u_b", top="top", rtl_paths=[top_v])
+    assert result["ok"] is True
+    assert result["nodes"][-1]["kind"] == "inst"
+    assert result["nodes"][-1]["child_module"] == "leaf"
+
+
+def test_wire_inst_collision_prefers_inst_on_leaf(tmp_path: Path):
+    top_v = _write(
+        tmp_path,
+        "scope_b.v",
+        """
+        module child (); endmodule
+        module scope_b;
+          wire u_b;
+          child u_b ();
+        endmodule
+        """,
+    )
+    result = resolve_hierarchy_grep("scope_b.u_b", top="scope_b", rtl_paths=[top_v])
+    assert result["ok"] is True
+    assert result["nodes"][-1]["kind"] == "inst"
+    assert result["nodes"][-1]["child_module"] == "child"
+
+
+def test_internal_segment_must_be_inst(tmp_path: Path):
+    top_v = _write(
+        tmp_path,
+        "top.v",
+        """
+        module top;
+          wire u_a;
+        endmodule
+        """,
+    )
+    result = resolve_hierarchy_grep("top.u_a.sig", top="top", rtl_paths=[top_v])
+    assert result["ok"] is False
+    assert "instance" in result["error"]
+
+
+def test_resolve_includes_timing_fields(tmp_path: Path):
+    top_v = _write(
+        tmp_path,
+        "top.v",
+        """
+        module child (); endmodule
+        module top;
+          child u_a ();
+        endmodule
+        """,
+    )
+    result = resolve_hierarchy_grep("top.u_a", top="top", rtl_paths=[top_v])
+    assert result["ok"] is True
+    assert result.get("started_at")
+    assert result.get("resolved_at")
+    assert result.get("total_elapsed_ms", 0) >= 0
+    assert all("elapsed_ms" in node for node in result["nodes"])
+
+
+def test_report_contains_json_block(tmp_path: Path):
+    top_v = _write(
+        tmp_path,
+        "top.v",
+        "module top; wire x; endmodule\n",
+    )
+    report, data = hierarchy_grep_report("top.x", top="top", rtl_paths=[top_v])
+    assert "json:" in report
+    assert '"ok": true' in report
+    assert data["nodes"][-1]["found"] is True
+
+
+def test_coarse_hierarchy_path_strips_array_indices():
+    assert coarse_hierarchy_path("top.u_arr[0].sig[3]") == "top.u_arr.sig"
+    assert coarse_hierarchy_path("top.u_matrix.outer[0].inner[0].u_nest") == (
+        "top.u_matrix.outer.inner.u_nest"
+    )
+
+
+def test_resolve_strips_array_indices_like_text_conn(tmp_path: Path):
+    top_v = _write(
+        tmp_path,
+        "top.v",
+        """
+        module leaf (output logic out);
+          assign out = 1'b0;
+        endmodule
+        module top;
+          leaf u_arr [0:1] ();
+        endmodule
+        """,
+    )
+    result = resolve_hierarchy_grep("top.u_arr[0]", top="top", rtl_paths=[top_v])
+    assert result["ok"] is True
+    assert result["hierarchy_input"] == "top.u_arr[0]"
+    assert result["hierarchy"] == "top.u_arr"
+    assert result["nodes"][-1]["child_module"] == "leaf"
+
+
+def test_resolve_strips_port_slice_on_leaf(tmp_path: Path):
+    top_v = _write(
+        tmp_path,
+        "top.v",
+        """
+        module child (output logic [3:0] nibble);
+        endmodule
+        module top;
+          child u_a ();
+        endmodule
+        """,
+    )
+    result = resolve_hierarchy_grep("top.u_a.nibble[2]", top="top", rtl_paths=[top_v])
+    assert result["ok"] is True
+    assert result["hierarchy"] == "top.u_a.nibble"
+    assert result["nodes"][-1]["kind"] == "port"
+
+
+def test_resolve_uses_absolute_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    top_v = _write(tmp_path, "top.v", "module top; wire x; endmodule\n")
+    monkeypatch.chdir(tmp_path)
+    result = resolve_hierarchy_grep("top.x", top="top", rtl_paths=[Path("top.v")])
+    assert result["ok"] is True
+    for node in result["nodes"]:
+        assert Path(node["file"]).is_absolute()
+        if node.get("hit_file"):
+            assert Path(node["hit_file"]).is_absolute()
+    assert result["nodes"][0]["file"] == top_v
+
+
+def test_build_file_grep_index_inverts_module_index(tmp_path: Path):
+    a = _write(tmp_path, "a.v", "module dup (); endmodule\nmodule only_a (); endmodule\n")
+    b = _write(tmp_path, "b.v", "module dup (); endmodule\n")
+    module_index = build_module_index([a, b])
+    file_index = build_file_grep_index(module_index)
+    assert set(file_index) == {a, b}
+    assert file_index[a]["modules"] == ["dup", "only_a"]
+    assert file_index[b]["modules"] == ["dup"]
+    assert file_index[a]["file"] == a
+    assert file_index[a]["module_count"] == 2
+
+
+def _consume_file_index(file_index: dict[str, dict]) -> list[str]:
+    return sorted(path for path, info in file_index.items() if info.get("modules"))
+
+
+def test_dump_and_load_file_grep_index_roundtrip(tmp_path: Path):
+    a = _write(tmp_path, "a.v", "module top (); endmodule\n")
+    module_index = build_module_index([a])
+    file_index = build_file_grep_index(module_index)
+    out = dump_file_grep_index(file_index, tmp_path / "grep" / "file_grep_index.json")
+    assert Path(out).is_absolute()
+    loaded = load_file_grep_index(out)
+    assert _consume_file_index(loaded) == _consume_file_index(file_index)
+
+
+def test_session_can_write_file_and_pass_data_to_function(tmp_path: Path):
+    top_v = _write(tmp_path, "top.v", "module top; wire x; endmodule\n")
+    json_path = tmp_path / "file_grep_index.json"
+    session = HierarchyGrepSession.from_rtl_paths(
+        [top_v],
+        file_grep_index_path=json_path,
+    )
+    result, file_index = session.resolve_with_file_index("top.x", top="top")
+    assert result["ok"] is True
+    assert _consume_file_index(file_index) == [top_v]
+    assert session.file_grep_index_ready() is True
+    assert Path(session.file_grep_index_path).is_file()
+    assert _consume_file_index(load_file_grep_index(session.file_grep_index_path)) == [top_v]
+
+
+def test_session_builds_file_grep_index_in_background(tmp_path: Path):
+    top_v = _write(tmp_path, "top.v", "module top; wire x; endmodule\n")
+    session = HierarchyGrepSession.from_rtl_paths([top_v])
+    result = session.resolve("top.x", top="top")
+    assert result["ok"] is True
+    file_index = session.file_grep_index(wait=True)
+    assert top_v in file_index
+    assert file_index[top_v]["modules"] == ["top"]
+    assert all(Path(path).is_absolute() for path in file_index)
+
+
+def test_missing_top_in_index(tmp_path: Path):
+    empty = _write(tmp_path, "empty.v", "module other (); endmodule\n")
+    result = resolve_hierarchy_grep("top.u", top="top", rtl_paths=[empty])
+    assert result["ok"] is False
+    assert "not in grep index" in result["error"]

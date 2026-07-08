@@ -2900,11 +2900,26 @@ def _pipeline_path_walk_text_conn(
     on_progress: Optional[Callable[[str], None]] = None,
 ) -> ConnectivityBatchResult:
     """Interleave per-check hierarchy walk with parallel text-COI workers (J-003/J-004)."""
+    from hierwalk.connect.hierarchy_grep_gate import (
+        emit_hgrep_gate_log,
+        gate_connect_check,
+        prepare_hierarchy_grep_session,
+        scoped_sources_for_gate,
+        text_check_from_gate,
+    )
     from hierwalk.connect.pipeline.artifacts import prepare_text_connect_request
     from hierwalk.connect.session import _ConnectCoiHeartbeat, _resolve_connect_jobs
     from hierwalk.verification_timing import record_connect_check
 
     text_request = prepare_text_connect_request(request)
+    hgrep_session = conn_session.hgrep_session
+    if hgrep_session is None and conn_session.sources:
+        hgrep_session = prepare_hierarchy_grep_session(
+            conn_session.sources,
+            top=conn_session.top,
+        )
+        hgrep_session.file_grep_index(wait=True)
+        conn_session.hgrep_session = hgrep_session
     workers = _resolve_connect_jobs(connect_jobs, len(request.checks))
     use_trace = text_request.trace
     dedup_cache: Dict = {}
@@ -2930,34 +2945,88 @@ def _pipeline_path_walk_text_conn(
     ):
         for idx, chk in enumerate(request.checks):
             t_walk = time.perf_counter()
-            _walk_hierarchy_for_check(
-                state,
-                chk,
-                jobs=hierarchy_jobs,
-                seen_lca=seen_lca,
-            )
+            gate = None
+            if hgrep_session is not None:
+                gate = gate_connect_check(
+                    chk,
+                    hgrep_session,
+                    top=conn_session.top,
+                    index=conn_session.index,
+                )
+                state._emit_walk(gate.log_line)
+                gate_result = text_check_from_gate(
+                    gate,
+                    chk,
+                    conn_session,
+                    trace=use_trace,
+                    dedup_cache=dedup_cache,
+                    dedup_stats=dedup_stats,
+                    dedup_lock=dedup_lock,
+                    state=state,
+                )
+                if gate_result is not None:
+                    results[idx] = gate_result
+                    coi_done += 1
+                    hierarchy_ready += 1
+                    walk_ms = (time.perf_counter() - t_walk) * 1000.0
+                    fast = gate.use_grep_fast_path
+                    fast_line = (
+                        f"connect-pipeline hgrep-{'fast' if fast else 'reject'} "
+                        f"check={chk.check_id or idx} ms={walk_ms:.1f} "
+                        f"scoped_files={len(gate.scoped_files or ())}"
+                    )
+                    state._emit_walk(fast_line)
+                    emit_hgrep_gate_log(fast_line)
+                    record_connect_check(
+                        check_id=chk.check_id,
+                        endpoint_a=str(chk.endpoint_a),
+                        endpoint_b=str(chk.endpoint_b),
+                        elapsed_sec=walk_ms / 1000.0,
+                    )
+                    continue
+
+            scoped_sources = conn_session.sources
+            if gate is not None and gate.scoped_files:
+                scoped_sources = scoped_sources_for_gate(
+                    gate,
+                    conn_session.sources or (),
+                    index=conn_session.index,
+                )
+
+            prev_pool = getattr(state.mod_db, "_override_queue_pool", None)
+            if scoped_sources:
+                state.mod_db._override_queue_pool = list(scoped_sources)
+            try:
+                _walk_hierarchy_for_check(
+                    state,
+                    chk,
+                    jobs=hierarchy_jobs,
+                    seen_lca=seen_lca,
+                )
+            finally:
+                state.mod_db._override_queue_pool = prev_pool
             state.flush_pending_misses()
             _drain_path_walk_workers(state.mod_db)
+            check_rows = tuple(state.rows_by_path.values())
+
             hierarchy_ready += 1
             walk_ms = (time.perf_counter() - t_walk) * 1000.0
             state._emit_walk(
                 f"connect-pipeline hierarchy-ready check={chk.check_id or idx} "
-                f"ms={walk_ms:.1f}"
+                f"ms={walk_ms:.1f} hgrep_pass=False "
+                f"scoped_files={len(scoped_sources or ())}"
             )
             from hierwalk.models import ElabIndex
 
-            walk_rows = tuple(state.rows_by_path.values())
-            # Rebuild from full walked hierarchy; incremental extend_rows cannot
-            # share state.rows_by_path dict (extend becomes a no-op).
-            worker_elab = ElabIndex.from_rows(list(walk_rows))
+            worker_elab = ElabIndex.from_rows(list(check_rows))
             state._connect_elab_index = worker_elab
             t0 = time.perf_counter()
             local = ConnectivitySession(
-                rows=walk_rows,
+                rows=check_rows,
                 index=conn_session.index,
                 top=conn_session.top,
                 defines=dict(conn_session.defines),
-                sources=conn_session.sources,
+                sources=scoped_sources,
                 strict_generate=conn_session.strict_generate,
                 ff_barrier=conn_session.ff_barrier,
                 over_approximate_if=True,
@@ -2968,6 +3037,7 @@ def _pipeline_path_walk_text_conn(
                 module_body_cache=conn_session.module_body_cache,
                 elab_index=worker_elab,
                 resolve_param_dims=False,
+                hgrep_session=hgrep_session,
             )
             results[idx] = local.text_check_entry(
                 chk,
@@ -2975,8 +3045,9 @@ def _pipeline_path_walk_text_conn(
                 dedup_cache=dedup_cache,
                 dedup_stats=dedup_stats,
                 dedup_lock=dedup_lock,
-                rows=walk_rows,
+                rows=check_rows,
                 elab_index=worker_elab,
+                hgrep_scoped_sources=scoped_sources,
             )
             record_connect_check(
                 check_id=chk.check_id,
@@ -3683,11 +3754,7 @@ def run_path_walk_connect(
     do_logical = phase in ("logical", "both")
     effective_connect_jobs = connect_jobs if connect_jobs != 0 else connect_jobs_from_env()
     conn_workers = _resolve_connect_jobs(effective_connect_jobs, len(request.checks))
-    use_connect_pipeline = (
-        do_text
-        and conn_workers > 1
-        and len(request.checks) >= 2
-    )
+    use_connect_pipeline = do_text
 
     trace_log_fh: Optional[TextIO] = None
     opened_log = False
@@ -3795,6 +3862,16 @@ def run_path_walk_connect(
         from hierwalk.models import ElabIndex
 
         walk_rows = state.rows()
+        hgrep_session = None
+        if do_text:
+            from hierwalk.connect.hierarchy_grep_gate import prepare_hierarchy_grep_session
+
+            hgrep_session = prepare_hierarchy_grep_session(
+                state.mod_db._sources,
+                top=top_name,
+            )
+            hgrep_session.file_grep_index(wait=True)
+
         conn_session = ConnectivitySession(
             rows=walk_rows,
             index=index,
@@ -3811,6 +3888,7 @@ def run_path_walk_connect(
             ),
             decl_net_cache=state._decl_net_cache,
             module_body_cache=state._module_body_cache,
+            hgrep_session=hgrep_session,
         )
         from hierwalk.connect.pipeline.artifacts import (
             apply_connect_logical_phase,

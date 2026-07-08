@@ -5,13 +5,12 @@ from __future__ import annotations
 from typing import Any, Sequence, Tuple
 
 from hierwalk.connect.shared.modes import _has_port, _mode
+from hierwalk.inst_scan import coarse_hierarchy_path
 from hierwalk.models import ConnectEndpoint, ConnectResult
 
 
 def coarse_inst_path(inst_path: str) -> str:
-    if not inst_path:
-        return ""
-    return ".".join(part.split("[", 1)[0] for part in inst_path.split("."))
+    return coarse_hierarchy_path(inst_path)
 
 
 def coarse_port_base(port_name: str) -> str:

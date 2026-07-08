@@ -96,6 +96,7 @@ from hierwalk.path_refine import refine_param_ctx_for_path
 from hierwalk.port_scan import (
     matching_ports,
     port_index_for_design_module,
+    port_index_for_module,
     ports_for_module,
     scan_ports_detail_from_module_text,
 )
@@ -171,6 +172,7 @@ def parse_connect_endpoint(
     index: Optional[DesignIndex] = None,
     top: str = "",
     module_body_cache: Optional[ModuleBodyCache] = None,
+    sources: Optional[Sequence[str]] = None,
 ) -> Tuple[str, Optional[str]]:
     """
     Split *spec* into ``(inst_path, port_or_signal_tail)``.
@@ -189,6 +191,8 @@ def parse_connect_endpoint(
             parent_row,
             leaf,
             top=top,
+            sources=sources,
+            module_body_cache=module_body_cache,
         ):
             from hierwalk.ubpat_debug import ubpat_log, ubpat_relevant
 
@@ -216,7 +220,21 @@ def parse_connect_endpoint(
                 row,
                 module_body_cache=module_body_cache,
             )
-            if _port_exists(index, row, tail, top=top):
+            if not body.strip() and sources:
+                body = lookup_cell_module_body(
+                    index,
+                    row.module,
+                    module_body_cache=module_body_cache,
+                    sources=sources,
+                )
+            if _port_exists(
+                index,
+                row,
+                tail,
+                top=top,
+                sources=sources,
+                module_body_cache=module_body_cache,
+            ):
                 from hierwalk.ubpat_debug import ubpat_log, ubpat_relevant
 
                 if ubpat_relevant(target_path=text, parent_path=hier, remainder=tail):
@@ -320,12 +338,43 @@ def _port_exists(
     *,
     top: str,
     param_ctx: Optional[Mapping[str, str]] = None,
+    sources: Optional[Sequence[str]] = None,
+    module_body_cache: Optional[ModuleBodyCache] = None,
 ) -> bool:
+    allowed: Optional[Set[str]] = None
+    row_file = ""
+    if sources:
+        from hierwalk.hierarchy_grep import abs_rtl_path
+
+        allowed = {abs_rtl_path(s) for s in sources if s}
+        row_file = abs_rtl_path(row.file) if row.file else ""
+        if row_file and allowed and row_file not in allowed:
+            return False
     ctx = (
         dict(param_ctx)
         if param_ctx is not None
         else _port_param_ctx(index, row, top)
     )
+    if allowed and row_file and row_file in allowed:
+            body = _resolve_row_module_body(
+                index,
+                row,
+                module_body_cache=module_body_cache,
+            )
+            if not body.strip() and hasattr(index, "_source_text"):
+                try:
+                    body = index._source_text(row.file, full=True)
+                except Exception:
+                    body = ""
+            if body.strip():
+                port_index = port_index_for_module(
+                    row.file,
+                    row.module,
+                    ctx,
+                    module_text=body,
+                )
+                return bool(matching_ports(port_index, port_name, param_ctx=ctx))
+            return False
     port_index = port_index_for_design_module(index, row.module, ctx)
     return bool(matching_ports(port_index, port_name, param_ctx=ctx))
 
@@ -962,6 +1011,7 @@ def resolve_endpoint(
     rows_by_path: Optional[Mapping[str, FlatRow]] = None,
     decl_net_cache: Optional[DeclNetCache] = None,
     module_body_cache: Optional[ModuleBodyCache] = None,
+    sources: Optional[Sequence[str]] = None,
 ) -> Tuple[ConnectEndpoint, List[str]]:
     if rows_by_path is not None:
         lookup = rows_by_path
@@ -974,6 +1024,7 @@ def resolve_endpoint(
         index=index,
         top=top,
         module_body_cache=module_body_cache,
+        sources=sources,
     )
     errors: List[str] = []
     row = lookup.get(inst_path) if inst_path else None
@@ -1008,6 +1059,18 @@ def resolve_endpoint(
         if require_port:
             errors.append(f"port required but not given: {spec}")
         return ep, errors
+    body = _cached_module_body_for_row(
+        index,
+        row,
+        cache=module_body_cache,
+    )
+    if not body.strip() and sources:
+        body = lookup_cell_module_body(
+            index,
+            row.module,
+            module_body_cache=module_body_cache,
+            sources=sources,
+        )
     if net_exists_in_module_fast(
         index,
         row,
@@ -1015,11 +1078,7 @@ def resolve_endpoint(
         top=top,
         cache=decl_net_cache,
         param_ctx=_row_param_ctx_optional(row),
-        body=_cached_module_body_for_row(
-            index,
-            row,
-            cache=module_body_cache,
-        ),
+        body=body,
     ):
         ep.port_found = True
         return ep, errors

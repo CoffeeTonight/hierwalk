@@ -80,6 +80,7 @@ def connect_pair_text(
         cache_lock=endpoint_cache_lock,
         decl_net_cache=decl_net_cache,
         module_body_cache=module_body_cache,
+        sources=sources,
     )
     ep_b, err_b = resolve_endpoint_cached(
         endpoint_b,
@@ -91,6 +92,7 @@ def connect_pair_text(
         cache_lock=endpoint_cache_lock,
         decl_net_cache=decl_net_cache,
         module_body_cache=module_body_cache,
+        sources=sources,
     )
     errors = list(err_a) + list(err_b)
 
@@ -381,6 +383,7 @@ def connect_pair_text_deduped(
         cache_lock=endpoint_cache_lock,
         decl_net_cache=decl_net_cache,
         module_body_cache=module_body_cache,
+        sources=sources,
     )
     ep_b, err_b = resolve_endpoint_cached(
         endpoint_b,
@@ -392,6 +395,7 @@ def connect_pair_text_deduped(
         cache_lock=endpoint_cache_lock,
         decl_net_cache=decl_net_cache,
         module_body_cache=module_body_cache,
+        sources=sources,
     )
     errors = list(err_a) + list(err_b)
     key = text_dedup_key(ep_a, ep_b, errors)

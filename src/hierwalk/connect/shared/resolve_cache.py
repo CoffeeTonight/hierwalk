@@ -37,6 +37,7 @@ def resolve_endpoint_cached(
     cache_lock: Optional[threading.Lock] = None,
     decl_net_cache: Optional[DeclNetCache] = None,
     module_body_cache: Optional[ModuleBodyCache] = None,
+    sources: Optional[Sequence[str]] = None,
 ) -> Tuple[ConnectEndpoint, List[str]]:
     """Resolve one endpoint spec; reuse prior result when *cache* is shared."""
     text = (spec or "").strip()
@@ -58,6 +59,7 @@ def resolve_endpoint_cached(
         rows_by_path=rows_by_path,
         decl_net_cache=decl_net_cache,
         module_body_cache=module_body_cache,
+        sources=sources,
     )
     if cache is not None and text:
         stored = (ep, tuple(errs))

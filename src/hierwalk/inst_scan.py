@@ -332,6 +332,19 @@ def inst_base_name(inst_leaf: str) -> str:
     return inst_leaf.strip().split("[", 1)[0]
 
 
+def coarse_hierarchy_path(hierarchy: str) -> str:
+    """
+    Strip per-segment slice/index suffixes for hierarchy existence checks.
+
+    Matches text-conn ``coarse_inst_path`` / hierarchy-check normalization:
+    ``top.u_arr[0].sig[3]`` → ``top.u_arr.sig``.
+    """
+    text = hierarchy.strip()
+    if not text:
+        return ""
+    return ".".join(inst_base_name(part) for part in text.split("."))
+
+
 def instance_edge_matches_leaf(
     edge: InstanceEdge,
     inst_leaf: str,
