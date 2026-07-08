@@ -29,7 +29,6 @@ from hierwalk.run_request import (
 from hierwalk.run_tests import (
     RUN_CONN_CHECK,
     build_test_run_configs,
-    expand_suite_verification_plan,
     try_parse_run_test_suite,
 )
 
@@ -37,7 +36,7 @@ from hierwalk.run_tests import (
 def _load_hgrep_run(
     config_path: Path,
 ) -> Tuple[RunConfig, ConnectivityRequest]:
-    """Load RUN.json (flat suite or legacy) and pick hgrep ``run_conn_check``."""
+    """Load RUN.json (flat suite or legacy) and pick enabled ``run_conn_check``."""
     if not config_path.is_file():
         raise SystemExit(f"missing config: {config_path}")
 
@@ -55,29 +54,53 @@ def _load_hgrep_run(
     base_dir = config_path.parent
     suite = try_parse_run_test_suite(data, base_dir=base_dir)
     if suite is not None:
-        plan = expand_suite_verification_plan(
-            build_test_run_configs(suite, data, base_dir=base_dir)
-        )
+        # Do not expand text/logical passes — this script always runs hgrep-only.
+        plan = build_test_run_configs(suite, data, base_dir=base_dir)
         hits: list[Tuple[RunConfig, ConnectivityRequest]] = []
         for entry, cfg in plan:
             if entry is None or entry.kind != RUN_CONN_CHECK:
                 continue
-            phase = (cfg.verification_phase or "").strip().lower()
+            phase = (cfg.verification_phase or "both").strip().lower()
+            if phase not in ("hgrep", "text", "logical", "both"):
+                phase = "both"
             if phase != "hgrep":
-                continue
+                print(
+                    f"run: note: {entry.name or RUN_CONN_CHECK} connect_phase={phase!r} "
+                    f"→ forcing hgrep for run_hierarchy_grep.py",
+                    file=sys.stderr,
+                )
+            cfg = replace(
+                cfg,
+                verification_phase="hgrep",
+                mode="check-hgrep",
+                index_strategy="hgrep",
+            )
             req = resolve_connectivity_request(cfg)
             if req is None:
                 raise SystemExit(
-                    f"{entry.name or RUN_CONN_CHECK}: connect_phase=hgrep but no checks"
+                    f"{entry.name or RUN_CONN_CHECK}: enabled but no checks in JSON"
                 )
             hits.append((cfg, req))
         if not hits:
+            from hierwalk.run_request import _mapping_get_ci
+
+            block = _mapping_get_ci(data, RUN_CONN_CHECK)
+            if block is None:
+                raise SystemExit(
+                    f"no {RUN_CONN_CHECK} block in {config_path.name}; "
+                    "add run_conn_check with enable:1 and checks:[...]"
+                )
+            if isinstance(block, dict) and not block.get("enable", 1):
+                raise SystemExit(
+                    f"{RUN_CONN_CHECK}.enable is 0 in {config_path.name}; set enable:1"
+                )
             raise SystemExit(
-                "no enabled run_conn_check with connect_phase=hgrep in RUN.json"
+                f"no enabled {RUN_CONN_CHECK} in {config_path.name} "
+                "(need enable:1 and checks:[...])"
             )
         if len(hits) > 1:
             print(
-                f"run: note: {len(hits)} hgrep steps; running first only",
+                f"run: note: {len(hits)} run_conn_check steps; running first only",
                 file=sys.stderr,
             )
         return hits[0]
@@ -108,7 +131,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument(
         "config",
-        help="RUN.json with filelist, env, run_conn_check.connect_phase=hgrep",
+        help="RUN.json with filelist, env, run_conn_check (connect_phase optional)",
     )
     ap.add_argument(
         "-o",
