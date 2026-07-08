@@ -3753,6 +3753,7 @@ def run_path_walk_connect(
     connect_output_dir: Optional[Path] = None,
     connect_output_name: str = "conn.tsv",
     connect_phase: str = "both",
+    refresh_cache: bool = False,
 ) -> Tuple[ConnectivityBatchResult, DesignIndex, PathWalkState]:
     """
     Path-walk batch connectivity: on-demand RTL + shared :class:`ConnectivitySession`.
@@ -3818,6 +3819,7 @@ def run_path_walk_connect(
                 top=top_name,
                 connect_output_dir=resolved_output_dir,
                 connect_output_name=connect_output_name,
+                refresh_cache=refresh_cache,
                 on_emit=_emit_hgrep,
             )
             mod_db = PathWalkModuleDb(
@@ -3931,6 +3933,13 @@ def run_path_walk_connect(
             _drain_path_walk_workers(state.mod_db)
 
         from hierwalk.models import ElabIndex
+        from hierwalk.connect.pipeline.artifacts import resolve_connect_output_dir
+
+        resolved_output_dir = resolve_connect_output_dir(
+            connect_output_dir,
+            top=top_name,
+            cache_dir=cache_dir,
+        )
 
         walk_rows = state.rows()
         hgrep_session = None
@@ -3940,8 +3949,10 @@ def run_path_walk_connect(
             hgrep_session = prepare_hierarchy_grep_session(
                 state.mod_db._sources,
                 top=top_name,
+                work_dir=resolved_output_dir,
+                refresh_cache=refresh_cache,
+                on_emit=state._emit_walk,
             )
-            hgrep_session.file_grep_index(wait=True)
 
         conn_session = ConnectivitySession(
             rows=walk_rows,
@@ -3975,18 +3986,12 @@ def run_path_walk_connect(
             prepare_text_connect_request,
             reorder_connect_results_to_checks,
             require_connect_phase_tsv,
-            resolve_connect_output_dir,
             snapshot_connect_text_phase,
         )
         from hierwalk.verification_timing import get_active_recorder
 
         bind_path_walk_phase_emit(state._emit_walk)
         timing_rec = get_active_recorder()
-        resolved_output_dir = resolve_connect_output_dir(
-            connect_output_dir,
-            top=top_name,
-            cache_dir=cache_dir,
-        )
         from hierwalk.connect.hierarchy_grep_gate import resolve_hgrep_gate_report_path
 
         conn_session.hgrep_gate_report_path = resolve_hgrep_gate_report_path(

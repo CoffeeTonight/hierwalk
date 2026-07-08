@@ -1064,6 +1064,9 @@ def expand_suite_verification_plan(
             continue
         name = run_cfg.verification_step_name or entry.name or f"{entry.kind}[{entry.index}]"
         phase = (run_cfg.verification_phase or "both").strip().lower()
+        if phase == "hgrep":
+            expanded.append((entry, run_cfg))
+            continue
         if phase in ("text", "both"):
             expanded.append(
                 (

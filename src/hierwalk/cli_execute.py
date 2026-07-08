@@ -76,6 +76,8 @@ from hierwalk.verification_timing import (
 
 
 def _verification_phase(cfg: RunConfig) -> str:
+    if cfg.check_hgrep:
+        return "hgrep"
     phase = (cfg.verification_phase or "both").strip().lower()
     return phase if phase in ("text", "logical", "both", "hgrep") else "both"
 
@@ -111,6 +113,7 @@ def execute_run(cfg: RunConfig, ap) -> int:
     connect_run_mode = effective_mode in (
         "check-connect",
         "check-connect-batch",
+        "check-hgrep",
         "path-walk",
     )
     if cfg.check_connect and connect_request is not None:
@@ -295,6 +298,7 @@ def execute_run(cfg: RunConfig, ap) -> int:
             ignore_filelists=list(cfg.ignore_filelist),
             cache_dir=cache_dir,
             no_cache=not use_cache,
+            refresh_cache=cfg.refresh_cache,
             on_progress=on_progress,
             trace_stream=sys.stderr if not cfg.quiet else None,
             trace_log_path=log_path,

@@ -519,6 +519,9 @@ Text-conn vs logical-conn (path-walk / suite)
   ``connect_phase: hgrep`` runs hierarchy_grep gate only (no connect-coi).
   Writes ``conn.hgrep_gate.report`` under ``.db_{TOP}/``; stdout TSV rows
   use ``mode=hgrep`` with gate pass/fail in ``connected``.
+  Grep index is cached as ``grep_hie.json`` in the same work dir; later runs
+  reuse it. ``refresh-cache`` (JSON/CLI) deletes ``grep_hie.json`` and rebuilds.
+  Standalone: ``--check-hgrep BATCH.json`` or ``scripts/run_hierarchy_grep.py``.
 
 Path evidence kinds (hops / connect-log)
 ----------------------------------------

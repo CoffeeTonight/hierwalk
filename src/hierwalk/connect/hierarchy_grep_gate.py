@@ -14,7 +14,15 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple, TYP
 from hierwalk.connect.shared.endpoints import _port_exists, inst_leaf_exists_in_module
 from hierwalk.connect.shared.expand import hierarchy_endpoint_specs, parse_list_display_spec
 from hierwalk.connect.shared.request import ConnectivityCheck
-from hierwalk.hierarchy_grep import HierarchyGrepSession, abs_rtl_path
+from hierwalk.hierarchy_grep import (
+    HierarchyGrepSession,
+    abs_rtl_path,
+    dump_grep_hie,
+    grep_hie_sources_match,
+    load_grep_hie,
+    remove_grep_hie,
+    resolve_grep_hie_path,
+)
 from hierwalk.index import DesignIndex
 from hierwalk.inst_scan import coarse_hierarchy_path, expand_inst_names
 from hierwalk.models import ConnectEndpoint, ConnectResult, FlatRow, InstanceEdge
@@ -395,13 +403,54 @@ def prepare_hierarchy_grep_session(
     sources: Sequence[str],
     *,
     top: str,
+    work_dir: Optional[Path] = None,
+    refresh_cache: bool = False,
+    on_emit: Optional[Any] = None,
 ) -> HierarchyGrepSession:
-    """Build grep session once per text-conn batch."""
+    """
+    Build or load grep session once per text-conn / hgrep batch.
+
+    When *work_dir* is set, persists ``grep_hie.json`` there. Reuses the cache
+    on later runs unless *refresh_cache* (JSON ``refresh-cache`` / CLI
+    ``--refresh-cache``) deletes it first.
+    """
     paths = [abs_rtl_path(p) for p in sources if p]
-    return HierarchyGrepSession.from_rtl_paths(
+    cache_path: Optional[Path] = None
+    if work_dir is not None:
+        cache_path = resolve_grep_hie_path(work_dir)
+        if refresh_cache and remove_grep_hie(cache_path):
+            line = f"hgrep-cache clean path={cache_path}"
+            emit_hgrep_gate_log(line)
+            if on_emit is not None:
+                on_emit(line)
+        if cache_path.is_file() and not refresh_cache:
+            try:
+                cached = load_grep_hie(cache_path)
+                if grep_hie_sources_match(cached, paths):
+                    line = f"hgrep-cache hit path={cache_path}"
+                    emit_hgrep_gate_log(line)
+                    if on_emit is not None:
+                        on_emit(line)
+                    return HierarchyGrepSession.from_grep_hie_cache(
+                        cached,
+                        cache_path=cache_path,
+                    )
+            except (OSError, ValueError, json.JSONDecodeError):
+                pass
+
+    session = HierarchyGrepSession.from_rtl_paths(
         paths,
         build_file_index_background=True,
     )
+    session.file_grep_index(wait=True)
+    if cache_path is not None:
+        dump_grep_hie(session, cache_path, top=top)
+        session.file_grep_index_path = str(cache_path)
+        line = f"hgrep-cache write path={cache_path}"
+        emit_hgrep_gate_log(line)
+        if on_emit is not None:
+            on_emit(line)
+    return session
 
 
 def _specs_for_gate(raw: Any) -> Tuple[str, ...]:
@@ -991,6 +1040,7 @@ def run_hgrep_connect_batch(
     top: str,
     connect_output_dir: Optional[Path] = None,
     connect_output_name: str = "conn.tsv",
+    refresh_cache: bool = False,
     on_emit: Optional[Any] = None,
 ) -> Tuple[Any, DesignIndex]:
     """
@@ -1013,8 +1063,13 @@ def run_hgrep_connect_batch(
             for p in paths
         }
     )
-    session = prepare_hierarchy_grep_session(paths, top=top_name)
-    session.file_grep_index(wait=True)
+    session = prepare_hierarchy_grep_session(
+        paths,
+        top=top_name,
+        work_dir=connect_output_dir,
+        refresh_cache=refresh_cache,
+        on_emit=on_emit,
+    )
     report_path = resolve_hgrep_gate_report_path(
         connect_output_dir=connect_output_dir,
         connect_output_name=connect_output_name,

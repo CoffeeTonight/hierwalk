@@ -8,14 +8,20 @@ import pytest
 
 from hierwalk.inst_scan import coarse_hierarchy_path
 from hierwalk.hierarchy_grep import (
+    GREP_HIE_JSON_NAME,
     HierarchyGrepSession,
     build_file_grep_index,
     build_module_index,
     dump_file_grep_index,
+    dump_grep_hie,
     format_hierarchy_grep_report,
+    grep_hie_sources_match,
     grep_modules_in_file,
     hierarchy_grep_report,
     load_file_grep_index,
+    load_grep_hie,
+    remove_grep_hie,
+    resolve_grep_hie_path,
     resolve_hierarchy_grep,
 )
 
@@ -254,3 +260,29 @@ def test_missing_top_in_index(tmp_path: Path):
     result = resolve_hierarchy_grep("top.u", top="top", rtl_paths=[empty])
     assert result["ok"] is False
     assert "not in grep index" in result["error"]
+
+
+def test_dump_and_load_grep_hie_roundtrip(tmp_path: Path):
+    top_v = _write(tmp_path, "top.v", "module top; wire x; endmodule\n")
+    session = HierarchyGrepSession.from_rtl_paths([top_v], build_file_index_background=False)
+    cache_path = tmp_path / "work" / GREP_HIE_JSON_NAME
+    dump_grep_hie(session, cache_path, top="top")
+    loaded = load_grep_hie(cache_path)
+    assert loaded["top"] == "top"
+    assert loaded["rtl_paths"] == [top_v]
+    assert loaded["module_index"]["top"] == [top_v]
+    restored = HierarchyGrepSession.from_grep_hie_cache(loaded, cache_path=cache_path)
+    assert restored.resolve("top.x", top="top")["ok"] is True
+
+
+def test_grep_hie_sources_match_requires_exact_set(tmp_path: Path):
+    a = _write(tmp_path, "a.v", "module top (); endmodule\n")
+    b = _write(tmp_path, "b.v", "module other (); endmodule\n")
+    session = HierarchyGrepSession.from_rtl_paths([a], build_file_index_background=False)
+    cache_path = resolve_grep_hie_path(tmp_path)
+    dump_grep_hie(session, cache_path, top="top")
+    cached = load_grep_hie(cache_path)
+    assert grep_hie_sources_match(cached, [a])
+    assert not grep_hie_sources_match(cached, [a, b])
+    assert remove_grep_hie(cache_path)
+    assert not cache_path.is_file()

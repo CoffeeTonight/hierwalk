@@ -13,7 +13,7 @@ from hierwalk.connect.hierarchy_grep_gate import (
     prepare_hierarchy_grep_session,
 )
 from hierwalk.connect.shared.request import ConnectivityCheck
-from hierwalk.hierarchy_grep import resolve_hierarchy_grep
+from hierwalk.hierarchy_grep import GREP_HIE_JSON_NAME, resolve_hierarchy_grep
 from hierwalk.index import DesignIndex
 
 
@@ -448,3 +448,113 @@ def test_flat_rows_from_resolve_inst_chain(tmp_path: Path):
     paths = {r.full_path for r in rows}
     assert "top" in paths
     assert "top.u_b" in paths
+
+
+def test_prepare_hierarchy_grep_session_writes_grep_hie_json(tmp_path: Path):
+    top_v = _write(
+        tmp_path,
+        "top.v",
+        """
+        module child (output logic out);
+          assign out = 1'b0;
+        endmodule
+        module top;
+          child u_a ();
+        endmodule
+        """,
+    )
+    work = tmp_path / "work"
+    logs: list[str] = []
+
+    session = prepare_hierarchy_grep_session(
+        [top_v],
+        top="top",
+        work_dir=work,
+        on_emit=logs.append,
+    )
+    cache = work / GREP_HIE_JSON_NAME
+    assert cache.is_file()
+    assert any("hgrep-cache write" in line for line in logs)
+    assert session.resolve("top.u_a.out", top="top")["ok"] is True
+
+
+def test_prepare_hierarchy_grep_session_reuses_grep_hie_cache(tmp_path: Path):
+    top_v = _write(tmp_path, "top.v", "module top; wire x; endmodule\n")
+    work = tmp_path / "work"
+    prepare_hierarchy_grep_session([top_v], top="top", work_dir=work)
+    logs: list[str] = []
+    session = prepare_hierarchy_grep_session(
+        [top_v],
+        top="top",
+        work_dir=work,
+        on_emit=logs.append,
+    )
+    assert any("hgrep-cache hit" in line for line in logs)
+    assert session.resolve("top.x", top="top")["ok"] is True
+
+
+def test_prepare_hierarchy_grep_session_refresh_cache_rebuilds(tmp_path: Path):
+    top_v = _write(tmp_path, "top.v", "module top; wire x; endmodule\n")
+    work = tmp_path / "work"
+    prepare_hierarchy_grep_session([top_v], top="top", work_dir=work)
+    cache = work / GREP_HIE_JSON_NAME
+    cache.write_text('{"stale": true}\n', encoding="utf-8")
+    logs: list[str] = []
+    prepare_hierarchy_grep_session(
+        [top_v],
+        top="top",
+        work_dir=work,
+        refresh_cache=True,
+        on_emit=logs.append,
+    )
+    assert any("hgrep-cache clean" in line for line in logs)
+    assert any("hgrep-cache write" in line for line in logs)
+    assert "module_index" in cache.read_text(encoding="utf-8")
+
+
+def test_connect_phase_hgrep_uses_grep_hie_cache(tmp_path: Path):
+    from hierwalk.connect.shared.request import ConnectivityRequest
+    from hierwalk.filelist import parse_filelist
+    from hierwalk.path_walk import run_path_walk_connect
+
+    top_v = _write(
+        tmp_path,
+        "top.v",
+        """
+        module child (output logic out);
+          assign out = 1'b0;
+        endmodule
+        module top;
+          child u_a ();
+        endmodule
+        """,
+    )
+    fl = tmp_path / "fl.f"
+    fl.write_text(f"{top_v}\n", encoding="utf-8")
+    fl_result = parse_filelist(str(fl))
+    out_dir = tmp_path / "out"
+    request = ConnectivityRequest(
+        checks=(ConnectivityCheck("top.u_a.out", "top.u_a.out", check_id="hg1"),),
+        top="top",
+    )
+    run_path_walk_connect(
+        request,
+        fl_result,
+        top="top",
+        no_cache=True,
+        connect_phase="hgrep",
+        connect_output_dir=out_dir,
+    )
+    assert (out_dir / GREP_HIE_JSON_NAME).is_file()
+    log_path = tmp_path / "walk2.log"
+    batch, _index, _state = run_path_walk_connect(
+        request,
+        fl_result,
+        top="top",
+        no_cache=True,
+        connect_phase="hgrep",
+        connect_output_dir=out_dir,
+        trace_log_path=log_path,
+    )
+    assert batch.results[0].connected
+    assert "hgrep-cache hit" in log_path.read_text(encoding="utf-8")

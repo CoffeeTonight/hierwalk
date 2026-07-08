@@ -182,6 +182,94 @@ def load_file_grep_index(path: str | Path) -> Dict[str, Dict[str, Any]]:
     return {abs_rtl_path(key): dict(value) for key, value in blob.items()}
 
 
+GREP_HIE_JSON_NAME = "grep_hie.json"
+GREP_HIE_SCHEMA_VERSION = 1
+
+
+def resolve_grep_hie_path(work_dir: str | Path) -> Path:
+    """Return ``grep_hie.json`` path under the per-top work directory."""
+    return Path(work_dir).expanduser().resolve() / GREP_HIE_JSON_NAME
+
+
+def grep_hie_sources_match(
+    cached: Mapping[str, Any],
+    sources: Sequence[str | Path],
+) -> bool:
+    """True when cached RTL path set matches *sources* exactly."""
+    cached_paths = {abs_rtl_path(p) for p in cached.get("rtl_paths", ()) if p}
+    current = {abs_rtl_path(p) for p in sources if p}
+    return bool(cached_paths) and cached_paths == current
+
+
+def _grep_hie_payload(
+    session: "HierarchyGrepSession",
+    *,
+    top: str = "",
+    file_index: Optional[Mapping[str, Mapping[str, Any]]] = None,
+) -> Dict[str, Any]:
+    fi = file_index
+    if fi is None:
+        fi = session._file_grep_index or build_file_grep_index(session.module_index)
+    return {
+        "schema_version": GREP_HIE_SCHEMA_VERSION,
+        "generated_at": _utc_now_iso(),
+        "top": top,
+        "rtl_paths": list(session.rtl_paths),
+        "module_index": session.module_index,
+        "files": {abs_rtl_path(key): dict(value) for key, value in fi.items()},
+    }
+
+
+def dump_grep_hie(
+    session: "HierarchyGrepSession",
+    path: str | Path,
+    *,
+    top: str = "",
+    file_index: Optional[Mapping[str, Mapping[str, Any]]] = None,
+) -> str:
+    """Persist hierarchy grep session data to ``grep_hie.json``."""
+    out = Path(path).expanduser().resolve()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(
+        json.dumps(
+            _grep_hie_payload(session, top=top, file_index=file_index),
+            indent=2,
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return str(out)
+
+
+def load_grep_hie(path: str | Path) -> Dict[str, Any]:
+    """Load ``grep_hie.json`` written by :func:`dump_grep_hie`."""
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError("grep_hie.json must be an object")
+    if "module_index" not in raw:
+        raise ValueError("grep_hie.json missing module_index")
+    files = raw.get("files")
+    if files is None:
+        raise ValueError("grep_hie.json missing files")
+    if not isinstance(files, dict):
+        raise ValueError("grep_hie.json files must be an object")
+    out = dict(raw)
+    out["rtl_paths"] = [abs_rtl_path(p) for p in raw.get("rtl_paths", ()) if p]
+    out["module_index"] = _normalize_module_index(raw["module_index"])
+    out["files"] = {abs_rtl_path(key): dict(value) for key, value in files.items()}
+    return out
+
+
+def remove_grep_hie(path: str | Path) -> bool:
+    """Delete ``grep_hie.json`` when present; return whether a file was removed."""
+    p = Path(path).expanduser()
+    if p.is_file():
+        p.unlink()
+        return True
+    return False
+
+
 def collect_rtl_paths(
     roots: Sequence[str | Path],
     *,
@@ -239,6 +327,26 @@ class HierarchyGrepSession:
         repr=False,
     )
     file_grep_index_path: Optional[str] = field(default=None, init=False, repr=False)
+
+    @classmethod
+    def from_grep_hie_cache(
+        cls,
+        data: Mapping[str, Any],
+        *,
+        cache_path: Optional[str | Path] = None,
+    ) -> HierarchyGrepSession:
+        """Rehydrate a session from ``grep_hie.json`` without re-grepping RTL."""
+        rtl_paths = [abs_rtl_path(p) for p in data.get("rtl_paths", ()) if p]
+        module_index = _normalize_module_index(data.get("module_index", {}))
+        session = cls(rtl_paths=rtl_paths, module_index=module_index)
+        files = data.get("files") or {}
+        session._file_grep_index = {
+            abs_rtl_path(key): dict(value) for key, value in files.items()
+        }
+        session._file_grep_index_ready.set()
+        if cache_path is not None:
+            session.file_grep_index_path = abs_rtl_path(cache_path)
+        return session
 
     @classmethod
     def from_rtl_paths(

@@ -207,6 +207,7 @@ class RunConfig:
     search_spec: Optional[SearchSpec] = None
     check_connect: Optional[Tuple[str, str]] = None
     check_connect_batch: Optional[str] = None
+    check_hgrep: Optional[str] = None
     connect_inline: Optional[Any] = None
     connect_trace: bool = False
     connect_log: bool = False
@@ -544,6 +545,8 @@ def resolve_effective_run_mode(
         return "search"
     if cfg.check_connect:
         return "check-connect"
+    if cfg.check_hgrep:
+        return "check-hgrep"
     if connect_request is not None:
         return "check-connect-batch"
     return "hierarchy"
@@ -1402,8 +1405,9 @@ def resolve_connectivity_request(cfg: RunConfig) -> Optional[ConnectivityRequest
             req = parse_connect_request_json(inline)
             req = _merge_connect_run_options(req, cfg)
         return req
-    if cfg.check_connect_batch:
-        p = Path(cfg.check_connect_batch)
+    batch_path = cfg.check_hgrep or cfg.check_connect_batch
+    if batch_path:
+        p = Path(batch_path)
         text = p.read_text(encoding="utf-8-sig").lstrip()
         if p.suffix.lower() == ".json" or text.startswith(("{", "[")):
             data = json.loads(text)
@@ -1411,7 +1415,7 @@ def resolve_connectivity_request(cfg: RunConfig) -> Optional[ConnectivityRequest
             if req is not None:
                 return _merge_connect_run_options(req, cfg)
             return None
-        req = load_connect_request(cfg.check_connect_batch)
+        req = load_connect_request(str(batch_path))
         return _merge_connect_run_options(req, cfg)
     return None
 
@@ -1477,6 +1481,7 @@ def run_config_from_args(args: Any) -> RunConfig:
         ),
         check_connect=check_connect,
         check_connect_batch=args.check_connect_batch,
+        check_hgrep=getattr(args, "check_hgrep", None),
         connect_trace=bool(args.connect_trace),
         connect_log=bool(getattr(args, "connect_log", False)),
         include_ff=bool(args.include_ff),
@@ -1551,6 +1556,18 @@ def merge_run_config(base: RunConfig, cli: RunConfig, args: Any) -> RunConfig:
             check_connect_batch=cli.check_connect_batch,
             connect_inline=None,
             check_connect=cli.check_connect,
+            check_hgrep=None,
+        )
+    if getattr(args, "check_hgrep", None):
+        out = replace(
+            out,
+            check_hgrep=cli.check_hgrep,
+            check_connect_batch=None,
+            connect_inline=None,
+            check_connect=None,
+            verification_phase="hgrep",
+            mode="path-walk",
+            index_strategy="path-walk",
         )
     if args.connect_trace:
         out = replace(out, connect_trace=True)

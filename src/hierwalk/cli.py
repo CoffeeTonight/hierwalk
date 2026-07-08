@@ -392,6 +392,14 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     conn.add_argument(
+        "--check-hgrep",
+        metavar="FILE",
+        help=(
+            "hierarchy_grep gate only (no connect-coi); JSON or text pairs file; "
+            "reuses .db_{TOP}/grep_hie.json unless --refresh-cache"
+        ),
+    )
+    conn.add_argument(
         "--connect-trace",
         action="store_true",
         help=(
@@ -535,13 +543,17 @@ def main(argv=None) -> int:
         )
         return 0
     run_json_arg = args.filelist or os.environ.get("HIERWALK_CONFIG")
-    if not run_json_arg and not args.check_connect_batch:
+    if not run_json_arg and not args.check_connect_batch and not args.check_hgrep:
         ap.error(
             "pass RUN.json or FILELIST.f (or set HIERWALK_CONFIG), "
-            "or --check-connect-batch BATCH.json"
+            "or --check-connect-batch / --check-hgrep BATCH.json"
         )
-    if args.check_connect and args.check_connect_batch:
-        ap.error("use either --check-connect or --check-connect-batch, not both")
+    if args.check_connect and (args.check_connect_batch or args.check_hgrep):
+        ap.error(
+            "use either --check-connect or --check-connect-batch/--check-hgrep, not both"
+        )
+    if args.check_connect_batch and args.check_hgrep:
+        ap.error("use either --check-connect-batch or --check-hgrep, not both")
     if args.fanin_cone and args.fanout_cone:
         ap.error("use either --fanin-cone or --fanout-cone, not both")
 
@@ -587,8 +599,9 @@ def main(argv=None) -> int:
 
     connect_batch_jobs_source: Optional[str] = None
     connect_batch_path: Optional[Path] = None
-    if cfg.check_connect_batch:
-        connect_batch_path = Path(cfg.check_connect_batch)
+    hgrep_batch_path = cfg.check_hgrep or cfg.check_connect_batch
+    if hgrep_batch_path:
+        connect_batch_path = Path(hgrep_batch_path)
         (
             cfg,
             connect_batch_jobs_source,
@@ -645,8 +658,9 @@ def main(argv=None) -> int:
                 file=sys.stderr,
             )
         elif connect_batch_path is not None:
+            batch_label = "hgrep-batch" if cfg.check_hgrep else "connect-batch"
             print(
-                f"run: connect-batch={connect_batch_path.resolve()} jobs={jobs_res.note} "
+                f"run: {batch_label}={connect_batch_path.resolve()} jobs={jobs_res.note} "
                 f"(source={jobs_res.source})",
                 file=sys.stderr,
             )
