@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from hierwalk.connect.hierarchy_grep_gate import (
+    _emit_hgrep_check_milestones,
     emit_hgrep_gate_log,
     flat_rows_from_resolve,
     format_hierarchy_grep_gate_report,
@@ -484,6 +485,12 @@ def test_prepare_hierarchy_grep_session_writes_grep_hie_json(tmp_path: Path):
     assert cache.is_file()
     assert any("hgrep-cache write" in line for line in logs)
     assert session.resolve("top.u_a.out", top="top")["ok"] is True
+    milestone_lines = [line for line in logs if "hgrep-hie milestone" in line]
+    assert any("filelist-ready sources=1 top=top" in line for line in milestone_lines)
+    assert any("rtl-db-build-start rtl_files=1" in line for line in milestone_lines)
+    assert any("rtl-db-built modules=2 rtl_files=1" in line for line in milestone_lines)
+    assert any("grep-hie-index-ready" in line for line in milestone_lines)
+    assert any("grep-hie-saved" in line for line in milestone_lines)
 
 
 def test_prepare_hierarchy_grep_session_reuses_grep_hie_cache(tmp_path: Path):
@@ -499,6 +506,26 @@ def test_prepare_hierarchy_grep_session_reuses_grep_hie_cache(tmp_path: Path):
     )
     assert any("hgrep-cache hit" in line for line in logs)
     assert session.resolve("top.x", top="top")["ok"] is True
+    milestone_lines = [line for line in logs if "hgrep-hie milestone" in line]
+    assert any("filelist-ready sources=1 top=top" in line for line in milestone_lines)
+    assert any("grep-hie-loaded from=cache" in line for line in milestone_lines)
+    assert not any("rtl-db-build-start" in line for line in milestone_lines)
+
+
+def test_emit_hgrep_check_milestones_at_quarter_buckets():
+    logs: list[str] = []
+    state: dict[str, int] = {}
+    total = 8
+    _emit_hgrep_check_milestones(0, total, on_emit=logs.append, state=state)
+    for done in range(1, total + 1):
+        _emit_hgrep_check_milestones(done, total, on_emit=logs.append, state=state)
+    joined = "\n".join(logs)
+    assert "hierarchy-check-start checks=0/8 pct=0%" in joined
+    assert "hierarchy-check checks=2/8 pct=25%" in joined
+    assert "hierarchy-check checks=4/8 pct=50%" in joined
+    assert "hierarchy-check checks=6/8 pct=75%" in joined
+    assert "hierarchy-check checks=8/8 pct=100%" in joined
+    assert len(logs) == 5
 
 
 def test_prepare_hierarchy_grep_session_refresh_cache_rebuilds(tmp_path: Path):
@@ -536,14 +563,19 @@ def test_run_hgrep_connect_batch_skips_full_design_index(tmp_path: Path, monkeyp
         raise AssertionError("DesignIndex.build must not run for hgrep-only batch")
 
     monkeypatch.setattr(DesignIndex, "build", staticmethod(_boom))
+    logs: list[str] = []
     batch, _index = run_hgrep_connect_batch(
         request,
         [top_v, other_v],
         top="top",
         connect_output_dir=tmp_path / "out",
+        on_emit=logs.append,
     )
     assert batch.results[0].connected
     assert batch.results[0].mode == "hgrep"
+    milestone_lines = [line for line in logs if "hgrep-hie milestone" in line]
+    assert any("hierarchy-check-start checks=0/1 pct=0%" in line for line in milestone_lines)
+    assert any("hierarchy-check checks=1/1 pct=100%" in line for line in milestone_lines)
 
 
 def test_connect_phase_hgrep_uses_grep_hie_cache(tmp_path: Path):

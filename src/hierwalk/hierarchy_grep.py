@@ -213,6 +213,21 @@ def _emit_hgrep_build_log(
         on_emit(message)
 
 
+def emit_hgrep_milestone(
+    stage: str,
+    detail: str,
+    *,
+    on_emit: Optional[Callable[[str], None]] = None,
+) -> None:
+    """One-line grep_hie progress milestone (filelist, rtl-db, checks %, …)."""
+    stage_label = str(stage or "step").strip().replace(" ", "-")
+    text = str(detail or "").strip()
+    msg = f"hgrep-hie milestone {stage_label}"
+    if text:
+        msg = f"{msg} {text}"
+    _emit_hgrep_build_log(msg, on_emit=on_emit)
+
+
 def build_module_index(
     rtl_paths: Sequence[str | Path],
     *,
@@ -472,9 +487,23 @@ class HierarchyGrepSession:
     ) -> HierarchyGrepSession:
         abs_paths = [abs_rtl_path(p) for p in rtl_paths if p]
         if module_index is None:
+            emit_hgrep_milestone(
+                "rtl-db-build-start",
+                f"rtl_files={len(abs_paths)}",
+                on_emit=on_emit,
+            )
+            t_build = time.perf_counter()
             progress = _HgrepBuildProgress(len(abs_paths))
             with _HgrepBuildHeartbeat(progress, on_emit=on_emit):
                 mod_index = build_module_index(abs_paths, progress=progress)
+            emit_hgrep_milestone(
+                "rtl-db-built",
+                (
+                    f"modules={len(mod_index)} rtl_files={len(abs_paths)} "
+                    f"elapsed_sec={time.perf_counter() - t_build:.1f}"
+                ),
+                on_emit=on_emit,
+            )
         else:
             mod_index = _normalize_module_index(module_index)
         session = cls(rtl_paths=abs_paths, module_index=mod_index)

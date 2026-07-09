@@ -46,6 +46,40 @@ def emit_hgrep_gate_log(log_line: str) -> None:
     emit_path_walk_log(log_line, stream=sys.stderr)
 
 
+def _emit_hgrep_check_milestones(
+    done: int,
+    total: int,
+    *,
+    on_emit: Optional[Any] = None,
+    state: Optional[Dict[str, int]] = None,
+) -> None:
+    """Emit check-resolution milestones at 0/25/50/75/100% (and final check)."""
+    if total <= 0:
+        return
+    from hierwalk.hierarchy_grep import emit_hgrep_milestone
+
+    pct = min(100, int(done * 100 / total))
+    bucket = 100 if done >= total else (pct // 25) * 25
+    seen = state if state is not None else {}
+    key = f"pct:{bucket}"
+    if seen.get(key):
+        return
+    if done == 0:
+        emit_hgrep_milestone(
+            "hierarchy-check-start",
+            f"checks=0/{total} pct=0%",
+            on_emit=on_emit,
+        )
+        seen[key] = 1
+        return
+    emit_hgrep_milestone(
+        "hierarchy-check",
+        f"checks={done}/{total} pct={pct}%",
+        on_emit=on_emit,
+    )
+    seen[key] = 1
+
+
 def _emit_hgrep_trace(log_line: str, *, on_emit: Optional[Any] = None) -> None:
     """stderr (timestamped) plus optional trace hook (log file / tests)."""
     if not log_line:
@@ -424,6 +458,13 @@ def prepare_hierarchy_grep_session(
     ``--refresh-cache``) deletes it first.
     """
     paths = [abs_rtl_path(p) for p in sources if p]
+    from hierwalk.hierarchy_grep import emit_hgrep_milestone
+
+    emit_hgrep_milestone(
+        "filelist-ready",
+        f"sources={len(paths)} top={top or '-'}",
+        on_emit=on_emit,
+    )
     cache_path: Optional[Path] = None
     if work_dir is not None:
         cache_path = resolve_grep_hie_path(work_dir)
@@ -436,6 +477,16 @@ def prepare_hierarchy_grep_session(
                 if grep_hie_sources_match(cached, paths):
                     line = f"hgrep-cache hit path={cache_path}"
                     _emit_hgrep_trace(line, on_emit=on_emit)
+                    mod_index = cached.get("module_index") or {}
+                    emit_hgrep_milestone(
+                        "grep-hie-loaded",
+                        (
+                            f"from=cache modules={len(mod_index)} "
+                            f"rtl_files={len(cached.get('rtl_paths', ()))} "
+                            f"path={cache_path}"
+                        ),
+                        on_emit=on_emit,
+                    )
                     return HierarchyGrepSession.from_grep_hie_cache(
                         cached,
                         cache_path=cache_path,
@@ -449,11 +500,29 @@ def prepare_hierarchy_grep_session(
         on_emit=on_emit,
     )
     session.file_grep_index(wait=True)
+    file_index = session.file_grep_index(wait=False)
+    emit_hgrep_milestone(
+        "grep-hie-index-ready",
+        (
+            f"modules={len(session.module_index)} "
+            f"rtl_files={len(session.rtl_paths)} "
+            f"file_entries={len(file_index)}"
+        ),
+        on_emit=on_emit,
+    )
     if cache_path is not None:
         dump_grep_hie(session, cache_path, top=top)
         session.file_grep_index_path = str(cache_path)
         line = f"hgrep-cache write path={cache_path}"
         _emit_hgrep_trace(line, on_emit=on_emit)
+        emit_hgrep_milestone(
+            "grep-hie-saved",
+            (
+                f"path={cache_path} modules={len(session.module_index)} "
+                f"rtl_files={len(session.rtl_paths)}"
+            ),
+            on_emit=on_emit,
+        )
     return session
 
 
@@ -1108,7 +1177,15 @@ def run_hgrep_connect_batch(
     announce_hgrep_gate_report_path(report_path, on_emit=on_emit)
 
     results: List[ConnectResult] = []
-    for chk in request.checks:
+    total_checks = len(request.checks)
+    milestone_state: Dict[str, int] = {}
+    _emit_hgrep_check_milestones(
+        0,
+        total_checks,
+        on_emit=on_emit,
+        state=milestone_state,
+    )
+    for idx, chk in enumerate(request.checks, start=1):
         gate = gate_connect_check(
             chk,
             session,
@@ -1119,6 +1196,12 @@ def run_hgrep_connect_batch(
         )
         _emit_hgrep_trace(gate.log_line, on_emit=on_emit)
         results.append(connect_result_from_hgrep_gate(chk, gate))
+        _emit_hgrep_check_milestones(
+            idx,
+            total_checks,
+            on_emit=on_emit,
+            state=milestone_state,
+        )
 
     _emit_hgrep_trace(
         f"connect-hgrep done checks={len(results)} "
