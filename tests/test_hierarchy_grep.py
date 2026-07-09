@@ -10,6 +10,8 @@ from hierwalk.inst_scan import coarse_hierarchy_path
 from hierwalk.hierarchy_grep import (
     GREP_HIE_JSON_NAME,
     HierarchyGrepSession,
+    _HgrepBuildHeartbeat,
+    _HgrepBuildProgress,
     build_file_grep_index,
     build_module_index,
     dump_file_grep_index,
@@ -98,6 +100,38 @@ def test_wire_inst_collision_prefers_inst_on_leaf(tmp_path: Path):
     assert result["ok"] is True
     assert result["nodes"][-1]["kind"] == "inst"
     assert result["nodes"][-1]["child_module"] == "child"
+
+
+def test_resolve_body_output_ports_on_separate_lines(tmp_path: Path):
+    top_v = _write(
+        tmp_path,
+        "top.v",
+        """
+        module top;
+          output a_0;
+          output a_1;
+        endmodule
+        """,
+    )
+    for leaf in ("a_0", "a_1"):
+        result = resolve_hierarchy_grep(f"top.{leaf}", top="top", rtl_paths=[top_v])
+        assert result["ok"] is True, (leaf, result.get("error"), result.get("nodes"))
+        assert result["nodes"][-1]["kind"] in ("port", "signal")
+
+
+def test_resolve_body_output_ports_comma_list(tmp_path: Path):
+    top_v = _write(
+        tmp_path,
+        "top.v",
+        """
+        module top;
+          output a_0, a_1;
+        endmodule
+        """,
+    )
+    for leaf in ("a_0", "a_1"):
+        result = resolve_hierarchy_grep(f"top.{leaf}", top="top", rtl_paths=[top_v])
+        assert result["ok"] is True, (leaf, result.get("error"))
 
 
 def test_internal_segment_must_be_inst(tmp_path: Path):
@@ -286,3 +320,28 @@ def test_grep_hie_sources_match_requires_exact_set(tmp_path: Path):
     assert not grep_hie_sources_match(cached, [a, b])
     assert remove_grep_hie(cache_path)
     assert not cache_path.is_file()
+
+
+def test_hgrep_build_heartbeat_emits_current_file(tmp_path: Path, monkeypatch):
+    paths = [
+        _write(tmp_path, f"m{i}.v", f"module m{i} (); endmodule\n")
+        for i in range(3)
+    ]
+    logs: list[str] = []
+
+    def slow_grep(path):
+        import time
+
+        time.sleep(0.05)
+        return [f"m{Path(path).stem}"]
+
+    monkeypatch.setattr(
+        "hierwalk.hierarchy_grep.grep_modules_in_file",
+        slow_grep,
+    )
+    progress = _HgrepBuildProgress(len(paths))
+    with _HgrepBuildHeartbeat(progress, on_emit=logs.append, interval_sec=0.05):
+        build_module_index(paths, progress=progress)
+
+    assert any("hgrep-hie heartbeat" in line for line in logs)
+    assert any("files_done=" in line and "folder:" in line for line in logs)

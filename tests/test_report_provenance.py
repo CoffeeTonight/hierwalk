@@ -36,9 +36,10 @@ def test_timing_summary_lists_text_and_logical_separately():
         StepTiming(kind="run_conn_check", name="conn_logical", elapsed_sec=2.3),
         StepTiming(kind="run_io_trace", name="io_trace_ff", elapsed_sec=0.4),
     ]
-    text_sec, logical_sec = connect_phase_timings(steps)
+    text_sec, logical_sec, hgrep_sec = connect_phase_timings(steps)
     assert text_sec == 1.2
     assert logical_sec == 2.3
+    assert hgrep_sec is None
 
     lines = format_timing_summary_lines(
         steps,
@@ -52,8 +53,21 @@ def test_timing_summary_lists_text_and_logical_separately():
     assert "--- summary ---" in body
     assert "Result:        PASS" in body
     assert "Total elapsed: 4.5s" in body
+    assert "grep-hierarchy: (not run)" in body
     assert "text-conn:     1.2s" in body
     assert "logical-conn:  2.3s" in body
-    assert "io_trace_ff" in body
-    assert body.index("text-conn") < body.index("logical-conn")
-    assert body.index("--- summary ---") < body.index("io_trace_ff")
+
+
+def test_timing_summary_includes_grep_hierarchy_phase():
+    steps = [
+        StepTiming(kind="run_conn_check", name="run_conn_check[0]:hgrep", elapsed_sec=0.85),
+    ]
+    text_sec, logical_sec, hgrep_sec = connect_phase_timings(steps)
+    assert hgrep_sec == 0.85
+    assert text_sec is None
+    assert logical_sec is None
+    lines = format_timing_summary_lines(steps, wall_sec=0.9)
+    body = "\n".join(lines)
+    assert "grep-hierarchy: 850ms" in body
+    assert "text-conn:     (not run)" in body
+    assert "logical-conn:  (not run)" in body

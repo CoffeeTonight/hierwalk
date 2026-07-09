@@ -59,8 +59,15 @@ def _step_blob(step) -> str:
 
 
 def classify_connect_timing_phase(step) -> Optional[str]:
-    """Return ``text`` or ``logical`` when *step* is a connect timing step."""
+    """Return ``text``, ``logical``, or ``hgrep`` when *step* is a connect timing step."""
     blob = _step_blob(step)
+    if (
+        "hgrep" in blob
+        or "grep-hierarchy" in blob
+        or "grep_hie" in blob
+        or "grep-hie" in blob
+    ):
+        return "hgrep"
     if "text-conn" in blob or blob.startswith("conn_text") or " conn_text" in blob:
         return "text"
     if "logical-conn" in blob or blob.startswith("conn_logical") or " conn_logical" in blob:
@@ -70,6 +77,8 @@ def classify_connect_timing_phase(step) -> Optional[str]:
     if step.name == "logical-conn" or step.kind == "activation-audit":
         return "logical"
     if step.kind == "run_conn_check":
+        if "hgrep" in blob:
+            return "hgrep"
         if "text" in blob:
             return "text"
         if "logical" in blob:
@@ -79,12 +88,14 @@ def classify_connect_timing_phase(step) -> Optional[str]:
 
 def connect_phase_timings(
     steps: Sequence,
-) -> Tuple[Optional[float], Optional[float]]:
-    """Return (text_sec, logical_sec); each phase uses the longest matching step."""
+) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """Return (text_sec, logical_sec, hgrep_sec); longest step per phase."""
     text_best = 0.0
     logical_best = 0.0
+    hgrep_best = 0.0
     text_hit = False
     logical_hit = False
+    hgrep_hit = False
     for step in steps:
         phase = classify_connect_timing_phase(step)
         if phase == "text" and step.elapsed_sec >= text_best:
@@ -93,7 +104,14 @@ def connect_phase_timings(
         elif phase == "logical" and step.elapsed_sec >= logical_best:
             logical_best = step.elapsed_sec
             logical_hit = True
-    return (text_best if text_hit else None, logical_best if logical_hit else None)
+        elif phase == "hgrep" and step.elapsed_sec >= hgrep_best:
+            hgrep_best = step.elapsed_sec
+            hgrep_hit = True
+    return (
+        text_best if text_hit else None,
+        logical_best if logical_hit else None,
+        hgrep_best if hgrep_hit else None,
+    )
 
 
 def format_timing_summary_lines(
@@ -105,8 +123,8 @@ def format_timing_summary_lines(
     issue_count: Optional[int] = None,
     ok: Optional[bool] = None,
 ) -> List[str]:
-    """Summary block: verdict, wall clock, text/logical conn listed separately."""
-    text_sec, logical_sec = connect_phase_timings(steps)
+    """Summary block: verdict, wall clock, connect phases listed separately."""
+    text_sec, logical_sec, hgrep_sec = connect_phase_timings(steps)
     other_steps = [
         step
         for step in steps
@@ -130,6 +148,10 @@ def format_timing_summary_lines(
             f"(recorded steps; excludes gaps between steps)"
         )
     lines.append("Connect phases (reported separately, not merged):")
+    if hgrep_sec is not None:
+        lines.append(f"  grep-hierarchy: {format_duration(hgrep_sec)}")
+    else:
+        lines.append("  grep-hierarchy: (not run)")
     if text_sec is not None:
         lines.append(f"  text-conn:     {format_duration(text_sec)}")
     else:

@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from hierwalk.inst_scan import coarse_hierarchy_path, inst_base_name
 
@@ -108,11 +109,122 @@ def grep_modules_in_file(path: str | Path) -> List[str]:
     return names
 
 
-def build_module_index(rtl_paths: Sequence[str | Path]) -> Dict[str, List[str]]:
+class _HgrepBuildProgress:
+    """Thread-safe progress for grep_hie module-index build."""
+
+    def __init__(self, total: int) -> None:
+        self._lock = threading.Lock()
+        self._total = total
+        self._index = 0
+        self._current_file = ""
+        self._started = time.monotonic()
+        self._heartbeat_count = 0
+
+    def set_file(self, index: int, path: str) -> None:
+        with self._lock:
+            self._index = index
+            self._current_file = path
+
+    def bump_heartbeat(self) -> int:
+        with self._lock:
+            self._heartbeat_count += 1
+            return self._heartbeat_count
+
+    def snapshot(self) -> Tuple[int, int, str, float, int]:
+        with self._lock:
+            return (
+                self._index,
+                self._total,
+                self._current_file,
+                time.monotonic() - self._started,
+                self._heartbeat_count,
+            )
+
+
+class _HgrepBuildHeartbeat:
+    """Emit periodic grep_hie build progress (default 30s)."""
+
+    def __init__(
+        self,
+        progress: _HgrepBuildProgress,
+        *,
+        on_emit: Optional[Callable[[str], None]] = None,
+        interval_sec: Optional[float] = None,
+    ) -> None:
+        from hierwalk.perf import hgrep_heartbeat_interval_sec
+
+        self._progress = progress
+        self._on_emit = on_emit
+        self._interval = (
+            interval_sec
+            if interval_sec is not None
+            else hgrep_heartbeat_interval_sec()
+        )
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def __enter__(self) -> "_HgrepBuildHeartbeat":
+        if self._interval is None or self._progress._total <= 0:
+            return self
+        self._thread = threading.Thread(
+            target=self._run,
+            name="hgrep-hie-heartbeat",
+            daemon=True,
+        )
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        if self._thread is not None:
+            self._stop.set()
+            self._thread.join(timeout=(self._interval or 0.0) + 2.0)
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval):
+            self._emit_once()
+
+    def _emit_once(self) -> None:
+        idx, total, path, elapsed, _prev = self._progress.snapshot()
+        count = self._progress.bump_heartbeat()
+        from hierwalk.progress import format_work_location
+
+        if path:
+            detail = format_work_location(path, index=idx, total=total)
+        else:
+            detail = "starting"
+        msg = (
+            f"hgrep-hie heartbeat count={count} "
+            f"files_done={idx}/{total} elapsed_sec={elapsed:.1f} {detail}"
+        )
+        _emit_hgrep_build_log(msg, on_emit=self._on_emit)
+
+
+def _emit_hgrep_build_log(
+    message: str,
+    *,
+    on_emit: Optional[Callable[[str], None]] = None,
+) -> None:
+    if not message:
+        return
+    from hierwalk.hierarchy_log import emit_path_walk_log
+
+    emit_path_walk_log(message, stream=sys.stderr)
+    if on_emit is not None:
+        on_emit(message)
+
+
+def build_module_index(
+    rtl_paths: Sequence[str | Path],
+    *,
+    progress: Optional[_HgrepBuildProgress] = None,
+) -> Dict[str, List[str]]:
     """Grep all RTL paths → ``{module_name: [abs_file_path, ...]}``."""
     index: Dict[str, List[str]] = {}
-    for raw in rtl_paths:
+    total = len(rtl_paths)
+    for i, raw in enumerate(rtl_paths, start=1):
         key = abs_rtl_path(raw)
+        if progress is not None:
+            progress.set_file(i, key)
         for name in grep_modules_in_file(key):
             bucket = index.setdefault(name, [])
             if key not in bucket:
@@ -356,10 +468,13 @@ class HierarchyGrepSession:
         module_index: Optional[Mapping[str, Sequence[str | Path]]] = None,
         build_file_index_background: bool = True,
         file_grep_index_path: Optional[str | Path] = None,
+        on_emit: Optional[Callable[[str], None]] = None,
     ) -> HierarchyGrepSession:
         abs_paths = [abs_rtl_path(p) for p in rtl_paths if p]
         if module_index is None:
-            mod_index = build_module_index(abs_paths)
+            progress = _HgrepBuildProgress(len(abs_paths))
+            with _HgrepBuildHeartbeat(progress, on_emit=on_emit):
+                mod_index = build_module_index(abs_paths, progress=progress)
         else:
             mod_index = _normalize_module_index(module_index)
         session = cls(rtl_paths=abs_paths, module_index=mod_index)
@@ -517,7 +632,7 @@ def _inst_child_module(body: str, inst_leaf: str) -> Optional[str]:
         needles.append(base)
     for name in needles:
         anchor = re.compile(
-            rf"\b{re.escape(name)}\s*(?:\[[^\]]*\]\s*)*(?:\(|;)",
+            rf"\b{re.escape(name)}\s*(?:\[[^\]]*\]\s*)*\(",
             re.IGNORECASE,
         )
         for m in anchor.finditer(compact):
@@ -580,8 +695,38 @@ def _port_names(header: str) -> set[str]:
     return names
 
 
+def _identifiers_after_decl_keyword(seg: str, kw: str) -> List[str]:
+    """Names declared after ``wire``/``output``/… on one statement (comma-separated)."""
+    if not re.search(rf"\b{kw}\b", seg, re.I):
+        return []
+    m = re.search(rf"\b{kw}\b\s*(.*)$", seg, re.I | re.DOTALL)
+    if not m:
+        return []
+    rest = m.group(1).strip().rstrip(";")
+    rest = re.sub(r"\[[^\]]*\]", " ", rest)
+    out: List[str] = []
+    for part in rest.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        hit = re.search(r"([A-Za-z_]\w*)", part)
+        if hit and hit.group(1).lower() not in _KEYWORDS:
+            out.append(hit.group(1))
+    return out
+
+
 def _declared_signals(body: str) -> set[str]:
     names: set[str] = set()
+    decl_kws = (
+        "wire",
+        "reg",
+        "logic",
+        "wand",
+        "wor",
+        "input",
+        "output",
+        "inout",
+    )
     for raw in body.splitlines():
         line = _strip_line_comment(raw).strip()
         if not line or line.startswith("`"):
@@ -591,15 +736,9 @@ def _declared_signals(body: str) -> set[str]:
             if not seg:
                 continue
             low = seg.lower()
-            for kw in ("wire", "reg", "logic", "wand", "wor"):
+            for kw in decl_kws:
                 if re.search(rf"\b{kw}\b", low):
-                    m = re.search(
-                        rf"\b{kw}\s+(?:\([^)]*\)\s+)?([A-Za-z_]\w*)",
-                        seg,
-                        re.I,
-                    )
-                    if m and m.group(1).lower() not in _KEYWORDS:
-                        names.add(m.group(1))
+                    names.update(_identifiers_after_decl_keyword(seg, kw))
                     break
             if re.search(r"\bassign\b", low):
                 m = re.search(r"\bassign\s+([A-Za-z_]\w*)", seg, re.I)

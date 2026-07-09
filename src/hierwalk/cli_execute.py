@@ -557,7 +557,12 @@ def execute_run(cfg: RunConfig, ap) -> int:
                 )
                 if artifact_rc:
                     return artifact_rc
-            stdout_phase = "logical" if do_logical else "text"
+            if do_hgrep:
+                stdout_phase = "hgrep"
+            elif do_logical and not do_text:
+                stdout_phase = "logical"
+            else:
+                stdout_phase = "text"
             body = format_connect_results_tsv(
                 connect_results,
                 modules_cached=batch.modules_cached,
@@ -640,10 +645,14 @@ def execute_run(cfg: RunConfig, ap) -> int:
                     elab_tops=[top_for_walk],
                     instance_rows=len(pw_state.rows_by_path),
                     mode="path-walk",
-                    output_path=str(
-                        conn_paths.logical_tsv
-                        if do_logical
-                        else conn_paths.text_tsv
+                    output_path=(
+                        str(cfg.output)
+                        if do_hgrep and cfg.output != "-"
+                        else str(
+                            conn_paths.logical_tsv
+                            if do_logical
+                            else conn_paths.text_tsv
+                        )
                     ),
                     filelist_warnings=len(fl.errors),
                     connect_results=connect_results,

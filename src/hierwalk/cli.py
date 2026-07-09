@@ -849,7 +849,12 @@ def main(argv=None) -> int:
             kind, name = step_label
             if test_entry is not None:
                 kind = test_entry.kind
-                name = test_entry.name or f"{test_entry.kind}[{test_entry.index}]"
+                entry_name = test_entry.name or f"{test_entry.kind}[{test_entry.index}]"
+                phase = str(run_cfg.verification_phase or "").strip().lower()
+                if phase and phase not in ("", "both") and f":{phase}" not in entry_name:
+                    name = f"{entry_name}:{phase}"
+                else:
+                    name = entry_name
             with verification_step(
                 kind=kind,
                 name=name,

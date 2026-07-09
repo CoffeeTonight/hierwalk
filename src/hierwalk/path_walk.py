@@ -2902,7 +2902,6 @@ def _pipeline_path_walk_text_conn(
     """Interleave per-check hierarchy walk with parallel text-COI workers (J-003/J-004)."""
     from hierwalk.connect.hierarchy_grep_gate import (
         announce_hgrep_gate_report_path,
-        emit_hgrep_gate_log,
         gate_connect_check,
         prepare_hierarchy_grep_session,
         scoped_sources_for_gate,
@@ -2993,7 +2992,6 @@ def _pipeline_path_walk_text_conn(
                         f"scoped_files={len(gate.scoped_files or ())}"
                     )
                     state._emit_walk(fast_line)
-                    emit_hgrep_gate_log(fast_line)
                     record_connect_check(
                         check_id=chk.check_id,
                         endpoint_a=str(chk.endpoint_a),
@@ -3807,11 +3805,10 @@ def run_path_walk_connect(
             sources = [str(p) for p in fl.source_files]
 
             def _emit_hgrep(msg: str) -> None:
-                _path_walk_trace_emit(
-                    msg,
-                    trace_stream=trace_stream,
-                    trace_log_fh=trace_log_fh,
-                )
+                if trace_log_fh is not None:
+                    from hierwalk.hierarchy_log import emit_path_walk_log
+
+                    emit_path_walk_log(msg, stream=trace_log_fh)
 
             batch, index = run_hgrep_connect_batch(
                 request,

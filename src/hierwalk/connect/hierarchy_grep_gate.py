@@ -38,10 +38,21 @@ _GATE_REPORT_HEADERS: Set[str] = set()
 
 
 def emit_hgrep_gate_log(log_line: str) -> None:
-    """Always emit tier0 gate lines to stderr for captured connect logs."""
+    """Emit tier0 gate lines to stderr with the standard hier-walk timestamp."""
     if not log_line:
         return
-    print(log_line, file=sys.stderr, flush=True)
+    from hierwalk.hierarchy_log import emit_path_walk_log
+
+    emit_path_walk_log(log_line, stream=sys.stderr)
+
+
+def _emit_hgrep_trace(log_line: str, *, on_emit: Optional[Any] = None) -> None:
+    """stderr (timestamped) plus optional trace hook (log file / tests)."""
+    if not log_line:
+        return
+    emit_hgrep_gate_log(log_line)
+    if on_emit is not None:
+        on_emit(log_line)
 
 
 def announce_hgrep_gate_report_path(
@@ -55,9 +66,7 @@ def announce_hgrep_gate_report_path(
         line = f"connect-pipeline hgrep-gate-report path={path}"
     else:
         line = "connect-pipeline hgrep-gate-report disabled"
-    emit_hgrep_gate_log(line)
-    if on_emit is not None:
-        on_emit(line)
+    _emit_hgrep_trace(line, on_emit=on_emit)
 
 
 def _utc_now_iso() -> str:
@@ -420,17 +429,13 @@ def prepare_hierarchy_grep_session(
         cache_path = resolve_grep_hie_path(work_dir)
         if refresh_cache and remove_grep_hie(cache_path):
             line = f"hgrep-cache clean path={cache_path}"
-            emit_hgrep_gate_log(line)
-            if on_emit is not None:
-                on_emit(line)
+            _emit_hgrep_trace(line, on_emit=on_emit)
         if cache_path.is_file() and not refresh_cache:
             try:
                 cached = load_grep_hie(cache_path)
                 if grep_hie_sources_match(cached, paths):
                     line = f"hgrep-cache hit path={cache_path}"
-                    emit_hgrep_gate_log(line)
-                    if on_emit is not None:
-                        on_emit(line)
+                    _emit_hgrep_trace(line, on_emit=on_emit)
                     return HierarchyGrepSession.from_grep_hie_cache(
                         cached,
                         cache_path=cache_path,
@@ -441,15 +446,14 @@ def prepare_hierarchy_grep_session(
     session = HierarchyGrepSession.from_rtl_paths(
         paths,
         build_file_index_background=True,
+        on_emit=on_emit,
     )
     session.file_grep_index(wait=True)
     if cache_path is not None:
         dump_grep_hie(session, cache_path, top=top)
         session.file_grep_index_path = str(cache_path)
         line = f"hgrep-cache write path={cache_path}"
-        emit_hgrep_gate_log(line)
-        if on_emit is not None:
-            on_emit(line)
+        _emit_hgrep_trace(line, on_emit=on_emit)
     return session
 
 
@@ -805,7 +809,6 @@ def gate_connect_check(
     ``fallback`` triggers path-walk when grep is inconclusive.
     """
     def _finish(gate: HierarchyGrepCheckGate) -> HierarchyGrepCheckGate:
-        emit_hgrep_gate_log(gate.log_line)
         if report_path is not None:
             write_hierarchy_grep_gate_report(
                 gate,
@@ -1083,12 +1086,12 @@ def run_hgrep_connect_batch(
     if not paths:
         raise ValueError("no RTL sources for connect_phase=hgrep")
 
-    if on_emit is not None:
-        on_emit(
-            "connect-hgrep begin "
-            f"checks={len(request.checks)} sources={len(paths)} "
-            "(no path-walk index; grep_hie gate only)"
-        )
+    _emit_hgrep_trace(
+        "connect-hgrep begin "
+        f"checks={len(request.checks)} sources={len(paths)} "
+        "(no path-walk index; grep_hie gate only)",
+        on_emit=on_emit,
+    )
     index = DesignIndex({})
     module_body_cache: Dict[str, str] = {}
     session = prepare_hierarchy_grep_session(
@@ -1114,16 +1117,15 @@ def run_hgrep_connect_batch(
             report_path=report_path,
             module_body_cache=module_body_cache,
         )
-        if on_emit is not None:
-            on_emit(gate.log_line)
+        _emit_hgrep_trace(gate.log_line, on_emit=on_emit)
         results.append(connect_result_from_hgrep_gate(chk, gate))
 
-    if on_emit is not None:
-        on_emit(
-            f"connect-hgrep done checks={len(results)} "
-            f"pass={sum(1 for r in results if r.connected)} "
-            f"report={report_path}"
-        )
+    _emit_hgrep_trace(
+        f"connect-hgrep done checks={len(results)} "
+        f"pass={sum(1 for r in results if r.connected)} "
+        f"report={report_path}",
+        on_emit=on_emit,
+    )
     return (
         ConnectivityBatchResult(results=tuple(results), modules_cached=0),
         index,

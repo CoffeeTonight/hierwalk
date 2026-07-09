@@ -1061,7 +1061,7 @@ def _execute_suite_plan(
     report.elapsed_sec = time.perf_counter() - t0
     report.timing_steps = list(timing_rec.steps)
     timing_by_name = {s.name: s.elapsed_sec for s in timing_rec.steps}
-    text_sec, logical_sec = connect_phase_timings(timing_rec.steps)
+    text_sec, logical_sec, hgrep_sec = connect_phase_timings(timing_rec.steps)
     for summary in report.step_summaries:
         hit = timing_by_name.get(summary.name)
         if hit is None:
@@ -1069,6 +1069,8 @@ def _execute_suite_plan(
             hit = timing_by_name.get(base)
         if hit is not None:
             summary.elapsed_sec = hit
+        elif summary.name.endswith(":hgrep") and hgrep_sec is not None:
+            summary.elapsed_sec = hgrep_sec
         elif summary.name.endswith(":text") and text_sec is not None:
             summary.elapsed_sec = text_sec
         elif summary.name.endswith(":logical") and logical_sec is not None:
@@ -1111,7 +1113,7 @@ def _format_aligned_step_artifact_rows(
 def _format_step_timing_summary(report: SuiteVerifyReport) -> List[str]:
     from hierwalk.progress import format_duration
 
-    text_sec, logical_sec = connect_phase_timings(report.timing_steps)
+    text_sec, logical_sec, hgrep_sec = connect_phase_timings(report.timing_steps)
     steps_sum = sum(s.elapsed_sec for s in report.timing_steps)
     lines = ["--- summary ---"]
     lines.append(f"Result:        {'PASS' if report.ok else 'FAIL'}")
@@ -1126,6 +1128,10 @@ def _format_step_timing_summary(report: SuiteVerifyReport) -> List[str]:
             f"(recorded steps; excludes gaps between steps)"
         )
     lines.append("Connect phases (separate, not merged):")
+    if hgrep_sec is not None:
+        lines.append(f"  grep-hierarchy: {format_duration(hgrep_sec)}")
+    else:
+        lines.append("  grep-hierarchy: (not run)")
     if text_sec is not None:
         lines.append(f"  text-conn:     {format_duration(text_sec)}")
     else:

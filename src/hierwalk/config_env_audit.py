@@ -17,6 +17,7 @@ from hierwalk.perf import (
     pw_db_prefetch_enabled,
     pw_db_prefetch_max_files,
     pw_db_prefetch_wait_on_exit,
+    hgrep_heartbeat_interval_sec,
     pw_heartbeat_interval_sec,
     pw_trace_verbose,
     slow_file_log_threshold_sec,
@@ -105,6 +106,11 @@ _BEHAVIOR_ENV_VARS: Sequence[tuple[str, str, str]] = (
         "HIERWALK_PW_HEARTBEAT",
         "(unset)",
         "pw-db / connect-coi heartbeat interval (1=30s)",
+    ),
+    (
+        "HIERWALK_HGREP_HEARTBEAT",
+        "(unset)",
+        "grep_hie.json module-grep heartbeat interval (default 30s; 0=off)",
     ),
     (
         "HIERWALK_CONNECT_JOBS",
@@ -264,6 +270,7 @@ def format_config_env_audit_lines(
         f"pp_log_slow_ms={preprocess_log_slow_ms():.0f} "
         f"pw_trace_verbose={int(pw_trace_verbose())} "
         f"pw_heartbeat_sec={pw_heartbeat_interval_sec() or 'off'} "
+        f"hgrep_heartbeat_sec={hgrep_heartbeat_interval_sec() or 'off'} "
         f"connect_jobs_env={connect_jobs_from_env()}"
     )
 

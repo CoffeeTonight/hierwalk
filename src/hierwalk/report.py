@@ -86,12 +86,14 @@ class RunReport:
         )
         phase = (self.connect_phase or "").strip().lower()
         timing_steps = []
-        if phase in ("text", "logical", "both"):
-            from hierwalk.verification_timing import get_active_recorder
+        if phase in ("text", "logical", "both", "hgrep"):
+            from hierwalk.verification_timing import (
+                get_active_recorder,
+                recorder_steps_for_report,
+            )
 
             rec = get_active_recorder()
-            if rec is not None and rec.steps:
-                timing_steps = list(rec.steps)
+            timing_steps = recorder_steps_for_report(rec)
         if timing_steps:
             out.extend(
                 format_timing_summary_lines(
@@ -103,7 +105,11 @@ class RunReport:
         else:
             out.append("--- summary ---")
             out.append(f"Elapsed:       {format_duration(self.elapsed_sec)}")
-            if phase in ("text", "logical"):
+            if phase == "hgrep":
+                out.append(
+                    f"Connect phase: grep-hierarchy ({format_duration(self.elapsed_sec)})"
+                )
+            elif phase in ("text", "logical"):
                 label = "text-conn" if phase == "text" else "logical-conn"
                 out.append(f"Connect phase: {label} ({format_duration(self.elapsed_sec)})")
             out.append("")
@@ -194,11 +200,13 @@ class RunReport:
             from hierwalk.connect.session import format_connect_results_report
 
             phase = (self.connect_phase or "logical").strip().lower()
-            if phase not in ("text", "logical", "both"):
+            if phase not in ("text", "logical", "both", "hgrep"):
                 phase = "logical"
             out.append("")
             out.append("Connectivity (hierarchy analysis)")
-            if phase in ("text", "logical"):
+            if phase == "hgrep":
+                out.append("  Phase:         grep-hierarchy")
+            elif phase in ("text", "logical"):
                 out.append(f"  Phase:         {phase}")
             out.append("  Elements:      inst / port / wire / logic / reg (hit or miss)")
             tops = list(self.elab_tops)

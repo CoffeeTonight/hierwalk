@@ -157,6 +157,25 @@ def get_active_recorder() -> Optional[VerificationTimingRecorder]:
     return _active_recorder
 
 
+def recorder_steps_for_report(
+    rec: Optional[VerificationTimingRecorder],
+) -> List[StepTiming]:
+    """Steps for end-of-run report, including the in-flight step if any."""
+    if rec is None:
+        return []
+    out = list(rec.steps)
+    if rec._active is not None:
+        from dataclasses import replace
+
+        out.append(
+            replace(
+                rec._active,
+                elapsed_sec=time.perf_counter() - rec._t0,
+            )
+        )
+    return out
+
+
 def set_active_recorder(recorder: Optional[VerificationTimingRecorder]) -> None:
     global _active_recorder
     _active_recorder = recorder
@@ -248,6 +267,9 @@ def verification_step_label(cfg) -> Optional[Tuple[str, str]]:
         name = cfg.fanout_cone
     elif cfg.fanin_cone:
         name = cfg.fanin_cone
+    phase = str(getattr(cfg, "verification_phase", "") or "").strip().lower()
+    if phase and phase not in ("", "both") and f":{phase}" not in name:
+        name = f"{name}:{phase}"
     return kind, name
 
 

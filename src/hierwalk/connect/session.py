@@ -961,6 +961,7 @@ class ConnectivitySession:
         pre_gates: Dict[str, Any] = {}
         if self.hgrep_session is not None:
             from hierwalk.connect.hierarchy_grep_gate import (
+                _emit_hgrep_trace,
                 announce_hgrep_gate_report_path,
                 gate_connect_check,
             )
@@ -979,8 +980,7 @@ class ConnectivitySession:
                 )
                 key = str(chk.check_id or id(chk))
                 pre_gates[key] = gate
-                if on_heartbeat is not None:
-                    on_heartbeat(gate.log_line)
+                _emit_hgrep_trace(gate.log_line, on_emit=on_heartbeat)
             if on_heartbeat is not None:
                 on_heartbeat(
                     f"connect-coi begin checks={len(checks)} "

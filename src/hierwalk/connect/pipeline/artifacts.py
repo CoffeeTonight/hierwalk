@@ -1849,7 +1849,10 @@ def format_connect_results_report(
                     lines.append(f"    {side} ---- {ep.spec:40} (unresolved)")
         text_ok = _connected_text_value(result)
         logical_ok = _connected_logical_value(result)
-        if phase_label == "text":
+        if phase_label == "hgrep":
+            gate_ok = bool(result.connected)
+            lines.append(f"    hgrep-gate: {'PASS' if gate_ok else 'FAIL'}")
+        elif phase_label == "text":
             coi = "PASS" if text_ok else "FAIL"
             lines.append(f"    coi(text): {coi}")
         elif phase_label == "logical":

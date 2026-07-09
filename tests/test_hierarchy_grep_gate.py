@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from hierwalk.connect.hierarchy_grep_gate import (
+    emit_hgrep_gate_log,
     flat_rows_from_resolve,
     format_hierarchy_grep_gate_report,
     gate_connect_check,
@@ -21,6 +22,13 @@ def _write(tmp_path: Path, name: str, text: str) -> str:
     p = tmp_path / name
     p.write_text(text, encoding="utf-8")
     return str(p.resolve())
+
+
+def test_emit_hgrep_gate_log_includes_timestamp(capsys):
+    emit_hgrep_gate_log("hgrep-cache hit path=/tmp/grep_hie.json")
+    err = capsys.readouterr().err
+    assert err.startswith("20")
+    assert "[hier-walk path-walk] hgrep-cache hit" in err
 
 
 def test_gate_strips_port_tail_for_hierarchy_resolve(tmp_path: Path):

@@ -282,6 +282,29 @@ def pw_heartbeat_interval_sec() -> Optional[float]:
         return 30.0
 
 
+def hgrep_heartbeat_interval_sec() -> Optional[float]:
+    """
+    Periodic heartbeat while building ``grep_hie.json`` (module line-grep over RTL).
+
+    Defaults to 30s. ``HIERWALK_HGREP_HEARTBEAT=0`` disables; ``=60`` uses 60s.
+    When unset, also honors ``HIERWALK_PW_HEARTBEAT`` if set; otherwise 30s.
+    """
+    raw = os.environ.get("HIERWALK_HGREP_HEARTBEAT", "").strip().lower()
+    if raw in ("0", "off", "false", "no", "disable", "disabled"):
+        return None
+    if raw in ("1", "true", "yes", "on"):
+        return 30.0
+    if raw:
+        try:
+            return max(5.0, float(raw))
+        except ValueError:
+            return 30.0
+    pw = pw_heartbeat_interval_sec()
+    if pw is not None:
+        return pw
+    return 30.0
+
+
 def connect_jobs_from_env() -> int:
     """``HIERWALK_CONNECT_JOBS`` override for path-walk connect-COI parallelism (0=auto)."""
     raw = os.environ.get("HIERWALK_CONNECT_JOBS", "").strip()
