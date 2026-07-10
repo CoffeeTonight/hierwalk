@@ -77,6 +77,26 @@ def test_cli_overrides_json_top_and_filelist(tmp_path: Path):
     assert cfg.top == "cli_top"
 
 
+def test_jsonc_line_comments(tmp_path: Path):
+    doc_path = tmp_path / "run.jsonc"
+    doc_path.write_text(
+        """
+        {
+          // top module
+          "top": "top",
+          "filelist": "fl.f",
+          "checks": [
+            { "id": "hg1", "a": "top.u", "b": "top.u" } // self
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+    cfg = load_hg_run_config(doc_path)
+    assert cfg.top == "top"
+    assert len(cfg.checks) == 1
+
+
 def test_require_top_and_filelist():
     with pytest.raises(SystemExit, match="missing top"):
         require_hg_run_config(HgRunConfig(filelist="fl.f", top=""))

@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional
 
 from hierwalk.connect.shared.request import ConnectivityCheck
 from hierwalk.run_request import (
@@ -14,6 +13,7 @@ from hierwalk.run_request import (
     _parse_defines,
     _resolve_path,
     apply_config_env_from_document,
+    read_json_document,
 )
 
 
@@ -28,9 +28,9 @@ class HgRunConfig:
 
 
 def load_json_document(path: Path) -> tuple[Any, Path]:
-    base = path.expanduser().resolve().parent
-    raw = json.loads(path.read_text(encoding="utf-8-sig"))
-    return raw, base
+    """Load JSON/JSONC (``//`` line comments) — same parser as hier-walk."""
+    resolved = path.expanduser().resolve()
+    return read_json_document(resolved), resolved.parent
 
 
 def _checks_items(doc: Mapping[str, Any]) -> List[Mapping[str, Any]]:
