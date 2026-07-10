@@ -9,6 +9,7 @@ from pathlib import Path
 
 from hg_core.log import emit_hg_log, hg_log_path
 from hg_core.report import ReportBuilder, format_elapsed_sec
+from hg_core.summary import append_hgconn_summary
 from hg_core.run_config import load_hg_run_config, require_hg_run_config
 from hgpath.batch import run_batch
 from hgpath.flat_db import load_or_build_flat_db
@@ -94,13 +95,14 @@ def main(argv: list[str] | None = None) -> int:
     report = ReportBuilder(title="hgconn report", tool="hgconn", started_at=t0)
     report.add(f"top: {cfg.top}")
     report.add(f"checks: {len(checks)}")
-    report.add(f"connected: {connected}")
-    report.add(f"failed: {len(checks) - connected}")
-    for r in results:
-        report.add(
-            f"  {r.check_id}: connected={r.connected} mode={r.mode} "
-            f"elapsed={r.elapsed_ms:.1f}ms"
-        )
+    append_hgconn_summary(
+        report,
+        entries=batch.entries,
+        check_results=batch.check_results,
+        conn_results=results,
+    )
+    report.add("")
+    report.add("--- timing ---")
     report.add(f"total_elapsed: {format_elapsed_sec(t0)}")
     report_path = work / "hgconn.report"
     report.finish(report_path)

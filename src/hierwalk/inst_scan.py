@@ -34,6 +34,9 @@ _DIRECTIVE_LINE_RE = re.compile(
     r"^\s*`(?:define|undef|include|ifdef|ifndef|elsif|else|endif|end)\b",
     re.IGNORECASE,
 )
+_PP_DIRECTIVE_KW = frozenset(
+    {"ifdef", "ifndef", "elsif", "else", "endif", "end", "define", "undef", "include"}
+)
 _MACRO_ONLY_LINE_RE = re.compile(r"^\s*(?:`[A-Za-z_]\w*\s*)+$")
 _ENDIF_DIRECTIVE_SUFFIX_RE = re.compile(
     r"^\s*`(?:endif|else|end)\b\s*(.*)$",
@@ -109,6 +112,14 @@ def _read_ident(text: str, i: int) -> Tuple[str, int]:
     if not m:
         return "", i
     return m.group(0), i + m.end()
+
+
+def _infer_cell_from_inst_leaf(inst_leaf: str) -> str:
+    """``u_A`` → ``A`` when cell type omitted (common ``ifndef`` wrapper)."""
+    base = inst_leaf.split("[", 1)[0]
+    if len(base) > 2 and base[0] in "uU" and base[1] == "_":
+        return base[2:]
+    return ""
 
 
 def _read_hier_inst_path(text: str, i: int) -> Tuple[str, int]:
@@ -413,17 +424,30 @@ def _inst_leaf_probe_pattern(inst_leaf: str) -> Optional[re.Pattern[str]]:
     return pat
 
 
+def _inst_leaf_probe_inst_only_pattern(inst_leaf: str) -> Optional[re.Pattern[str]]:
+    base = inst_leaf.split("[", 1)[0]
+    if not base:
+        return None
+    esc = re.escape(base)
+    return re.compile(
+        rf"(?:^|[;{{}}])\s*{esc}(?:\s*\[[^\]]*\])?\s*\(",
+        re.MULTILINE,
+    )
+
+
 def probe_inst_leaf_regex_fast(body: str, inst_leaf: str) -> bool:
     """
     Regex probe for ``cell inst (...)`` / ``cell inst;`` without a full body walk.
 
-    Used on path-walk signal-tail miss to avoid scanning large assign-only modules
-    when the first dotted segment is an instance name.
+    Also matches cell-less ``inst (...)`` (param ``#(...)`` on prior line).
     """
     if not body or not inst_leaf:
         return False
     pat = _inst_leaf_probe_pattern(inst_leaf)
-    return pat is not None and pat.search(body) is not None
+    if pat is not None and pat.search(body) is not None:
+        return True
+    inst_only = _inst_leaf_probe_inst_only_pattern(inst_leaf)
+    return inst_only is not None and inst_only.search(body) is not None
 
 
 def _clean_body_for_instance_scan(body: str) -> str:
@@ -567,6 +591,7 @@ def _iter_hierarchy_instance_edges(
     seen: Set[Tuple[str, str]] = set()
     n = len(clean)
     i = max(0, min(start, n))
+    pending_cell: Optional[str] = None
 
     def add(
         cell: str,
@@ -574,16 +599,17 @@ def _iter_hierarchy_instance_edges(
         dims: str,
         overrides: Optional[Dict[str, str]] = None,
     ) -> Optional[InstanceEdge]:
-        if cell.lower() in _KEYWORDS:
+        use_cell = cell or _infer_cell_from_inst_leaf(inst)
+        if not use_cell or use_cell.lower() in _KEYWORDS:
             return None
         for leaf in expand_inst_names(inst, dims, pmap):
-            key = (leaf, cell)
+            key = (leaf, use_cell)
             if key in seen:
                 continue
             seen.add(key)
             edge = InstanceEdge(
                 inst_name=leaf,
-                child_module=cell,
+                child_module=use_cell,
                 param_overrides=dict(overrides or {}),
             )
             return edge
@@ -607,11 +633,61 @@ def _iter_hierarchy_instance_edges(
             i += 1
         if i >= n:
             break
+        if clean[i] == "#":
+            overrides, k = consume_hash(i)
+            while k < n and clean[k].isspace():
+                k += 1
+            k = _skip_sv_attributes(clean, k)
+            inst, k = _read_hier_inst_path(clean, k)
+            if inst:
+                while k < n and clean[k].isspace():
+                    k += 1
+                dims = ""
+                while k < n and clean[k] == "[":
+                    end = _skip_balanced(clean, k, "[", "]")
+                    dims += clean[k:end]
+                    k = end
+                    while k < n and clean[k].isspace():
+                        k += 1
+                if k < n and clean[k] in "(;":
+                    cell = pending_cell or _infer_cell_from_inst_leaf(inst) or ""
+                    pending_cell = None
+                    edge = add(cell, inst, dims, overrides)
+                    if edge is not None:
+                        yield edge
+                    if clean[k] == "(":
+                        k = _skip_balanced(clean, k, "(", ")")
+            i = max(i + 1, k)
+            continue
+        if pending_cell:
+            inst, j = _read_hier_inst_path(clean, i)
+            if inst:
+                cell = pending_cell
+                pending_cell = None
+                k = j
+                while k < n and clean[k].isspace():
+                    k += 1
+                dims = ""
+                while k < n and clean[k] == "[":
+                    end = _skip_balanced(clean, k, "[", "]")
+                    dims += clean[k:end]
+                    k = end
+                    while k < n and clean[k].isspace():
+                        k += 1
+                if k < n and clean[k] in "(;":
+                    edge = add(cell, inst, dims, {})
+                    if edge is not None:
+                        yield edge
+                    if clean[k] == "(":
+                        k = _skip_balanced(clean, k, "(", ")")
+                i = k
+                continue
+            pending_cell = None
         cell, j = _read_ident(clean, i)
         if not cell:
             i += 1
             continue
-        if cell.lower() in _KEYWORDS:
+        if cell.lower() in _KEYWORDS or cell.lower() in _PP_DIRECTIVE_KW:
             i = j
             continue
         k = j
@@ -634,8 +710,22 @@ def _iter_hierarchy_instance_edges(
                 if k < n and clean[k] == "#":
                     overrides, k = consume_hash(k)
         if not inst:
+            while k < n and clean[k].isspace():
+                k += 1
+            if k < n and clean[k] in "(;":
+                inst = cell
+                cell = pending_cell or ""
+                pending_cell = None
+            else:
+                pending_cell = cell
+                i = j
+                continue
+        if not inst:
             i += 1
             continue
+        pending_cell = None
+        if not cell:
+            cell = _infer_cell_from_inst_leaf(inst) or ""
         while k < n and clean[k].isspace():
             k += 1
         dims = ""

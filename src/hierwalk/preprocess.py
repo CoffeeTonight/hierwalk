@@ -17,9 +17,10 @@ from hierwalk.progress import format_work_location, maybe_track_work
 
 _IGNORE_PATH_STUB = "/* hierwalk: ignore-path skipped */"
 
+_PP_ESC_SUFFIX = r"(?:\\(?:[A-Za-z_]\w*|\S+))?"
 _IFDEF_RE = re.compile(
-    r"`(?:ifdef|ifndef)\s+([A-Za-z_]\w*)"
-    r"|`elsif\s+([A-Za-z_]\w*)"
+    rf"`(?:ifdef|ifndef)\s+([A-Za-z_]\w*){_PP_ESC_SUFFIX}"
+    rf"|`elsif\s+([A-Za-z_]\w*){_PP_ESC_SUFFIX}"
     r"|`(?:else|endif|end)\b",
     re.IGNORECASE,
 )
@@ -405,15 +406,27 @@ def _apply_ifdef_control_line(
 ) -> bool:
     """Update *stack* when *line* is a standalone `` `ifdef `` control directive."""
     stripped = line.strip()
-    m = re.match(r"^\s*`ifdef\s+([A-Za-z_]\w*)\s*$", stripped, re.IGNORECASE)
+    m = re.match(
+        rf"^\s*`ifdef\s+([A-Za-z_]\w*){_PP_ESC_SUFFIX}\s*$",
+        stripped,
+        re.IGNORECASE,
+    )
     if m:
         _apply_ifdef_directive("ifdef", m.group(1), stack, defs)
         return True
-    m = re.match(r"^\s*`ifndef\s+([A-Za-z_]\w*)\s*$", stripped, re.IGNORECASE)
+    m = re.match(
+        rf"^\s*`ifndef\s+([A-Za-z_]\w*){_PP_ESC_SUFFIX}\s*$",
+        stripped,
+        re.IGNORECASE,
+    )
     if m:
         _apply_ifdef_directive("ifndef", m.group(1), stack, defs)
         return True
-    m = re.match(r"^\s*`elsif\s+([A-Za-z_]\w*)\s*$", stripped, re.IGNORECASE)
+    m = re.match(
+        rf"^\s*`elsif\s+([A-Za-z_]\w*){_PP_ESC_SUFFIX}\s*$",
+        stripped,
+        re.IGNORECASE,
+    )
     if m:
         _apply_ifdef_directive("elsif", m.group(1), stack, defs)
         return True

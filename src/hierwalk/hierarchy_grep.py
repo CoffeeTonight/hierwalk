@@ -26,8 +26,16 @@ _KEYWORDS = frozenset(
         "module", "endmodule", "interface", "endinterface", "program", "endprogram",
         "input", "output", "inout", "wire", "reg", "logic", "assign", "always",
         "begin", "end", "if", "else", "generate", "endgenerate", "parameter",
+        "ifdef", "ifndef", "elsif", "endif",
     }
 )
+
+
+def _body_for_instance_lookup(body: str) -> str:
+    """Comment + `` `ifdef `` filter (inst_scan parity for hierarchy resolve)."""
+    from hierwalk.preprocess import apply_ifdef_filter, strip_comments_for_instance_scan
+
+    return apply_ifdef_filter(strip_comments_for_instance_scan(body), {})
 
 
 def _strip_line_comment(line: str) -> str:
@@ -669,22 +677,20 @@ def _cell_before_inst(compact: str, inst_at: int) -> Optional[str]:
 
 def _inst_child_module(body: str, inst_leaf: str) -> Optional[str]:
     """Return cell type for ``inst_leaf`` instance, if declared in *body*."""
+    from hierwalk.inst_scan import find_hierarchy_instance, _infer_cell_from_inst_leaf
+
     if not body or not inst_leaf:
         return None
-    compact = _collapse_ws(body)
+    filtered = _body_for_instance_lookup(body)
     base, _idx = _split_hier_segment(inst_leaf)
-    needles = [inst_leaf]
-    if base != inst_leaf:
-        needles.append(base)
-    for name in needles:
-        anchor = re.compile(
-            rf"\b{re.escape(name)}\s*(?:\[[^\]]*\]\s*)*\(",
-            re.IGNORECASE,
-        )
-        for m in anchor.finditer(compact):
-            cell = _cell_before_inst(compact, m.start())
-            if cell:
-                return cell
+    for name in (inst_leaf, base) if base != inst_leaf else (inst_leaf,):
+        edge = find_hierarchy_instance(filtered, name)
+        if edge is not None:
+            if edge.child_module:
+                return edge.child_module
+            inferred = _infer_cell_from_inst_leaf(name)
+            if inferred:
+                return inferred
     return None
 
 

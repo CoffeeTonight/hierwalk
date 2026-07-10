@@ -9,6 +9,7 @@ from pathlib import Path
 
 from hg_core.log import emit_hg_log, hg_log_path
 from hg_core.report import ReportBuilder, format_elapsed_sec
+from hg_core.summary import append_hgpath_summary
 from hg_core.run_config import load_hg_run_config, require_hg_run_config
 from hgpath.batch import run_batch
 from hgpath.flat_db import load_or_build_flat_db
@@ -105,19 +106,30 @@ def main(argv: list[str] | None = None) -> int:
         tree = TreeDb(work_dir=work, path=resolve_tree_db_path(work))
 
     checks = cfg.checks
+    batch = None
     if checks:
-        run_batch(checks, top=cfg.top, session=session, tree=tree, on_log=on_log)
+        batch = run_batch(checks, top=cfg.top, session=session, tree=tree, on_log=on_log)
         tree.save()
         on_log(f"tree-saved path={tree.path} nodes={tree.node_count}")
 
     report = ReportBuilder(title="hgpath report", tool="hgpath", started_at=t0)
     report.add(f"top: {cfg.top}")
+    report.add(f"checks: {len(checks)}")
+    if batch is not None:
+        append_hgpath_summary(
+            report,
+            entries=batch.entries,
+            check_results=batch.check_results,
+        )
+    else:
+        report.add("(no checks in input JSON — hierarchy summary skipped)")
+    report.add("")
+    report.add("--- db / cache ---")
     report.add(f"flat_db: {flat_db.path}")
     report.add(f"tree_db: {tree.path}")
     report.add(f"modules: {flat_db.module_count}")
     report.add(f"rtl_files: {flat_db.rtl_file_count}")
     report.add(f"tree_nodes: {tree.node_count}")
-    report.add(f"checks: {len(checks)}")
     report.add(f"total_elapsed: {format_elapsed_sec(t0)}")
     report_path = work / "hgpath.report"
     report.finish(report_path)
