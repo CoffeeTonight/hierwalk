@@ -12,6 +12,8 @@ dependencies = []
 
 [project.scripts]
 hier-walk = "hierwalk.cli:main"
+hgpath = "hgpath.cli:main"
+hgconn = "hgconn.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

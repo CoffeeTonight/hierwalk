@@ -322,6 +322,92 @@ def test_grep_hie_sources_match_requires_exact_set(tmp_path: Path):
     assert not cache_path.is_file()
 
 
+def test_session_resolve_reuses_module_body_cache(tmp_path: Path, monkeypatch):
+    top_v = _write(
+        tmp_path,
+        "top.v",
+        """
+        module child (output logic out);
+          assign out = 1'b0;
+        endmodule
+        module top;
+          child u_a ();
+          child u_b ();
+        endmodule
+        """,
+    )
+    import hierwalk.hierarchy_grep as hg
+
+    read_count = 0
+    orig_read = hg._read_text
+
+    def counting_read(path):
+        nonlocal read_count
+        read_count += 1
+        return orig_read(path)
+
+    monkeypatch.setattr(hg, "_read_text", counting_read)
+
+    session = HierarchyGrepSession.from_rtl_paths(
+        [top_v],
+        build_file_index_background=False,
+    )
+    session.resolve("top.u_a.out", top="top")
+    after_first = read_count
+    assert after_first == 1
+
+    session.resolve("top.u_b.out", top="top")
+    after_second = read_count
+    assert after_second == 1
+
+    session.resolve("top.u_a.out", top="top")
+    assert read_count == after_second
+
+    assert len(session._module_body_cache) >= 1
+
+
+def test_resolve_without_session_still_uses_per_call_cache(tmp_path: Path, monkeypatch):
+    top_v = _write(
+        tmp_path,
+        "top.v",
+        """
+        module child (output logic out);
+          assign out = 1'b0;
+        endmodule
+        module top;
+          child u_a ();
+        endmodule
+        """,
+    )
+    import hierwalk.hierarchy_grep as hg
+
+    read_count = 0
+    orig_read = hg._read_text
+
+    def counting_read(path):
+        nonlocal read_count
+        read_count += 1
+        return orig_read(path)
+
+    monkeypatch.setattr(hg, "_read_text", counting_read)
+
+    index = build_module_index([top_v])
+    resolve_hierarchy_grep(
+        "top.u_a.out",
+        top="top",
+        rtl_paths=[top_v],
+        module_index=index,
+    )
+    first_reads = read_count
+    resolve_hierarchy_grep(
+        "top.u_a.out",
+        top="top",
+        rtl_paths=[top_v],
+        module_index=index,
+    )
+    assert read_count == first_reads * 2
+
+
 def test_hgrep_build_heartbeat_emits_current_file(tmp_path: Path, monkeypatch):
     paths = [
         _write(tmp_path, f"m{i}.v", f"module m{i} (); endmodule\n")

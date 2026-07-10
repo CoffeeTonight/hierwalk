@@ -454,6 +454,16 @@ class HierarchyGrepSession:
         repr=False,
     )
     file_grep_index_path: Optional[str] = field(default=None, init=False, repr=False)
+    _module_body_cache: Dict[Tuple[str, str], str] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
+    _rtl_text_cache: Dict[str, str] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
 
     @classmethod
     def from_grep_hie_cache(
@@ -576,7 +586,14 @@ class HierarchyGrepSession:
             top=top,
             rtl_paths=self.rtl_paths,
             module_index=self.module_index,
+            body_cache=self._module_body_cache,
+            file_cache=self._rtl_text_cache,
         )
+
+    def clear_module_body_cache(self) -> None:
+        """Drop cached per-module RTL bodies (e.g. after RTL edits in long sessions)."""
+        self._module_body_cache.clear()
+        self._rtl_text_cache.clear()
 
     def resolve_with_file_index(
         self,
@@ -780,12 +797,20 @@ def _body_cached(
     cache: Dict[Tuple[str, str], str],
     path: str,
     module_name: str,
+    *,
+    file_cache: Optional[Dict[str, str]] = None,
 ) -> str:
     key = (path, module_name)
     hit = cache.get(key)
     if hit is not None:
         return hit
-    body = _module_body(_read_text(path), module_name)
+    if file_cache is not None and path in file_cache:
+        text = file_cache[path]
+    else:
+        text = _read_text(path)
+        if file_cache is not None:
+            file_cache[path] = text
+    body = _module_body(text, module_name)
     cache[key] = body
     return body
 
@@ -795,8 +820,10 @@ def _scoped_body(
     path: str,
     module_name: str,
     scope_stack: Sequence[Tuple[str, Optional[str]]],
+    *,
+    file_cache: Optional[Dict[str, str]] = None,
 ) -> str:
-    scoped = _body_cached(cache, path, module_name)
+    scoped = _body_cached(cache, path, module_name, file_cache=file_cache)
     for label, idx in scope_stack:
         narrowed = _generate_block_body(scoped, label, index=idx)
         if narrowed is None:
@@ -871,11 +898,12 @@ def _child_decl_candidates(
     cache: Dict[Tuple[str, str], str],
     *,
     prune_empty: bool,
+    file_cache: Optional[Dict[str, str]] = None,
 ) -> List[str]:
     out: List[str] = []
     for path in index.get(child_mod, ()):
         if prune_empty:
-            body = _body_cached(cache, path, child_mod)
+            body = _body_cached(cache, path, child_mod, file_cache=file_cache)
             if not _module_body_has_content(body, child_mod):
                 continue
         out.append(path)
@@ -939,6 +967,8 @@ def resolve_hierarchy_grep(
     top: str,
     rtl_paths: Sequence[str | Path],
     module_index: Optional[Mapping[str, Sequence[str]]] = None,
+    body_cache: Optional[Dict[Tuple[str, str], str]] = None,
+    file_cache: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """
     Resolve *hierarchy* using grep-built module index and per-node file paths.
@@ -987,7 +1017,7 @@ def resolve_hierarchy_grep(
     parts = [inst_base_name(part) for part in parts]
     text = ".".join(parts)
 
-    body_cache: Dict[Tuple[str, str], str] = {}
+    cache = body_cache if body_cache is not None else {}
 
     if top_name not in index:
         return _normalize_resolve_result(
@@ -1038,7 +1068,13 @@ def resolve_hierarchy_grep(
 
         if not is_leaf:
             for br in branches:
-                body = _scoped_body(body_cache, br.parent_file, br.mod, br.gen_scope)
+                body = _scoped_body(
+                    cache,
+                    br.parent_file,
+                    br.mod,
+                    br.gen_scope,
+                    file_cache=file_cache,
+                )
                 child_mod = _inst_child_module(body, seg)
                 if child_mod:
                     for child_file in index.get(child_mod, ()):
@@ -1125,15 +1161,22 @@ def resolve_hierarchy_grep(
             continue
 
         for br in branches:
-            body = _scoped_body(body_cache, br.parent_file, br.mod, br.gen_scope)
+            body = _scoped_body(
+                cache,
+                br.parent_file,
+                br.mod,
+                br.gen_scope,
+                file_cache=file_cache,
+            )
             kind, detail = _leaf_kind_in_body(body, br.mod, seg)
             if kind == "inst":
                 child_mod = _inst_child_module(body, seg) or ""
                 child_files = _child_decl_candidates(
                     child_mod,
                     index,
-                    body_cache,
+                    cache,
                     prune_empty=True,
+                    file_cache=file_cache,
                 )
                 if not child_files:
                     child_files = list(index.get(child_mod, ()))

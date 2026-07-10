@@ -547,6 +547,53 @@ def test_prepare_hierarchy_grep_session_refresh_cache_rebuilds(tmp_path: Path):
     assert "module_index" in cache.read_text(encoding="utf-8")
 
 
+def test_run_hgrep_connect_batch_reuses_session_body_cache(tmp_path: Path, monkeypatch):
+    from hierwalk.connect.hierarchy_grep_gate import run_hgrep_connect_batch
+    from hierwalk.connect.shared.request import ConnectivityRequest
+    from hierwalk.index import DesignIndex
+    import hierwalk.hierarchy_grep as hg
+
+    top_v = _write(
+        tmp_path,
+        "top.v",
+        """
+        module child (output logic out);
+          assign out = 1'b0;
+        endmodule
+        module top;
+          child u_a ();
+          child u_b ();
+        endmodule
+        """,
+    )
+    read_count = 0
+    orig_read = hg._read_text
+
+    def counting_read(path):
+        nonlocal read_count
+        read_count += 1
+        return orig_read(path)
+
+    monkeypatch.setattr(hg, "_read_text", counting_read)
+
+    request = ConnectivityRequest(
+        checks=(
+            ConnectivityCheck("top.u_a.out", "top.u_a.out", check_id="hg1"),
+            ConnectivityCheck("top.u_b.out", "top.u_b.out", check_id="hg2"),
+            ConnectivityCheck("top.u_a.out", "top.u_b.out", check_id="hg3"),
+        ),
+        top="top",
+    )
+    batch, _index = run_hgrep_connect_batch(
+        request,
+        [top_v],
+        top="top",
+        connect_output_dir=tmp_path / "out",
+    )
+    assert all(r.connected for r in batch.results)
+    assert read_count == 1
+
+
 def test_run_hgrep_connect_batch_skips_full_design_index(tmp_path: Path, monkeypatch):
     from hierwalk.connect.hierarchy_grep_gate import run_hgrep_connect_batch
     from hierwalk.connect.shared.request import ConnectivityRequest
