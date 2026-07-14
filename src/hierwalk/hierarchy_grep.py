@@ -18,7 +18,8 @@ _PATH_FIELDS = ("file", "hit_file", "child_decl_file", "parent_file")
 
 _RTL_SUFFIXES = {".v", ".sv", ".vh", ".svh"}
 _MODULE_DECL = re.compile(
-    r"^\s*(?:module|interface|program|macromodule)\s+([A-Za-z_]\w*)\b",
+    r"^\s*(?:module|interface|program|macromodule)\s+"
+    r"((?:\\(?:[A-Za-z_]\w*|\S+))|(?:[A-Za-z_]\w*))\b",
     re.IGNORECASE,
 )
 _KEYWORDS = frozenset(
@@ -108,7 +109,9 @@ def grep_modules_in_file(path: str | Path) -> List[str]:
                 m = _MODULE_DECL.match(line)
                 if m is None:
                     continue
-                name = m.group(1)
+                from hierwalk.inst_scan import normalize_cell_module
+
+                name = normalize_cell_module(m.group(1))
                 if name not in seen:
                     seen.add(name)
                     names.append(name)
@@ -619,7 +622,7 @@ class HierarchyGrepSession:
 
 def _module_body(text: str, module_name: str) -> str:
     start = re.search(
-        rf"\b(?:module|interface|program)\s+{re.escape(module_name)}\b",
+        _module_decl_pattern(module_name),
         text,
         re.IGNORECASE,
     )
@@ -634,9 +637,17 @@ def _module_body(text: str, module_name: str) -> str:
     return chunk[: end.start()] if end else chunk
 
 
+def _module_decl_pattern(module_name: str) -> str:
+    """Match ``module BUF`` or ``module \\BUF`` after :func:`normalize_cell_module`."""
+    plain = re.escape(str(module_name or "").strip())
+    if not plain:
+        return r"(?!)"
+    return rf"\b(?:module|interface|program)\s+(?:\\{plain}|{plain})\b"
+
+
 def _module_header(body: str, module_name: str) -> str:
     m = re.match(
-        rf"\b(?:module|interface|program)\s+{re.escape(module_name)}\b(.*)",
+        rf"{_module_decl_pattern(module_name)}(.*)",
         body,
         re.IGNORECASE | re.DOTALL,
     )
@@ -687,7 +698,9 @@ def _inst_child_module(body: str, inst_leaf: str) -> Optional[str]:
         edge = find_hierarchy_instance(filtered, name)
         if edge is not None:
             if edge.child_module:
-                return edge.child_module
+                from hierwalk.inst_scan import normalize_cell_module
+
+                return normalize_cell_module(edge.child_module)
             inferred = _infer_cell_from_inst_leaf(name)
             if inferred:
                 return inferred
@@ -840,7 +853,7 @@ def _scoped_body(
 
 def _module_body_after_header(body: str, module_name: str) -> str:
     m = re.match(
-        rf"\b(?:module|interface|program)\s+{re.escape(module_name)}\b[^;]*;",
+        rf"{_module_decl_pattern(module_name)}[^;]*;",
         body,
         re.IGNORECASE | re.DOTALL,
     )

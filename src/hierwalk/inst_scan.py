@@ -114,6 +114,14 @@ def _read_ident(text: str, i: int) -> Tuple[str, int]:
     return m.group(0), i + m.end()
 
 
+def normalize_cell_module(cell: str) -> str:
+    """``\\A`` escaped id → ``A`` for module_index lookup."""
+    name = str(cell or "").strip()
+    if name.startswith("\\"):
+        name = name[1:].strip()
+    return name
+
+
 def _infer_cell_from_inst_leaf(inst_leaf: str) -> str:
     """``u_A`` → ``A`` when cell type omitted (common ``ifndef`` wrapper)."""
     base = inst_leaf.split("[", 1)[0]
@@ -599,7 +607,7 @@ def _iter_hierarchy_instance_edges(
         dims: str,
         overrides: Optional[Dict[str, str]] = None,
     ) -> Optional[InstanceEdge]:
-        use_cell = cell or _infer_cell_from_inst_leaf(inst)
+        use_cell = normalize_cell_module(cell or _infer_cell_from_inst_leaf(inst))
         if not use_cell or use_cell.lower() in _KEYWORDS:
             return None
         for leaf in expand_inst_names(inst, dims, pmap):

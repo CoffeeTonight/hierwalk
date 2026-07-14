@@ -18,6 +18,7 @@ from hierwalk.progress import format_work_location, maybe_track_work
 _IGNORE_PATH_STUB = "/* hierwalk: ignore-path skipped */"
 
 _PP_ESC_SUFFIX = r"(?:\\(?:[A-Za-z_]\w*|\S+))?"
+_PP_ESC_SUFFIX_CAP = r"(\\(?:[A-Za-z_]\w*|\S+))"
 _IFDEF_RE = re.compile(
     rf"`(?:ifdef|ifndef)\s+([A-Za-z_]\w*){_PP_ESC_SUFFIX}"
     rf"|`elsif\s+([A-Za-z_]\w*){_PP_ESC_SUFFIX}"
@@ -52,8 +53,14 @@ _INCLUDE_LINE_PARSE_RE = re.compile(
     re.IGNORECASE,
 )
 _LINE_COMMENT_RE = re.compile(r"//[^\n]*")
-_ENDIF_LABEL_COMMENT_RE = re.compile(
-    r"^(\s*`(?:endif|else|end))\s*//\s*[A-Za-z_]\w*\s*(.*)$",
+# Glued `` `endif//MACRO`` labels (+ optional same-line RTL). Spaced `` `endif // end B``
+# is a normal ``//`` comment — not a label.
+_ENDIF_GLUED_LABEL_RE = re.compile(
+    r"^(\s*`(?:endif|else|end))//([A-Za-z_]\w*)(?:\s+(.+))?$",
+    re.IGNORECASE,
+)
+_ENDIF_GLUED_TAIL_RE = re.compile(
+    r"^//([A-Za-z_]\w*)(?:\s+(.+))?$",
     re.IGNORECASE,
 )
 
@@ -216,18 +223,19 @@ def _strip_comments_stateful(text: str, *, preserve_endif_label: bool = False) -
             while line_end < n and text[line_end] not in "\r\n":
                 line_end += 1
             line = text[i:line_end]
-            trailing = rtl_after_ifdef_label_comment(line)
-            if trailing:
-                m = _ENDIF_LABEL_COMMENT_RE.match(line)
-                if m is not None:
-                    out.append(m.group(1))
-                    if trailing:
-                        out.append(" ")
-                        out.append(trailing)
-                    i = line_end
-                    if i < n:
-                        i = append_newlines_from(i)
-                    continue
+            m_glued = _ENDIF_GLUED_LABEL_RE.match(line.strip())
+            if m_glued is not None:
+                out.append(m_glued.group(1))
+                out.append("//")
+                out.append(m_glued.group(2))
+                trailing = (m_glued.group(3) or "").strip()
+                if trailing:
+                    out.append(" ")
+                    out.append(trailing)
+                i = line_end
+                if i < n:
+                    i = append_newlines_from(i)
+                continue
 
         if i < n - 1 and text[i : i + 2] == "//":
             i += 2
@@ -253,25 +261,20 @@ def strip_comments(text: str) -> str:
 
 
 def rtl_after_ifdef_label_comment(line: str) -> str:
-    """
-    RTL tokens after `` `endif//MACRO`` / `` `else//MACRO`` on the same source line.
-
-    Common in RTL: the ``//MACRO`` suffix is a human label, but engineers sometimes
-    place instance declarations on the same line after the label.
-    """
-    m = _ENDIF_LABEL_COMMENT_RE.match(line)
+    """RTL after glued `` `endif//MACRO u_A(...)`` only (not `` `endif // comment``)."""
+    m = _ENDIF_GLUED_LABEL_RE.match(line.strip())
     if not m:
         return ""
-    return m.group(2).strip()
+    return (m.group(3) or "").strip()
 
 
 def strip_line_for_ifdef_scan(line: str) -> str:
-    """Like :func:`strip_comments` but keep RTL after `` `endif//label``."""
-    trailing = rtl_after_ifdef_label_comment(line)
-    if trailing:
-        m = _ENDIF_LABEL_COMMENT_RE.match(line)
-        assert m is not None
-        return f"{m.group(1)} {trailing}"
+    """Like :func:`strip_comments` but keep RTL after glued `` `endif//label`` tails."""
+    m = _ENDIF_GLUED_LABEL_RE.match(line.strip())
+    if m:
+        rtl = (m.group(3) or "").strip()
+        base = f"{m.group(1)}//{m.group(2)}"
+        return f"{base} {rtl}".strip() if rtl else base
     return strip_comments(line)
 
 
@@ -319,6 +322,16 @@ def _apply_ifdef_directive(
         stack.pop()
 
 
+def _trailing_cell_after_ifdef_directive(match_text: str, cmd: str) -> str:
+    """Cell type token after `` `ifndef MACRO\\CELL `` (``\\A`` → module ``A``)."""
+    m = re.match(
+        rf"`{cmd}\s+[A-Za-z_]\w*{_PP_ESC_SUFFIX_CAP}\s*$",
+        match_text.strip(),
+        re.IGNORECASE,
+    )
+    return m.group(1) if m else ""
+
+
 def _emit_ifdef_line_segments(
     line: str,
     stack: List[Tuple[bool, bool, bool]],
@@ -355,7 +368,19 @@ def _emit_ifdef_line_segments(
         else:
             cmd, macro = "endif", ""
         _apply_ifdef_directive(cmd, macro, stack, defs)
+        if cmd in ("ifdef", "ifndef") and _stack_active(stack):
+            tail_cell = _trailing_cell_after_ifdef_directive(m.group(0), cmd)
+            if tail_cell:
+                segments.append(tail_cell)
         pos = m.end()
+        if cmd == "endif":
+            tail = line[pos:].strip()
+            m_glued = _ENDIF_GLUED_TAIL_RE.match(tail)
+            if m_glued is not None:
+                rtl = (m_glued.group(2) or "").strip()
+                if rtl:
+                    segments.append(rtl)
+                break
     return segments
 
 
@@ -716,8 +741,6 @@ def _preprocess_conditional_pass(
             continue
 
         if _apply_ifdef_control_line(line, stack, defines):
-            if not defines_only:
-                _write(line)
             continue
 
         if _line_has_inline_ifdef(line):

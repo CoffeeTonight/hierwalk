@@ -119,6 +119,22 @@ def test_ifdef_filter_preserves_rtl_after_endif_label_comment():
     assert "u_cpusystem_top" in out_def
 
 
+def test_ifdef_filter_preserves_pending_cell_after_endif_label():
+    """``ifndef`` + pending cell + `` `endif//MACRO`` second instance (user stress axis)."""
+    from hierwalk.inst_scan import scan_hierarchy_instances
+
+    src = (
+        "`ifndef NO_GLUE\n"
+        "LeafA\n"
+        "u_glue_a ();\n"
+        "`endif//NO_GLUE LeafB u_glue_b ();\n"
+    )
+    out = apply_ifdef_filter(src, {})
+    edges = scan_hierarchy_instances(out)
+    by_name = {e.inst_name: e.child_module for e in edges}
+    assert by_name == {"u_glue_a": "LeafA", "u_glue_b": "LeafB"}
+
+
 def test_slim_body_preserves_rtl_after_endif_label_comment():
     from hierwalk.inst_scan import scan_hierarchy_instances
 
