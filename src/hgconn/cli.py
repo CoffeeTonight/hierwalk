@@ -65,7 +65,21 @@ def main(argv: list[str] | None = None) -> int:
 
     session = None
     filelist = cfg.filelist or str(args.filelist or "").strip()
-    if filelist:
+    from hgpath.flat_db import resolve_flat_db_path, try_load_flat_db_cache
+
+    hit = None
+    if filelist and not need_filelist:
+        hit = try_load_flat_db_cache(
+            work_dir=work,
+            filelist=filelist,
+            index_cwd=cfg.index_cwd,
+            on_log=on_log,
+        )
+    if hit is not None:
+        _flat, session = hit
+        if cfg.index_cwd:
+            on_log(f"index-cwd={cfg.index_cwd}")
+    elif filelist:
         from hierwalk.filelist import parse_filelist
 
         fl = parse_filelist(
@@ -75,14 +89,17 @@ def main(argv: list[str] | None = None) -> int:
         )
         sources = [str(p) for p in fl.source_files]
         _flat, session = load_or_build_flat_db(
-            sources, top=cfg.top, work_dir=work, on_log=on_log
+            sources,
+            top=cfg.top,
+            work_dir=work,
+            filelist=filelist,
+            index_cwd=cfg.index_cwd,
+            on_log=on_log,
         )
         if cfg.index_cwd:
             on_log(f"index-cwd={cfg.index_cwd}")
     else:
         from hierwalk.hierarchy_grep import HierarchyGrepSession, load_grep_hie
-
-        from hgpath.flat_db import resolve_flat_db_path
 
         flat_path = resolve_flat_db_path(work)
         cached = load_grep_hie(flat_path)

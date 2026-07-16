@@ -31,8 +31,7 @@ _STRESS_CASES = (
     ("u_sub", "Sub", "top.u_mid.u_sub.out", True),
     ("u_parm", "LeafA", "top.u_parm.out", True),
     ("u_ports", "LeafA", "top.u_ports.out", True),
-    ("u_dead", None, "top.u_dead.out", False),
-    ("u_fake", None, "top.u_fake.out", False),
+    ("u_missing", None, "top.u_totally_missing.out", False),
 )
 
 _MATRIX_HIER_CHECKS = (

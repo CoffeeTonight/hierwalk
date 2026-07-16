@@ -447,6 +447,10 @@ def prepare_hierarchy_grep_session(
     *,
     top: str,
     work_dir: Optional[Path] = None,
+    cache_path: Optional[str | Path] = None,
+    filelist: str | Path = "",
+    index_cwd: Optional[str | Path] = None,
+    paths_normalized: bool = False,
     refresh_cache: bool = False,
     on_emit: Optional[Any] = None,
 ) -> HierarchyGrepSession:
@@ -457,25 +461,29 @@ def prepare_hierarchy_grep_session(
     on later runs unless *refresh_cache* (JSON ``refresh-cache`` / CLI
     ``--refresh-cache``) deletes it first.
     """
-    paths = [abs_rtl_path(p) for p in sources if p]
-    from hierwalk.hierarchy_grep import emit_hgrep_milestone
+    from hierwalk.hierarchy_grep import emit_hgrep_milestone, normalize_rtl_paths
 
+    paths = normalize_rtl_paths(sources, already_normalized=paths_normalized)
     emit_hgrep_milestone(
         "filelist-ready",
         f"sources={len(paths)} top={top or '-'}",
         on_emit=on_emit,
     )
-    cache_path: Optional[Path] = None
-    if work_dir is not None:
-        cache_path = resolve_grep_hie_path(work_dir)
-        if refresh_cache and remove_grep_hie(cache_path):
-            line = f"hgrep-cache clean path={cache_path}"
+    resolved_cache: Optional[Path] = None
+    if cache_path is not None:
+        resolved_cache = Path(cache_path).expanduser().resolve()
+    elif work_dir is not None:
+        resolved_cache = resolve_grep_hie_path(work_dir)
+
+    if resolved_cache is not None:
+        if refresh_cache and remove_grep_hie(resolved_cache):
+            line = f"hgrep-cache clean path={resolved_cache}"
             _emit_hgrep_trace(line, on_emit=on_emit)
-        if cache_path.is_file() and not refresh_cache:
+        if resolved_cache.is_file() and not refresh_cache:
             try:
-                cached = load_grep_hie(cache_path)
+                cached = load_grep_hie(resolved_cache)
                 if grep_hie_sources_match(cached, paths):
-                    line = f"hgrep-cache hit path={cache_path}"
+                    line = f"hgrep-cache hit path={resolved_cache}"
                     _emit_hgrep_trace(line, on_emit=on_emit)
                     mod_index = cached.get("module_index") or {}
                     emit_hgrep_milestone(
@@ -483,42 +491,47 @@ def prepare_hierarchy_grep_session(
                         (
                             f"from=cache modules={len(mod_index)} "
                             f"rtl_files={len(cached.get('rtl_paths', ()))} "
-                            f"path={cache_path}"
+                            f"path={resolved_cache}"
                         ),
                         on_emit=on_emit,
                     )
                     return HierarchyGrepSession.from_grep_hie_cache(
                         cached,
-                        cache_path=cache_path,
+                        cache_path=resolved_cache,
                     )
             except (OSError, ValueError, json.JSONDecodeError):
                 pass
 
     session = HierarchyGrepSession.from_rtl_paths(
         paths,
-        build_file_index_background=True,
+        paths_normalized=True,
+        build_file_index_background=False,
         on_emit=on_emit,
     )
-    session.file_grep_index(wait=True)
-    file_index = session.file_grep_index(wait=False)
-    emit_hgrep_milestone(
-        "grep-hie-index-ready",
-        (
-            f"modules={len(session.module_index)} "
-            f"rtl_files={len(session.rtl_paths)} "
-            f"file_entries={len(file_index)}"
-        ),
-        on_emit=on_emit,
-    )
-    if cache_path is not None:
-        dump_grep_hie(session, cache_path, top=top)
-        session.file_grep_index_path = str(cache_path)
-        line = f"hgrep-cache write path={cache_path}"
+    if resolved_cache is not None:
+        dump_grep_hie(
+            session,
+            resolved_cache,
+            top=top,
+            filelist=filelist,
+            index_cwd=index_cwd,
+        )
+        file_index = session.file_grep_index(wait=False)
+        emit_hgrep_milestone(
+            "grep-hie-index-ready",
+            (
+                f"modules={len(session.module_index)} "
+                f"rtl_files={len(session.rtl_paths)} "
+                f"file_entries={len(file_index)}"
+            ),
+            on_emit=on_emit,
+        )
+        line = f"hgrep-cache write path={resolved_cache}"
         _emit_hgrep_trace(line, on_emit=on_emit)
         emit_hgrep_milestone(
             "grep-hie-saved",
             (
-                f"path={cache_path} modules={len(session.module_index)} "
+                f"path={resolved_cache} modules={len(session.module_index)} "
                 f"rtl_files={len(session.rtl_paths)}"
             ),
             on_emit=on_emit,

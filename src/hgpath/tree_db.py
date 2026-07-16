@@ -131,6 +131,7 @@ class TreeDb:
     work_dir: Path
     path: Path
     entries: Dict[str, TreeEntry] = field(default_factory=dict)
+    _dirty: bool = field(default=False, repr=False)
 
     @property
     def node_count(self) -> int:
@@ -179,6 +180,7 @@ class TreeDb:
             resolve_result=dict(result),
         )
         self.entries[key] = entry
+        self._dirty = True
         parts: List[str] = []
         for i, node in enumerate(nodes):
             parts.append(node.segment)
@@ -199,22 +201,30 @@ class TreeDb:
                 self.entries[prefix] = sub
         return entry
 
-    def save(self) -> None:
+    def _payload_text(self) -> str:
         payload = {
             "schema_version": TREE_SCHEMA_VERSION,
             "entries": {k: v.to_dict() for k, v in self.entries.items()},
         }
+        return json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+
+    def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(
-            json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
+        self.path.write_text(self._payload_text(), encoding="utf-8")
+        self._dirty = False
+
+    def save_if_changed(self) -> bool:
+        """Persist only when entries changed since load or last save."""
+        if not self._dirty:
+            return False
+        self.save()
+        return True
 
     @classmethod
     def load(cls, work_dir: str | Path) -> TreeDb:
         work = Path(work_dir).expanduser().resolve()
         path = resolve_tree_db_path(work)
-        db = cls(work_dir=work, path=path)
+        db = cls(work_dir=work, path=path, _dirty=False)
         if not path.is_file():
             return db
         raw = json.loads(path.read_text(encoding="utf-8"))

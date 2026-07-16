@@ -84,6 +84,115 @@ def test_last_segment_can_be_inst(tmp_path: Path):
     assert result["nodes"][-1]["child_module"] == "leaf"
 
 
+def test_intermediate_hop_db_first_infer_and_index(tmp_path: Path):
+    """``\\bu_a\\b`` in body + ``child`` in module_index → inst hop without cell parse."""
+    top_v = _write(
+        tmp_path,
+        "top.v",
+        """
+        module child (output logic out);
+          assign out = 1'b0;
+        endmodule
+        module top;
+          `ifdef CHIP_HAS_CHILD
+          child u_a ();
+          `endif
+        endmodule
+        """,
+    )
+    index = build_module_index([top_v])
+    result = resolve_hierarchy_grep(
+        "top.u_a.out", top="top", rtl_paths=[top_v], module_index=index
+    )
+    assert result["ok"] is True
+    assert result["nodes"][1]["child_module"] == "child"
+
+
+def test_intermediate_hop_db_first_fails_when_module_not_in_index(tmp_path: Path):
+    top_v = _write(
+        tmp_path,
+        "top.v",
+        """
+        module top;
+          ghost_module u_ghost ();
+        endmodule
+        """,
+    )
+    index = build_module_index([top_v])
+    result = resolve_hierarchy_grep(
+        "top.u_ghost.out", top="top", rtl_paths=[top_v], module_index=index
+    )
+    assert result["ok"] is False
+    assert "u_ghost" in result.get("error", "")
+
+
+def test_ifdef_multi_branch_prunes_by_downstream_leaf(tmp_path: Path):
+    """Same inst under ifdef/elsif/else → fan-out; leaf prunes dead branches."""
+    top_v = _write(
+        tmp_path,
+        "top.v",
+        """
+        module ModA (output logic o);
+          assign o = 1'b0;
+        endmodule
+        module ModB (output logic only_b);
+          assign only_b = 1'b1;
+        endmodule
+        module ModC (output logic o);
+          assign o = 1'b1;
+        endmodule
+        module top;
+          `ifdef FEAT_A
+          ModA
+          u_foo ();
+          `elsif FEAT_B
+          ModB
+          u_foo ();
+          `else
+          ModC
+          u_foo ();
+          `endif
+        endmodule
+        """,
+    )
+    index = build_module_index([top_v])
+    unique = resolve_hierarchy_grep(
+        "top.u_foo.only_b", top="top", rtl_paths=[top_v], module_index=index
+    )
+    assert unique["ok"] is True
+    assert unique["ambiguous"] is False
+    assert unique["nodes"][1]["child_module"] == "ModB"
+
+    shared = resolve_hierarchy_grep(
+        "top.u_foo.o", top="top", rtl_paths=[top_v], module_index=index
+    )
+    assert shared["ok"] is True
+    assert shared["ambiguous"] is True
+    assert len(shared.get("candidates", ())) >= 2
+    child_mods = {
+        c["nodes"][1]["child_module"] for c in shared["candidates"] if c.get("nodes")
+    }
+    assert child_mods >= {"ModA", "ModC"}
+
+
+def test_intermediate_hop_db_first_requires_word_boundary(tmp_path: Path):
+    top_v = _write(
+        tmp_path,
+        "top.v",
+        """
+        module child (); endmodule
+        module top;
+          child u_ab ();
+        endmodule
+        """,
+    )
+    index = build_module_index([top_v])
+    result = resolve_hierarchy_grep(
+        "top.u_a.out", top="top", rtl_paths=[top_v], module_index=index
+    )
+    assert result["ok"] is False
+
+
 def test_wire_inst_collision_prefers_inst_on_leaf(tmp_path: Path):
     top_v = _write(
         tmp_path,

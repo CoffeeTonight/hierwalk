@@ -42,8 +42,35 @@ def _user_top_body() -> str:
 def test_filtered_body_has_A_then_u_A():
     filt = _filtered(_user_top_body())
     assert "ifndef" not in filt
-    assert "A\n" in filt
+    assert "A\n" in filt or " A" in filt
     assert "u_A" in filt
+
+
+def test_ifdef_positive_wrapper_finds_u_A():
+    """Production `` `ifdef CHIP_HAS_A`` (not `` `ifndef not_A``) must resolve."""
+    body = """
+    module A (output logic out);
+      assign out = 1'b0;
+    endmodule
+    module top;
+    `ifdef CHIP_HAS_A
+    A
+    `ifndef B
+    #(.P(1))
+    `endif
+    u_A ();
+    `endif
+    endmodule
+    """
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "top.v"
+        path.write_text(body, encoding="utf-8")
+        session = HierarchyGrepSession.from_rtl_paths(
+            [str(path)],
+            build_file_index_background=False,
+        )
+        result = session.resolve("top.u_A.out", top="top")
+        assert result.get("ok") is True, result.get("error")
 
 
 def test_A_line_between_ifndefs_pairs_with_u_A():

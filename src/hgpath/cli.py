@@ -12,7 +12,7 @@ from hg_core.report import ReportBuilder, format_elapsed_sec
 from hg_core.summary import append_hgpath_summary
 from hg_core.run_config import load_hg_run_config, require_hg_run_config
 from hgpath.batch import run_batch
-from hgpath.flat_db import load_or_build_flat_db
+from hgpath.flat_db import load_or_build_flat_db, try_load_flat_db_cache
 from hgpath.tree_db import TreeDb, resolve_tree_db_path
 
 
@@ -29,6 +29,41 @@ def _parse_filelist(cfg, on_log):
     if cfg.defines and on_log:
         on_log(f"defines={len(cfg.defines)}")
     return fl
+
+
+def _load_flat_and_filelist(cfg, work, refresh, on_log):
+    from hierwalk.filelist import filelist_result_from_grep_hie
+
+    if not refresh:
+        hit = try_load_flat_db_cache(
+            work_dir=work,
+            filelist=cfg.filelist,
+            index_cwd=cfg.index_cwd,
+            on_log=on_log,
+        )
+        if hit is not None:
+            flat_db, session = hit
+            fl = filelist_result_from_grep_hie(
+                {"rtl_paths": session.rtl_paths, "top": cfg.top},
+                top=cfg.top,
+                defines=cfg.defines or None,
+            )
+            if cfg.index_cwd and on_log:
+                on_log(f"index-cwd={cfg.index_cwd}")
+            return flat_db, session, fl
+
+    fl = _parse_filelist(cfg, on_log)
+    sources = [str(p) for p in fl.source_files]
+    flat_db, session = load_or_build_flat_db(
+        sources,
+        top=cfg.top,
+        work_dir=work,
+        refresh=refresh,
+        filelist=cfg.filelist,
+        index_cwd=cfg.index_cwd,
+        on_log=on_log,
+    )
+    return flat_db, session, fl
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -85,20 +120,26 @@ def main(argv: list[str] | None = None) -> int:
 
     emit_hg_log(f"begin filelist={cfg.filelist} top={cfg.top}", tool="hgpath", log_file=log_fh)
 
-    fl = _parse_filelist(cfg, on_log)
-    sources = [str(p) for p in fl.source_files]
-    if not sources:
+    flat_db, session, fl = _load_flat_and_filelist(cfg, work, args.refresh, on_log)
+    if not fl.source_files:
         emit_hg_log("error: no sources", tool="hgpath", log_file=log_fh)
         return 2
 
-    flat_db, session = load_or_build_flat_db(
-        sources,
-        top=cfg.top,
-        work_dir=work,
-        refresh=args.refresh,
-        on_log=on_log,
-    )
+    if cfg.defines:
+        session.defines = dict(cfg.defines)
+        on_log(
+            f"instance-scan defines={len(cfg.defines)} "
+            f"(compile-accurate ifdef from JSON; default scans all conditional branches)"
+        )
+    elif fl.defines:
+        on_log(
+            f"filelist defines={len(fl.defines)} (not applied to instance scan; "
+            f"add JSON \"defines\" only for compile-accurate ifdef filtering)"
+        )
     on_log(f"flat-ready modules={flat_db.module_count} rtl_files={flat_db.rtl_file_count}")
+    if flat_db.rtl_file_count == 0:
+        emit_hg_log("error: filelist expanded to 0 RTL files", tool="hgpath", log_file=log_fh)
+        return 2
 
     tree = TreeDb.load(work)
     if args.refresh and tree.path.is_file():
@@ -109,8 +150,10 @@ def main(argv: list[str] | None = None) -> int:
     batch = None
     if checks:
         batch = run_batch(checks, top=cfg.top, session=session, tree=tree, on_log=on_log)
-        tree.save()
-        on_log(f"tree-saved path={tree.path} nodes={tree.node_count}")
+        if tree.save_if_changed():
+            on_log(f"tree-saved path={tree.path} nodes={tree.node_count}")
+        else:
+            on_log(f"tree-unchanged path={tree.path} nodes={tree.node_count}")
 
     report = ReportBuilder(title="hgpath report", tool="hgpath", started_at=t0)
     report.add(f"top: {cfg.top}")

@@ -32,11 +32,26 @@ _KEYWORDS = frozenset(
 )
 
 
-def _body_for_instance_lookup(body: str) -> str:
-    """Comment + `` `ifdef `` filter (inst_scan parity for hierarchy resolve)."""
-    from hierwalk.preprocess import apply_ifdef_filter, strip_comments_for_instance_scan
+def _body_for_instance_lookup(
+    body: str,
+    defines: Mapping[str, str] | None = None,
+) -> str:
+    """
+    Prepare parent RTL for instance lookup.
 
-    return apply_ifdef_filter(strip_comments_for_instance_scan(body), {})
+    Default (no *defines*): ``slim_body_for_instance_scan`` — keep RTL in every
+    conditional branch (tier-1 index / path_refine parity). Required for
+    production `` `ifdef FEATURE`` wrappers when compile macros are unknown.
+
+    With *defines*: ``apply_ifdef_filter`` for compile-accurate active-branch view.
+    """
+    from hierwalk.preprocess import apply_ifdef_filter, strip_comments_for_instance_scan
+    from hierwalk.inst_scan import slim_body_for_instance_scan
+
+    stripped = strip_comments_for_instance_scan(body)
+    if defines:
+        return apply_ifdef_filter(stripped, defines)
+    return slim_body_for_instance_scan(stripped)
 
 
 def _strip_line_comment(line: str) -> str:
@@ -54,6 +69,23 @@ def abs_rtl_path(path: str | Path) -> str:
     if not path:
         return ""
     return str(Path(path).resolve())
+
+
+def normalize_rtl_paths(
+    paths: Sequence[str | Path],
+    *,
+    already_normalized: bool = False,
+) -> List[str]:
+    """Resolve RTL paths once for DB build / cache match."""
+    if already_normalized:
+        return [str(p) for p in paths if p]
+    return [abs_rtl_path(p) for p in paths if p]
+
+
+def _rtl_path_key(path: str | Path, *, paths_normalized: bool) -> str:
+    if not path:
+        return ""
+    return str(path) if paths_normalized else abs_rtl_path(path)
 
 
 def _normalize_module_index(
@@ -243,12 +275,13 @@ def build_module_index(
     rtl_paths: Sequence[str | Path],
     *,
     progress: Optional[_HgrepBuildProgress] = None,
+    paths_normalized: bool = False,
 ) -> Dict[str, List[str]]:
     """Grep all RTL paths → ``{module_name: [abs_file_path, ...]}``."""
     index: Dict[str, List[str]] = {}
     total = len(rtl_paths)
     for i, raw in enumerate(rtl_paths, start=1):
-        key = abs_rtl_path(raw)
+        key = _rtl_path_key(raw, paths_normalized=paths_normalized)
         if progress is not None:
             progress.set_file(i, key)
         for name in grep_modules_in_file(key):
@@ -260,6 +293,8 @@ def build_module_index(
 
 def build_file_grep_index(
     module_index: Mapping[str, Sequence[str | Path]],
+    *,
+    paths_normalized: bool = False,
 ) -> Dict[str, Dict[str, Any]]:
     """
     Invert grep module index → ``{abs_file_path: {modules, ...}}``.
@@ -270,7 +305,7 @@ def build_file_grep_index(
     file_index: Dict[str, Dict[str, Any]] = {}
     for module, files in module_index.items():
         for raw in files:
-            path = abs_rtl_path(raw)
+            path = _rtl_path_key(raw, paths_normalized=paths_normalized)
             if not path:
                 continue
             entry = file_index.setdefault(
@@ -329,13 +364,51 @@ def resolve_grep_hie_path(work_dir: str | Path) -> Path:
     return Path(work_dir).expanduser().resolve() / GREP_HIE_JSON_NAME
 
 
+def grep_hie_filelist_fingerprint(
+    filelist: str | Path,
+    *,
+    index_cwd: Optional[str | Path] = None,
+) -> Dict[str, Any]:
+    """Stable metadata for skipping filelist expand on warm cache hits."""
+    fl = Path(filelist).expanduser().resolve()
+    meta: Dict[str, Any] = {"filelist": str(fl)}
+    if fl.is_file():
+        st = fl.stat()
+        meta["filelist_mtime_ns"] = st.st_mtime_ns
+        meta["filelist_size"] = st.st_size
+    if index_cwd:
+        meta["index_cwd"] = str(Path(index_cwd).expanduser().resolve())
+    return meta
+
+
+def grep_hie_filelist_match(
+    cached: Mapping[str, Any],
+    filelist: str | Path,
+    *,
+    index_cwd: Optional[str | Path] = None,
+) -> bool:
+    """True when cached filelist fingerprint matches the current top filelist."""
+    if not filelist or not cached.get("filelist"):
+        return False
+    current = grep_hie_filelist_fingerprint(filelist, index_cwd=index_cwd)
+    for key in ("filelist", "filelist_mtime_ns", "filelist_size", "index_cwd"):
+        if cached.get(key) != current.get(key):
+            return False
+    return True
+
+
 def grep_hie_sources_match(
     cached: Mapping[str, Any],
     sources: Sequence[str | Path],
 ) -> bool:
     """True when cached RTL path set matches *sources* exactly."""
-    cached_paths = {abs_rtl_path(p) for p in cached.get("rtl_paths", ()) if p}
-    current = {abs_rtl_path(p) for p in sources if p}
+    normalized = bool(cached.get("paths_normalized"))
+    if normalized:
+        cached_paths = {str(p) for p in cached.get("rtl_paths", ()) if p}
+        current = {str(p) for p in sources if p}
+    else:
+        cached_paths = {abs_rtl_path(p) for p in cached.get("rtl_paths", ()) if p}
+        current = {abs_rtl_path(p) for p in sources if p}
     return bool(cached_paths) and cached_paths == current
 
 
@@ -344,18 +417,28 @@ def _grep_hie_payload(
     *,
     top: str = "",
     file_index: Optional[Mapping[str, Mapping[str, Any]]] = None,
+    filelist: str | Path = "",
+    index_cwd: Optional[str | Path] = None,
 ) -> Dict[str, Any]:
     fi = file_index
     if fi is None:
-        fi = session._file_grep_index or build_file_grep_index(session.module_index)
-    return {
+        normalized = bool(session.rtl_paths and session._paths_normalized)
+        fi = session._file_grep_index or build_file_grep_index(
+            session.module_index,
+            paths_normalized=normalized,
+        )
+    payload: Dict[str, Any] = {
         "schema_version": GREP_HIE_SCHEMA_VERSION,
         "generated_at": _utc_now_iso(),
         "top": top,
+        "paths_normalized": True,
         "rtl_paths": list(session.rtl_paths),
         "module_index": session.module_index,
-        "files": {abs_rtl_path(key): dict(value) for key, value in fi.items()},
+        "files": {str(key): dict(value) for key, value in fi.items()},
     }
+    if filelist:
+        payload.update(grep_hie_filelist_fingerprint(filelist, index_cwd=index_cwd))
+    return payload
 
 
 def dump_grep_hie(
@@ -364,19 +447,29 @@ def dump_grep_hie(
     *,
     top: str = "",
     file_index: Optional[Mapping[str, Mapping[str, Any]]] = None,
+    filelist: str | Path = "",
+    index_cwd: Optional[str | Path] = None,
 ) -> str:
     """Persist hierarchy grep session data to ``grep_hie.json``."""
+    session._ensure_file_grep_index(file_index=file_index)
     out = Path(path).expanduser().resolve()
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(
         json.dumps(
-            _grep_hie_payload(session, top=top, file_index=file_index),
+            _grep_hie_payload(
+                session,
+                top=top,
+                file_index=session._file_grep_index,
+                filelist=filelist,
+                index_cwd=index_cwd,
+            ),
             indent=2,
             ensure_ascii=False,
         )
         + "\n",
         encoding="utf-8",
     )
+    session.file_grep_index_path = str(out)
     return str(out)
 
 
@@ -393,6 +486,14 @@ def load_grep_hie(path: str | Path) -> Dict[str, Any]:
     if not isinstance(files, dict):
         raise ValueError("grep_hie.json files must be an object")
     out = dict(raw)
+    if raw.get("paths_normalized"):
+        out["rtl_paths"] = [str(p) for p in raw.get("rtl_paths", ()) if p]
+        out["module_index"] = {
+            module: [str(path) for path in files_list]
+            for module, files_list in raw["module_index"].items()
+        }
+        out["files"] = {str(key): dict(value) for key, value in files.items()}
+        return out
     out["rtl_paths"] = [abs_rtl_path(p) for p in raw.get("rtl_paths", ()) if p]
     out["module_index"] = _normalize_module_index(raw["module_index"])
     out["files"] = {abs_rtl_path(key): dict(value) for key, value in files.items()}
@@ -448,6 +549,7 @@ class HierarchyGrepSession:
 
     rtl_paths: List[str]
     module_index: Dict[str, List[str]]
+    defines: Dict[str, str] = field(default_factory=dict)
     _file_grep_index: Optional[Dict[str, Dict[str, Any]]] = field(
         default=None,
         init=False,
@@ -475,6 +577,32 @@ class HierarchyGrepSession:
         init=False,
         repr=False,
     )
+    _paths_normalized: bool = field(default=False, init=False, repr=False)
+
+    def _ensure_file_grep_index(
+        self,
+        *,
+        file_index: Optional[Mapping[str, Mapping[str, Any]]] = None,
+    ) -> None:
+        """Build file-keyed grep JSON on demand (lazy unless already ready)."""
+        if self._file_grep_index_ready.is_set() and self._file_grep_index is not None:
+            return
+        if self._file_grep_index_thread is not None and self._file_grep_index_thread.is_alive():
+            self._file_grep_index_ready.wait()
+            if self._file_grep_index_error:
+                raise RuntimeError(self._file_grep_index_error)
+            return
+        if file_index is not None:
+            self._file_grep_index = {
+                str(key): dict(value) for key, value in file_index.items()
+            }
+        else:
+            self._file_grep_index = build_file_grep_index(
+                self.module_index,
+                paths_normalized=self._paths_normalized,
+            )
+        self._file_grep_index_error = None
+        self._file_grep_index_ready.set()
 
     @classmethod
     def from_grep_hie_cache(
@@ -484,16 +612,29 @@ class HierarchyGrepSession:
         cache_path: Optional[str | Path] = None,
     ) -> HierarchyGrepSession:
         """Rehydrate a session from ``grep_hie.json`` without re-grepping RTL."""
-        rtl_paths = [abs_rtl_path(p) for p in data.get("rtl_paths", ()) if p]
-        module_index = _normalize_module_index(data.get("module_index", {}))
+        if data.get("paths_normalized"):
+            rtl_paths = [str(p) for p in data.get("rtl_paths", ()) if p]
+            module_index = {
+                module: [str(path) for path in files_list]
+                for module, files_list in (data.get("module_index") or {}).items()
+            }
+            files = data.get("files") or {}
+            file_index = {str(key): dict(value) for key, value in files.items()}
+            cache_key = str(cache_path) if cache_path is not None else None
+        else:
+            rtl_paths = [abs_rtl_path(p) for p in data.get("rtl_paths", ()) if p]
+            module_index = _normalize_module_index(data.get("module_index", {}))
+            files = data.get("files") or {}
+            file_index = {
+                abs_rtl_path(key): dict(value) for key, value in files.items()
+            }
+            cache_key = abs_rtl_path(cache_path) if cache_path is not None else None
         session = cls(rtl_paths=rtl_paths, module_index=module_index)
-        files = data.get("files") or {}
-        session._file_grep_index = {
-            abs_rtl_path(key): dict(value) for key, value in files.items()
-        }
+        session._file_grep_index = file_index
+        session._paths_normalized = bool(data.get("paths_normalized"))
         session._file_grep_index_ready.set()
-        if cache_path is not None:
-            session.file_grep_index_path = abs_rtl_path(cache_path)
+        if cache_key is not None:
+            session.file_grep_index_path = cache_key
         return session
 
     @classmethod
@@ -502,11 +643,14 @@ class HierarchyGrepSession:
         rtl_paths: Sequence[str | Path],
         *,
         module_index: Optional[Mapping[str, Sequence[str | Path]]] = None,
-        build_file_index_background: bool = True,
+        paths_normalized: bool = False,
+        build_file_index_background: bool = False,
+        build_file_index_eager: bool = False,
         file_grep_index_path: Optional[str | Path] = None,
         on_emit: Optional[Callable[[str], None]] = None,
     ) -> HierarchyGrepSession:
-        abs_paths = [abs_rtl_path(p) for p in rtl_paths if p]
+        abs_paths = normalize_rtl_paths(rtl_paths, already_normalized=paths_normalized)
+        stored_normalized = paths_normalized or bool(abs_paths)
         if module_index is None:
             emit_hgrep_milestone(
                 "rtl-db-build-start",
@@ -516,7 +660,11 @@ class HierarchyGrepSession:
             t_build = time.perf_counter()
             progress = _HgrepBuildProgress(len(abs_paths))
             with _HgrepBuildHeartbeat(progress, on_emit=on_emit):
-                mod_index = build_module_index(abs_paths, progress=progress)
+                mod_index = build_module_index(
+                    abs_paths,
+                    progress=progress,
+                    paths_normalized=True,
+                )
             emit_hgrep_milestone(
                 "rtl-db-built",
                 (
@@ -526,26 +674,40 @@ class HierarchyGrepSession:
                 on_emit=on_emit,
             )
         else:
-            mod_index = _normalize_module_index(module_index)
+            mod_index = (
+                {
+                    module: [str(path) for path in files_list]
+                    for module, files_list in module_index.items()
+                }
+                if paths_normalized
+                else _normalize_module_index(module_index)
+            )
         session = cls(rtl_paths=abs_paths, module_index=mod_index)
+        session._paths_normalized = stored_normalized
         if file_grep_index_path:
-            session.file_grep_index_path = abs_rtl_path(file_grep_index_path)
+            session.file_grep_index_path = (
+                str(file_grep_index_path)
+                if paths_normalized
+                else abs_rtl_path(file_grep_index_path)
+            )
         if build_file_index_background:
             session._start_file_grep_index_background()
-        else:
-            session._file_grep_index = build_file_grep_index(session.module_index)
+        elif build_file_index_eager or file_grep_index_path:
+            session._ensure_file_grep_index()
             if session.file_grep_index_path:
                 dump_file_grep_index(
-                    session._file_grep_index,
+                    session._file_grep_index or {},
                     session.file_grep_index_path,
                 )
-            session._file_grep_index_ready.set()
         return session
 
     def _start_file_grep_index_background(self) -> None:
         def _run() -> None:
             try:
-                self._file_grep_index = build_file_grep_index(self.module_index)
+                self._file_grep_index = build_file_grep_index(
+                    self.module_index,
+                    paths_normalized=self._paths_normalized,
+                )
                 if self.file_grep_index_path:
                     dump_file_grep_index(
                         self._file_grep_index,
@@ -569,8 +731,16 @@ class HierarchyGrepSession:
         wait: bool = True,
         timeout: Optional[float] = None,
     ) -> Dict[str, Dict[str, Any]]:
-        """Return file-keyed grep JSON; optionally wait for background build."""
-        if wait:
+        """Return file-keyed grep JSON; build lazily on first wait."""
+        if wait and not self._file_grep_index_ready.is_set():
+            if (
+                self._file_grep_index_thread is not None
+                and self._file_grep_index_thread.is_alive()
+            ):
+                self._file_grep_index_ready.wait(timeout=timeout)
+            else:
+                self._ensure_file_grep_index()
+        elif wait:
             self._file_grep_index_ready.wait(timeout=timeout)
         if self._file_grep_index_error:
             raise RuntimeError(self._file_grep_index_error)
@@ -599,6 +769,7 @@ class HierarchyGrepSession:
             module_index=self.module_index,
             body_cache=self._module_body_cache,
             file_cache=self._rtl_text_cache,
+            defines=self.defines,
         )
 
     def clear_module_body_cache(self) -> None:
@@ -686,25 +857,247 @@ def _cell_before_inst(compact: str, inst_at: int) -> Optional[str]:
     return cell
 
 
-def _inst_child_module(body: str, inst_leaf: str) -> Optional[str]:
+_DEFINE_MACRO_RE = re.compile(
+    r"^\s*`define\s+([A-Za-z_]\w*)\s+([^\n//]+)",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _macro_expand_cell_from_body(body: str, macro_name: str) -> Optional[str]:
+    """Resolve `` `define CELL LEAF`` → ``LEAF`` for module_index lookup."""
+    from hierwalk.inst_scan import normalize_cell_module
+
+    name = str(macro_name or "").strip()
+    if not name or not body:
+        return None
+    for m in _DEFINE_MACRO_RE.finditer(body):
+        if m.group(1).lower() == name.lower():
+            expanded = normalize_cell_module(m.group(2).strip().split()[0])
+            return expanded or None
+    return None
+
+
+def _lookup_module_index(
+    index: Mapping[str, Sequence[str]],
+    module_name: str,
+) -> Optional[str]:
+    """Return canonical module key from flat index (case-insensitive fallback)."""
+    from hierwalk.inst_scan import normalize_cell_module
+
+    norm = normalize_cell_module(module_name)
+    if not norm:
+        return None
+    if norm in index:
+        return norm
+    lower = norm.lower()
+    for key in index:
+        if key.lower() == lower:
+            return key
+    return None
+
+
+def _inst_leaf_word_in_body(body: str, inst_leaf: str) -> bool:
+    """True when *inst_leaf* base name appears as ``\\bname\\b`` in parent RTL."""
+    from hierwalk.preprocess import strip_comments_for_instance_scan
+
+    if not body or not inst_leaf:
+        return False
+    work = strip_comments_for_instance_scan(body)
+    base = inst_base_name(inst_leaf)
+    if not base:
+        return False
+    return re.search(rf"\b{re.escape(base)}\b", work) is not None
+
+
+def _edge_matches_inst_lookup(edge: Any, inst_leaf: str) -> bool:
+    """Match *inst_leaf* to scan edge (incl. ``u_arr`` vs ``u_arr[0]``)."""
+    from hierwalk.inst_scan import (
+        InstanceEdge,
+        instance_edge_matches_leaf,
+        inst_base_name,
+    )
+
+    if not isinstance(edge, InstanceEdge):
+        return False
+    if instance_edge_matches_leaf(edge, inst_leaf):
+        return True
+    base = inst_base_name(inst_leaf)
+    edge_base = inst_base_name(edge.inst_name)
+    return bool(base and edge_base and edge_base.lower() == base.lower())
+
+
+def _inst_child_module(
+    body: str,
+    inst_leaf: str,
+    *,
+    defines: Mapping[str, str] | None = None,
+) -> Optional[str]:
     """Return cell type for ``inst_leaf`` instance, if declared in *body*."""
-    from hierwalk.inst_scan import find_hierarchy_instance, _infer_cell_from_inst_leaf
+    from hierwalk.inst_scan import (
+        find_hierarchy_instance,
+        scan_hierarchy_instances,
+        _infer_cell_from_inst_leaf,
+        normalize_cell_module,
+    )
 
     if not body or not inst_leaf:
         return None
-    filtered = _body_for_instance_lookup(body)
+    filtered = _body_for_instance_lookup(body, defines)
     base, _idx = _split_hier_segment(inst_leaf)
+
+    def _child_from_edge(edge: Any) -> Optional[str]:
+        if edge.child_module:
+            return normalize_cell_module(edge.child_module)
+        inferred = _infer_cell_from_inst_leaf(inst_leaf)
+        return normalize_cell_module(inferred) if inferred else None
+
     for name in (inst_leaf, base) if base != inst_leaf else (inst_leaf,):
         edge = find_hierarchy_instance(filtered, name)
         if edge is not None:
-            if edge.child_module:
-                from hierwalk.inst_scan import normalize_cell_module
+            return _child_from_edge(edge)
 
-                return normalize_cell_module(edge.child_module)
-            inferred = _infer_cell_from_inst_leaf(name)
-            if inferred:
-                return inferred
+    for edge in scan_hierarchy_instances(filtered):
+        if _edge_matches_inst_lookup(edge, inst_leaf):
+            hit = _child_from_edge(edge)
+            if hit:
+                return hit
     return None
+
+
+def _resolve_child_mod_in_index(
+    cand: str,
+    index: Mapping[str, Sequence[str]],
+    macro_src: str,
+) -> Optional[str]:
+    """Map scan/infer cell name → canonical module_index key (incl. macro expand)."""
+    hit = _lookup_module_index(index, cand)
+    if hit:
+        return hit
+    expanded = _macro_expand_cell_from_body(macro_src, cand)
+    if expanded:
+        return _lookup_module_index(index, expanded)
+    return None
+
+
+def _inst_hop_child_modules_db_first(
+    seg: str,
+    body: str,
+    index: Mapping[str, Sequence[str]],
+    *,
+    file_text: str | None = None,
+    defines: Mapping[str, str] | None = None,
+) -> List[str]:
+    """
+    All DB-valid child modules for one inst hop (ifdef multi-branch fan-out).
+
+    ``\\bseg\\b`` must appear in parent RTL. Every scan edge + infer candidate is
+    checked against *index*; survivors are returned in discovery order (deduped).
+    """
+    from hierwalk.inst_scan import (
+        _infer_cell_from_inst_leaf,
+        normalize_cell_module,
+        scan_hierarchy_instances,
+    )
+
+    base, _ = _split_hier_segment(seg)
+    if not base or not _inst_leaf_word_in_body(body, base):
+        return []
+
+    macro_src = file_text or body
+    found: List[str] = []
+    seen: set[str] = set()
+
+    def _add(hit: Optional[str]) -> None:
+        if hit and hit not in seen:
+            seen.add(hit)
+            found.append(hit)
+
+    from hierwalk.inst_scan import find_hierarchy_instance
+
+    filtered = _body_for_instance_lookup(body, defines)
+    scan_hit = False
+    for edge in scan_hierarchy_instances(filtered):
+        if not _edge_matches_inst_lookup(edge, seg):
+            continue
+        scan_hit = True
+        raw_names: List[str] = []
+        if edge.child_module:
+            raw_names.append(normalize_cell_module(edge.child_module))
+        precise = find_hierarchy_instance(filtered, inst_base_name(edge.inst_name))
+        if precise is not None and precise.child_module:
+            pc = normalize_cell_module(precise.child_module)
+            if pc and pc not in raw_names:
+                raw_names.append(pc)
+        if not raw_names:
+            inferred = normalize_cell_module(_infer_cell_from_inst_leaf(seg))
+            if inferred:
+                raw_names.append(inferred)
+        for raw in raw_names:
+            _add(_resolve_child_mod_in_index(raw, index, macro_src))
+
+    if not scan_hit:
+        inferred = normalize_cell_module(_infer_cell_from_inst_leaf(seg))
+        if inferred:
+            _add(_resolve_child_mod_in_index(inferred, index, macro_src))
+
+    return found
+
+
+def _inst_hop_child_module_db_first(
+    seg: str,
+    body: str,
+    index: Mapping[str, Sequence[str]],
+    *,
+    file_text: str | None = None,
+    defines: Mapping[str, str] | None = None,
+) -> Optional[str]:
+    """First DB-valid child module (compat); prefer :func:`_inst_hop_child_modules_db_first`."""
+    mods = _inst_hop_child_modules_db_first(
+        seg, body, index, file_text=file_text, defines=defines
+    )
+    return mods[0] if mods else None
+
+
+def _fanout_inst_hop_branches(
+    br: "_Branch",
+    seg: str,
+    child_mods: Sequence[str],
+    index: Mapping[str, Sequence[str]],
+    *,
+    role: str,
+    kind: Optional[str] = None,
+    detail: str = "",
+) -> List["_Branch"]:
+    """Expand one branch per (child_module, decl_file) for multi-ifdef inst hops."""
+    out: List[_Branch] = []
+    for child_mod in child_mods:
+        child_files = list(index.get(child_mod, ()))
+        if not child_files:
+            continue
+        for child_file in child_files:
+            node: Dict[str, Any] = {
+                "segment": seg,
+                "role": role,
+                "module": br.mod,
+                "file": br.parent_file,
+                "hit_file": br.parent_file,
+                "child_decl_file": child_file,
+                "child_module": child_mod,
+                "found": True,
+            }
+            if kind is not None:
+                node["kind"] = kind
+            if detail:
+                node["detail"] = detail
+            out.append(
+                _Branch(
+                    mod=child_mod,
+                    parent_file=child_file,
+                    gen_scope=[],
+                    nodes=[*br.nodes, node],
+                )
+            )
+    return out
 
 
 def _generate_block_body(
@@ -884,9 +1277,18 @@ def _leaf_kind_in_body(
     body: str,
     module_name: str,
     leaf: str,
+    *,
+    index: Mapping[str, Sequence[str]] | None = None,
+    file_text: str | None = None,
+    defines: Mapping[str, str] | None = None,
 ) -> Tuple[Optional[str], str]:
     """Classify last path segment inside one scoped body."""
-    if _inst_child_module(body, leaf):
+    if index is not None:
+        if _inst_hop_child_modules_db_first(
+            leaf, body, index, file_text=file_text, defines=defines
+        ):
+            return "inst", f"instance {inst_base_name(leaf)}"
+    elif _inst_child_module(body, leaf, defines=defines):
         return "inst", f"instance {inst_base_name(leaf)}"
     leaf_base = inst_base_name(leaf)
     header = _module_header(body, module_name)
@@ -988,6 +1390,7 @@ def resolve_hierarchy_grep(
     module_index: Optional[Mapping[str, Sequence[str]]] = None,
     body_cache: Optional[Dict[Tuple[str, str], str]] = None,
     file_cache: Optional[Dict[str, str]] = None,
+    defines: Mapping[str, str] | None = None,
 ) -> Dict[str, Any]:
     """
     Resolve *hierarchy* using grep-built module index and per-node file paths.
@@ -1037,6 +1440,8 @@ def resolve_hierarchy_grep(
     text = ".".join(parts)
 
     cache = body_cache if body_cache is not None else {}
+    if file_cache is None:
+        file_cache = {}
 
     if top_name not in index:
         return _normalize_resolve_result(
@@ -1094,27 +1499,20 @@ def resolve_hierarchy_grep(
                     br.gen_scope,
                     file_cache=file_cache,
                 )
-                child_mod = _inst_child_module(body, seg)
-                if child_mod:
-                    for child_file in index.get(child_mod, ()):
-                        node = {
-                            "segment": seg,
-                            "role": "inst",
-                            "module": br.mod,
-                            "file": br.parent_file,
-                            "hit_file": br.parent_file,
-                            "child_decl_file": child_file,
-                            "child_module": child_mod,
-                            "found": True,
-                        }
-                        next_branches.append(
-                            _Branch(
-                                mod=child_mod,
-                                parent_file=child_file,
-                                gen_scope=[],
-                                nodes=[*br.nodes, node],
-                            )
+                file_text = (file_cache or {}).get(br.parent_file, "")
+                child_mods = _inst_hop_child_modules_db_first(
+                    seg,
+                    body,
+                    index,
+                    file_text=file_text,
+                    defines=defines,
+                )
+                if child_mods:
+                    next_branches.extend(
+                        _fanout_inst_hop_branches(
+                            br, seg, child_mods, index, role="inst"
                         )
+                    )
                     continue
 
                 label, idx = _split_hier_segment(seg)
@@ -1187,39 +1585,33 @@ def resolve_hierarchy_grep(
                 br.gen_scope,
                 file_cache=file_cache,
             )
-            kind, detail = _leaf_kind_in_body(body, br.mod, seg)
+            file_text = (file_cache or {}).get(br.parent_file, "")
+            kind, detail = _leaf_kind_in_body(
+                body,
+                br.mod,
+                seg,
+                index=index,
+                file_text=file_text,
+                defines=defines,
+            )
             if kind == "inst":
-                child_mod = _inst_child_module(body, seg) or ""
-                child_files = _child_decl_candidates(
-                    child_mod,
+                child_mods = _inst_hop_child_modules_db_first(
+                    seg,
+                    body,
                     index,
-                    cache,
-                    prune_empty=True,
-                    file_cache=file_cache,
+                    file_text=file_text,
+                    defines=defines,
                 )
-                if not child_files:
-                    child_files = list(index.get(child_mod, ()))
-                if not child_files:
-                    child_files = [br.parent_file]
-                for child_file in child_files:
-                    node = {
-                        "segment": seg,
-                        "role": "leaf",
-                        "kind": "inst",
-                        "module": br.mod,
-                        "file": br.parent_file,
-                        "hit_file": br.parent_file,
-                        "child_decl_file": child_file,
-                        "child_module": child_mod,
-                        "found": True,
-                        "detail": detail,
-                    }
-                    next_branches.append(
-                        _Branch(
-                            mod=child_mod or br.mod,
-                            parent_file=child_file,
-                            gen_scope=[],
-                            nodes=[*br.nodes, node],
+                if child_mods:
+                    next_branches.extend(
+                        _fanout_inst_hop_branches(
+                            br,
+                            seg,
+                            child_mods,
+                            index,
+                            role="leaf",
+                            kind="inst",
+                            detail=detail,
                         )
                     )
             elif kind is not None:
