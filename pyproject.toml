@@ -10,6 +10,9 @@ readme = "README.md"
 requires-python = ">=3.9"
 dependencies = []
 
+[project.optional-dependencies]
+pyslangwalk = ["pyslang>=11"]
+
 [project.scripts]
 hier-walk = "hierwalk.cli:main"
 hgpath = "hgpath.cli:main"

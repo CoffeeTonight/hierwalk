@@ -1,0 +1,27 @@
+{
+  "filelist": "filelist.f",
+  "top": "stress_top",
+  "defines": {
+    "STRESS_USE_IN": "1",
+    "STRESS_ALT": "0"
+  },
+  "run_conn_check": {
+    "enable": 1,
+    "mode": "path-walk",
+    "connect_phase": "hgrep",
+    "include_ff": true,
+    "checks": [
+      {
+        "id": "port_port",
+        "a": "stress_top.probe_in",
+        "b": "stress_top.u_spine.u_spine.probe_out"
+      },
+      {
+        "id": "missing_hierarchy",
+        "a": "stress_top.u_missing.probe_in",
+        "b": "stress_top.u_spine.probe_out"
+      }
+    ],
+    "output": "hgrep_probe_conn.tsv"
+  }
+}

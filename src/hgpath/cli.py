@@ -7,6 +7,7 @@ import sys
 import time
 from pathlib import Path
 
+from hg_core.hierarchy_json import resolve_hierarchy_json_path, write_hgpath_hierarchy_json
 from hg_core.log import emit_hg_log, hg_log_path
 from hg_core.report import ReportBuilder, format_elapsed_sec
 from hg_core.summary import append_hgpath_summary
@@ -80,6 +81,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--index-cwd", default="", help="override JSON index-cwd")
     ap.add_argument("--work-dir", default=".db_hgpath", help="cache directory")
     ap.add_argument("--refresh", action="store_true", help="rebuild flat DB")
+    ap.add_argument(
+        "--simple-exist",
+        action="store_true",
+        help="slash paths: comment-strip only + \\bsegment\\b existence",
+    )
     args = ap.parse_args(argv)
 
     t0 = time.perf_counter()
@@ -99,6 +105,7 @@ def main(argv: list[str] | None = None) -> int:
             filelist_cli=args.filelist,
             top_cli=args.top,
             index_cwd_cli=args.index_cwd,
+            simple_exist_cli=args.simple_exist,
         )
     else:
         from hg_core.run_config import HgRunConfig
@@ -107,6 +114,7 @@ def main(argv: list[str] | None = None) -> int:
             filelist=str(args.filelist or "").strip(),
             top=str(args.top or "").strip(),
             index_cwd=str(args.index_cwd or "").strip() or None,
+            simple_exist=bool(args.simple_exist),
         )
 
     try:
@@ -118,7 +126,11 @@ def main(argv: list[str] | None = None) -> int:
     if cfg.env_applied:
         on_log(f"config-env applied keys={','.join(cfg.env_applied)}")
 
-    emit_hg_log(f"begin filelist={cfg.filelist} top={cfg.top}", tool="hgpath", log_file=log_fh)
+    emit_hg_log(
+        f"begin filelist={cfg.filelist} top={cfg.top} simple_exist={cfg.simple_exist}",
+        tool="hgpath",
+        log_file=log_fh,
+    )
 
     flat_db, session, fl = _load_flat_and_filelist(cfg, work, args.refresh, on_log)
     if not fl.source_files:
@@ -148,32 +160,51 @@ def main(argv: list[str] | None = None) -> int:
 
     checks = cfg.checks
     batch = None
+    hierarchy_json_path = None
     if checks:
-        batch = run_batch(checks, top=cfg.top, session=session, tree=tree, on_log=on_log)
+        batch = run_batch(
+            checks,
+            top=cfg.top,
+            session=session,
+            tree=tree,
+            on_log=on_log,
+            simple_exist=cfg.simple_exist,
+        )
         if tree.save_if_changed():
             on_log(f"tree-saved path={tree.path} nodes={tree.node_count}")
         else:
             on_log(f"tree-unchanged path={tree.path} nodes={tree.node_count}")
 
+        hierarchy_json_path = resolve_hierarchy_json_path(work)
+        write_hgpath_hierarchy_json(
+            hierarchy_json_path,
+            top=cfg.top,
+            check_results=batch.check_results,
+            simple_exist=cfg.simple_exist,
+        )
+        on_log(f"hierarchy-json path={hierarchy_json_path}")
+
     report = ReportBuilder(title="hgpath report", tool="hgpath", started_at=t0)
-    report.add(f"top: {cfg.top}")
-    report.add(f"checks: {len(checks)}")
     if batch is not None:
         append_hgpath_summary(
             report,
+            top=cfg.top,
             entries=batch.entries,
             check_results=batch.check_results,
+            db_info={
+                "flat_db": flat_db.path,
+                "tree_db": tree.path,
+                "hierarchy_json": hierarchy_json_path,
+                "modules": flat_db.module_count,
+                "rtl_files": flat_db.rtl_file_count,
+                "tree_nodes": tree.node_count,
+                "simple_exist": cfg.simple_exist,
+            },
         )
     else:
         report.add("(no checks in input JSON — hierarchy summary skipped)")
     report.add("")
-    report.add("--- db / cache ---")
-    report.add(f"flat_db: {flat_db.path}")
-    report.add(f"tree_db: {tree.path}")
-    report.add(f"modules: {flat_db.module_count}")
-    report.add(f"rtl_files: {flat_db.rtl_file_count}")
-    report.add(f"tree_nodes: {tree.node_count}")
-    report.add(f"total_elapsed: {format_elapsed_sec(t0)}")
+    report.add(f"  total_elapsed: {format_elapsed_sec(t0)}")
     report_path = work / "hgpath.report"
     report.finish(report_path)
 

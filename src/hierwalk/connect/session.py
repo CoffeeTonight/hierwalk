@@ -1052,17 +1052,26 @@ class ConnectivitySession:
                         hgrep_gate_rows=folded,
                         hgrep_scoped_sources=scoped,
                     )
-                    if record_timing:
-                        from hierwalk.verification_timing import record_connect_check
+                    fast_ok = (
+                        all(sr.connected for sr in result.sub_results)
+                        if result.sub_results
+                        else bool(result.connected)
+                    )
+                    if fast_ok:
+                        if record_timing:
+                            from hierwalk.verification_timing import (
+                                record_connect_check,
+                            )
 
-                        record_connect_check(
-                            check_id=chk.check_id,
-                            endpoint_a=str(chk.endpoint_a),
-                            endpoint_b=str(chk.endpoint_b),
-                            elapsed_sec=time.perf_counter() - t0,
-                        )
-                    _bump_checks_done()
-                    return result
+                            record_connect_check(
+                                check_id=chk.check_id,
+                                endpoint_a=str(chk.endpoint_a),
+                                endpoint_b=str(chk.endpoint_b),
+                                elapsed_sec=time.perf_counter() - t0,
+                            )
+                        _bump_checks_done()
+                        return result
+                    # Fast-path miss: retry without hgrep RTL scope clamp.
             result = self.text_check_entry(
                 chk,
                 trace=use_trace,

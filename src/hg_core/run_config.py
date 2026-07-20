@@ -25,6 +25,16 @@ class HgRunConfig:
     defines: Dict[str, str] = field(default_factory=dict)
     checks: List[ConnectivityCheck] = field(default_factory=list)
     env_applied: List[str] = field(default_factory=list)
+    simple_exist: bool = False
+
+
+def _parse_bool(val: Any) -> bool:
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, (int, float)):
+        return bool(val)
+    text = str(val or "").strip().lower()
+    return text in ("1", "true", "yes", "on")
 
 
 def load_json_document(path: Path) -> tuple[Any, Path]:
@@ -71,6 +81,7 @@ def parse_hg_run_config(
     filelist_cli: str = "",
     top_cli: str = "",
     index_cwd_cli: str = "",
+    simple_exist_cli: bool = False,
     apply_env: bool = True,
 ) -> HgRunConfig:
     env_applied: List[str] = []
@@ -81,6 +92,7 @@ def parse_hg_run_config(
     top = str(top_cli or "").strip()
     index_cwd: Optional[str] = str(index_cwd_cli or "").strip() or None
     defines: Dict[str, str] = {}
+    simple_exist = bool(simple_exist_cli)
 
     if isinstance(doc, Mapping):
         if not filelist:
@@ -95,6 +107,12 @@ def parse_hg_run_config(
                 index_cwd = _resolve_path(base_dir, str(cwd_raw).strip())
         if _mapping_get_ci(doc, "defines") is not None:
             defines = _parse_defines(_mapping_get_ci(doc, "defines"))
+        if not simple_exist_cli:
+            raw_se = _mapping_get_ci(doc, "simple_exist")
+            if raw_se is None:
+                raw_se = _mapping_get_ci(doc, "simple-exist")
+            if raw_se is not None:
+                simple_exist = _parse_bool(raw_se)
 
     checks = parse_checks(doc, top=top) if doc is not None else []
 
@@ -105,6 +123,7 @@ def parse_hg_run_config(
         defines=defines,
         checks=checks,
         env_applied=env_applied,
+        simple_exist=simple_exist,
     )
 
 
@@ -114,6 +133,7 @@ def load_hg_run_config(
     filelist_cli: str = "",
     top_cli: str = "",
     index_cwd_cli: str = "",
+    simple_exist_cli: bool = False,
 ) -> HgRunConfig:
     doc, base = load_json_document(checks_path)
     return parse_hg_run_config(
@@ -122,6 +142,7 @@ def load_hg_run_config(
         filelist_cli=filelist_cli,
         top_cli=top_cli,
         index_cwd_cli=index_cwd_cli,
+        simple_exist_cli=simple_exist_cli,
     )
 
 

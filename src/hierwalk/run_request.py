@@ -208,6 +208,7 @@ class RunConfig:
     check_connect: Optional[Tuple[str, str]] = None
     check_connect_batch: Optional[str] = None
     check_hgrep: Optional[str] = None
+    check_pyslangwalk: Optional[str] = None
     connect_inline: Optional[Any] = None
     connect_trace: bool = False
     connect_log: bool = False
@@ -253,12 +254,13 @@ class RunConfig:
 
 
 def parse_connect_phase_value(raw: Any) -> str:
-    """Parse connect/verification phase (text, logical, both, or hgrep-only gate)."""
-    phase = str(raw or "both").strip().lower()
-    if phase in ("text", "logical", "both", "hgrep"):
+    """Parse connect/verification phase (text, logical, both, hgrep, pyslangwalk)."""
+    phase = str(raw or "both").strip().lower().replace("_", "-")
+    if phase in ("text", "logical", "both", "hgrep", "pyslangwalk"):
         return phase
     raise ValueError(
-        f"connect_phase must be text, logical, both, or hgrep (got {raw!r})"
+        "connect_phase must be text, logical, both, hgrep, or pyslangwalk "
+        f"(got {raw!r})"
     )
 
 
@@ -517,6 +519,8 @@ def resolve_effective_index_strategy(
     phase = (cfg.verification_phase or "").strip().lower()
     if phase == "hgrep" or effective_mode == "check-hgrep":
         return "hgrep"
+    if phase == "pyslangwalk" or effective_mode == "check-pyslangwalk":
+        return "pyslangwalk"
     explicit = normalize_index_strategy(cfg.index_strategy)
     if explicit:
         return explicit
@@ -553,6 +557,8 @@ def resolve_effective_run_mode(
         return "check-connect"
     if cfg.check_hgrep:
         return "check-hgrep"
+    if cfg.check_pyslangwalk:
+        return "check-pyslangwalk"
     if connect_request is not None:
         return "check-connect-batch"
     return "hierarchy"
@@ -1411,7 +1417,9 @@ def resolve_connectivity_request(cfg: RunConfig) -> Optional[ConnectivityRequest
             req = parse_connect_request_json(inline)
             req = _merge_connect_run_options(req, cfg)
         return req
-    batch_path = cfg.check_hgrep or cfg.check_connect_batch
+    batch_path = (
+        cfg.check_hgrep or cfg.check_pyslangwalk or cfg.check_connect_batch
+    )
     if batch_path:
         p = Path(batch_path)
         text = p.read_text(encoding="utf-8-sig").lstrip()
@@ -1488,6 +1496,7 @@ def run_config_from_args(args: Any) -> RunConfig:
         check_connect=check_connect,
         check_connect_batch=args.check_connect_batch,
         check_hgrep=getattr(args, "check_hgrep", None),
+        check_pyslangwalk=getattr(args, "check_pyslangwalk", None),
         connect_trace=bool(args.connect_trace),
         connect_log=bool(getattr(args, "connect_log", False)),
         include_ff=bool(args.include_ff),
@@ -1568,10 +1577,23 @@ def merge_run_config(base: RunConfig, cli: RunConfig, args: Any) -> RunConfig:
         out = replace(
             out,
             check_hgrep=cli.check_hgrep,
+            check_pyslangwalk=None,
             check_connect_batch=None,
             connect_inline=None,
             check_connect=None,
             verification_phase="hgrep",
+            mode="path-walk",
+            index_strategy="path-walk",
+        )
+    if getattr(args, "check_pyslangwalk", None):
+        out = replace(
+            out,
+            check_pyslangwalk=cli.check_pyslangwalk,
+            check_hgrep=None,
+            check_connect_batch=None,
+            connect_inline=None,
+            check_connect=None,
+            verification_phase="pyslangwalk",
             mode="path-walk",
             index_strategy="path-walk",
         )

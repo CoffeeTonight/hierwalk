@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-07-16T13:47:53.833+00:00",
+  "top": "top",
+  "paths_normalized": true,
+  "rtl_paths": [
+    "/home/user/Desktop/hgrep_demo/top_ifndef_stress.v"
+  ],
+  "module_index": {
+    "Sub": [
+      "/home/user/Desktop/hgrep_demo/top_ifndef_stress.v"
+    ],
+    "LeafA": [
+      "/home/user/Desktop/hgrep_demo/top_ifndef_stress.v"
+    ],
+    "LeafB": [
+      "/home/user/Desktop/hgrep_demo/top_ifndef_stress.v"
+    ],
+    "BUF_ESC": [
+      "/home/user/Desktop/hgrep_demo/top_ifndef_stress.v"
+    ],
+    "MidA": [
+      "/home/user/Desktop/hgrep_demo/top_ifndef_stress.v"
+    ],
+    "top": [
+      "/home/user/Desktop/hgrep_demo/top_ifndef_stress.v"
+    ]
+  },
+  "files": {
+    "/home/user/Desktop/hgrep_demo/top_ifndef_stress.v": {
+      "file": "/home/user/Desktop/hgrep_demo/top_ifndef_stress.v",
+      "modules": [
+        "Sub",
+        "LeafA",
+        "LeafB",
+        "BUF_ESC",
+        "MidA",
+        "top"
+      ],
+      "module_count": 6
+    }
+  }
+}

@@ -24,6 +24,43 @@ _KEYWORDS = frozenset(
     }
 )
 
+# Net/var keywords: skip the whole declaration to ``;`` so ``wire u_b;`` is not
+# mistaken for an instance (common wire/inst name collision torture).
+_NET_VAR_DECL_KW = frozenset(
+    {
+        "wire",
+        "wand",
+        "wor",
+        "reg",
+        "logic",
+        "bit",
+        "byte",
+        "int",
+        "integer",
+        "shortint",
+        "longint",
+        "time",
+        "realtime",
+        "real",
+        "shortreal",
+        "string",
+        "event",
+        "trireg",
+        "tri",
+        "tri0",
+        "tri1",
+        "supply0",
+        "supply1",
+        "input",
+        "output",
+        "inout",
+        "const",
+        "var",
+        "signed",
+        "unsigned",
+    }
+)
+
 _ATTR_RE = re.compile(r"\(\*.*?\*\)", re.DOTALL)
 _PARAM_RE = re.compile(
     r"(?:parameter|localparam)\s+(?:\w+\s+)?([A-Za-z_]\w*)\s*=\s*([^;,\n]+)",
@@ -458,10 +495,13 @@ def probe_inst_leaf_regex_fast(body: str, inst_leaf: str) -> bool:
     return inst_only is not None and inst_only.search(body) is not None
 
 
-def _clean_body_for_instance_scan(body: str) -> str:
+def _clean_body_for_instance_scan(body: str, *, comment_only: bool = False) -> str:
     from hierwalk.preprocess import strip_comments_for_instance_scan
 
-    work = slim_body_for_instance_scan(strip_comments_for_instance_scan(body))
+    work = strip_comments_for_instance_scan(body)
+    if comment_only:
+        return work
+    work = slim_body_for_instance_scan(work)
     if len(work) <= _LARGE_BODY_ATTR_SKIP:
         clean = _ATTR_RE.sub(" ", work)
         clean = _BIND_LINE_RE.sub("", clean)
@@ -504,6 +544,7 @@ def find_hierarchy_instance(
     *,
     param_map: Optional[Mapping[str, str]] = None,
     reverse_anchor: bool = True,
+    comment_only: bool = False,
 ) -> Optional[InstanceEdge]:
     """
     Selective instance lookup: scan until *inst_leaf* matches, then stop.
@@ -512,7 +553,7 @@ def find_hierarchy_instance(
     """
     if not body or not inst_leaf:
         return None
-    clean = _clean_body_for_instance_scan(body)
+    clean = _clean_body_for_instance_scan(body, comment_only=comment_only)
     if not probe_inst_leaf_regex_fast(clean, inst_leaf):
         return None
     start = _inst_leaf_scan_start(clean, inst_leaf)
@@ -523,6 +564,7 @@ def find_hierarchy_instance(
                 body,
                 param_map=param_map,
                 start=tail_start,
+                comment_only=comment_only,
             ):
                 if _instance_edge_matches_lookup(
                     edge, inst_leaf, param_map=param_map
@@ -532,6 +574,7 @@ def find_hierarchy_instance(
         body,
         param_map=param_map,
         start=start,
+        comment_only=comment_only,
     ):
         if _instance_edge_matches_lookup(edge, inst_leaf, param_map=param_map):
             return edge
@@ -564,6 +607,7 @@ def scan_hierarchy_instances(
     body: str,
     *,
     param_map: Optional[Mapping[str, str]] = None,
+    comment_only: bool = False,
 ) -> List[InstanceEdge]:
     """
     Find synthesizable ``cell_type inst_name`` pairs in a module body.
@@ -578,7 +622,13 @@ def scan_hierarchy_instances(
       generate / if / for bodies;
       comma-separated: cell u1 (...), u2 (...);
     """
-    return list(_iter_hierarchy_instance_edges(body, param_map=param_map))
+    return list(
+        _iter_hierarchy_instance_edges(
+            body,
+            param_map=param_map,
+            comment_only=comment_only,
+        )
+    )
 
 
 def _iter_hierarchy_instance_edges(
@@ -586,16 +636,21 @@ def _iter_hierarchy_instance_edges(
     *,
     param_map: Optional[Mapping[str, str]] = None,
     start: int = 0,
+    comment_only: bool = False,
 ) -> Iterator[InstanceEdge]:
     from hierwalk.preprocess import strip_comments_for_instance_scan
 
     pmap = dict(param_map or {})
-    work = slim_body_for_instance_scan(strip_comments_for_instance_scan(body))
-    if len(work) <= _LARGE_BODY_ATTR_SKIP:
-        clean = _ATTR_RE.sub(" ", work)
-        clean = _BIND_LINE_RE.sub("", clean)
-    else:
+    work = strip_comments_for_instance_scan(body)
+    if comment_only:
         clean = work
+    else:
+        work = slim_body_for_instance_scan(work)
+        if len(work) <= _LARGE_BODY_ATTR_SKIP:
+            clean = _ATTR_RE.sub(" ", work)
+            clean = _BIND_LINE_RE.sub("", clean)
+        else:
+            clean = work
     seen: Set[Tuple[str, str]] = set()
     n = len(clean)
     i = max(0, min(start, n))
@@ -696,6 +751,19 @@ def _iter_hierarchy_instance_edges(
             i += 1
             continue
         if cell.lower() in _KEYWORDS or cell.lower() in _PP_DIRECTIVE_KW:
+            # Skip net/var declarations entirely (``wire u_b;`` must not become inst).
+            if cell.lower() in _NET_VAR_DECL_KW:
+                pos = j
+                while pos < n and clean[pos] != ";":
+                    if clean[pos] == "(":
+                        pos = _skip_balanced(clean, pos, "(", ")")
+                    elif clean[pos] == "[":
+                        pos = _skip_balanced(clean, pos, "[", "]")
+                    else:
+                        pos += 1
+                i = pos + 1 if pos < n else n
+                pending_cell = None
+                continue
             i = j
             continue
         k = j
@@ -734,6 +802,11 @@ def _iter_hierarchy_instance_edges(
         pending_cell = None
         if not cell:
             cell = _infer_cell_from_inst_leaf(inst) or ""
+            # Bare ``name;`` with only inferred cell type is a residual net decl
+            # (after keyword skip), not ``cell inst;``.
+            if cell and k < n and clean[k] == ";" and not overrides:
+                i = k + 1
+                continue
         while k < n and clean[k].isspace():
             k += 1
         dims = ""

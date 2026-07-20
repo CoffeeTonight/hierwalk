@@ -523,6 +523,10 @@ Text-conn vs logical-conn (path-walk / suite)
   reuse it. ``refresh-cache`` (JSON/CLI) deletes ``grep_hie.json`` and rebuilds.
   Standalone: ``--check-hgrep BATCH.json`` or ``scripts/run_hierarchy_grep.py``.
 
+  ``connect_phase: pyslangwalk`` walks hierarchy with pyslang, opening only
+  module-index files on the path (same ``grep_hie.json`` module→file map).
+  Standalone: ``--check-pyslangwalk BATCH.json``.
+
 Path evidence kinds (hops / connect-log)
 ----------------------------------------
   intra-module    assign/alias/ff within one module

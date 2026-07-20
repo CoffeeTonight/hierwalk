@@ -191,32 +191,36 @@ def summarize_connectivity(
 def append_hgpath_summary(
     report,
     *,
+    top: str = "",
     entries: Dict[str, TreeEntry],
     check_results: Sequence[Tuple[ConnectivityCheck, TreeEntry, TreeEntry]],
+    db_info: Optional[Dict[str, object]] = None,
 ) -> None:
-    for block in (
-        summarize_hierarchy_endpoints(entries),
-        summarize_hierarchy_checks(check_results),
+    from hg_core.human_report import build_hgpath_human_report
+
+    for line in build_hgpath_human_report(
+        top=top,
+        entries=entries,
+        check_results=check_results,
+        db_info=db_info,
     ):
-        if block:
-            report.add("")
-            for line in block:
-                report.add(line)
+        report.add(line)
 
 
 def append_hgconn_summary(
     report,
     *,
+    top: str = "",
     entries: Dict[str, TreeEntry],
     check_results: Sequence[Tuple[ConnectivityCheck, TreeEntry, TreeEntry]],
     conn_results: Sequence["ConnResult"],
 ) -> None:
-    for block in (
-        summarize_hierarchy_endpoints(entries),
-        summarize_hierarchy_checks(check_results),
-        summarize_connectivity(conn_results),
+    from hg_core.human_report import build_hgconn_human_report
+
+    for line in build_hgconn_human_report(
+        top=top,
+        entries=entries,
+        check_results=check_results,
+        conn_results=conn_results,
     ):
-        if block:
-            report.add("")
-            for line in block:
-                report.add(line)
+        report.add(line)

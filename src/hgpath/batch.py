@@ -37,6 +37,7 @@ def run_batch(
     session: HierarchyGrepSession,
     tree: TreeDb,
     on_log: LogFn = None,
+    simple_exist: bool = False,
 ) -> BatchResult:
     specs = _collect_specs(checks)
     norm_keys = [normalize_spec(s, top=top).coarse for s in specs]
@@ -45,7 +46,8 @@ def run_batch(
     if on_log:
         on_log(
             f"cluster checks={len(checks)} specs={len(specs)} "
-            f"unique_paths={len(unique)} common_prefix={'.'.join(prefix) or '-'}"
+            f"unique_paths={len(unique)} common_prefix={'.'.join(prefix) or '-'} "
+            f"simple_exist={simple_exist}"
         )
 
     spec_entries: Dict[str, TreeEntry] = {}
@@ -58,6 +60,7 @@ def run_batch(
             session=session,
             tree=tree,
             on_log=on_log,
+            simple_exist=simple_exist,
         )
 
     check_results: List[Tuple[ConnectivityCheck, TreeEntry, TreeEntry]] = []
@@ -66,10 +69,20 @@ def run_batch(
         ka = normalize_spec(str(chk.endpoint_a), top=top).coarse
         kb = normalize_spec(str(chk.endpoint_b), top=top).coarse
         ea = spec_entries.get(ka) or resolve_with_tree(
-            str(chk.endpoint_a), top=top, session=session, tree=tree, on_log=on_log
+            str(chk.endpoint_a),
+            top=top,
+            session=session,
+            tree=tree,
+            on_log=on_log,
+            simple_exist=simple_exist,
         )
         eb = spec_entries.get(kb) or resolve_with_tree(
-            str(chk.endpoint_b), top=top, session=session, tree=tree, on_log=on_log
+            str(chk.endpoint_b),
+            top=top,
+            session=session,
+            tree=tree,
+            on_log=on_log,
+            simple_exist=simple_exist,
         )
         spec_entries[ka] = ea
         spec_entries[kb] = eb

@@ -931,6 +931,7 @@ def _inst_child_module(
     inst_leaf: str,
     *,
     defines: Mapping[str, str] | None = None,
+    comment_only: bool = False,
 ) -> Optional[str]:
     """Return cell type for ``inst_leaf`` instance, if declared in *body*."""
     from hierwalk.inst_scan import (
@@ -939,10 +940,14 @@ def _inst_child_module(
         _infer_cell_from_inst_leaf,
         normalize_cell_module,
     )
+    from hierwalk.preprocess import strip_comments_for_instance_scan
 
     if not body or not inst_leaf:
         return None
-    filtered = _body_for_instance_lookup(body, defines)
+    if comment_only:
+        filtered = strip_comments_for_instance_scan(body)
+    else:
+        filtered = _body_for_instance_lookup(body, defines)
     base, _idx = _split_hier_segment(inst_leaf)
 
     def _child_from_edge(edge: Any) -> Optional[str]:
@@ -952,11 +957,11 @@ def _inst_child_module(
         return normalize_cell_module(inferred) if inferred else None
 
     for name in (inst_leaf, base) if base != inst_leaf else (inst_leaf,):
-        edge = find_hierarchy_instance(filtered, name)
+        edge = find_hierarchy_instance(filtered, name, comment_only=comment_only)
         if edge is not None:
             return _child_from_edge(edge)
 
-    for edge in scan_hierarchy_instances(filtered):
+    for edge in scan_hierarchy_instances(filtered, comment_only=comment_only):
         if _edge_matches_inst_lookup(edge, inst_leaf):
             hit = _child_from_edge(edge)
             if hit:

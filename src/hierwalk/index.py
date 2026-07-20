@@ -1148,6 +1148,35 @@ class DesignIndex:
             return "ignorePath"
         return ""
 
+    def _prefer_instance_edge(
+        self,
+        a: "InstanceEdge",
+        b: "InstanceEdge",
+    ) -> "InstanceEdge":
+        """Prefer edge whose child module is indexed (drop phantom wire→inst)."""
+        a_ok = self.get_module(a.child_module) is not None
+        b_ok = self.get_module(b.child_module) is not None
+        if a_ok and not b_ok:
+            return a
+        if b_ok and not a_ok:
+            return b
+        if len(str(b.child_module or "")) > len(str(a.child_module or "")):
+            return b
+        return a
+
+    def _dedupe_instance_edges(
+        self,
+        edges: Sequence["InstanceEdge"],
+    ) -> List["InstanceEdge"]:
+        by_name: Dict[str, InstanceEdge] = {}
+        for edge in edges:
+            prev = by_name.get(edge.inst_name)
+            if prev is None:
+                by_name[edge.inst_name] = edge
+            else:
+                by_name[edge.inst_name] = self._prefer_instance_edge(prev, edge)
+        return list(by_name.values())
+
     def instances_for_walk(
         self,
         mod_name: str,
@@ -1159,23 +1188,27 @@ class DesignIndex:
         Tier-1 already records instances declared outside ``generate`` even when
         ``needs_generate_fold`` is set; do not drop them in favour of a full
         ``instances_for`` rescan (slow preprocess + possible ifdef divergence).
+
+        Same-name edges are collapsed preferring child modules that exist in the
+        index (``wire u_b`` must not hide ``zz_scope_B u_b``).
         """
         rec = self.modules.get(mod_name)
         if not rec or rec.stop_reason or rec.is_blackbox:
-            return list(rec.instances) if rec else []
+            return self._dedupe_instance_edges(list(rec.instances) if rec else [])
         if not rec.needs_generate_fold:
-            return list(rec.instances)
+            return self._dedupe_instance_edges(list(rec.instances))
         base = list(rec.instances)
         folded = self.instances_for(mod_name, parent_ctx, {})
         if not folded:
-            return base
-        seen = {edge.inst_name for edge in base}
-        out = list(base)
-        for edge in folded:
-            if edge.inst_name not in seen:
-                out.append(edge)
-                seen.add(edge.inst_name)
-        return out
+            return self._dedupe_instance_edges(base)
+        by_name: Dict[str, InstanceEdge] = {}
+        for edge in (*base, *folded):
+            prev = by_name.get(edge.inst_name)
+            if prev is None:
+                by_name[edge.inst_name] = edge
+            else:
+                by_name[edge.inst_name] = self._prefer_instance_edge(prev, edge)
+        return list(by_name.values())
 
     def instances_for(
         self,

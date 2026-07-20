@@ -584,7 +584,7 @@ def test_run_hgrep_connect_batch_reuses_session_body_cache(tmp_path: Path, monke
         ),
         top="top",
     )
-    batch, _index = run_hgrep_connect_batch(
+    batch, _index, _rows = run_hgrep_connect_batch(
         request,
         [top_v],
         top="top",
@@ -611,7 +611,7 @@ def test_run_hgrep_connect_batch_skips_full_design_index(tmp_path: Path, monkeyp
 
     monkeypatch.setattr(DesignIndex, "build", staticmethod(_boom))
     logs: list[str] = []
-    batch, _index = run_hgrep_connect_batch(
+    batch, _index, _rows = run_hgrep_connect_batch(
         request,
         [top_v, other_v],
         top="top",

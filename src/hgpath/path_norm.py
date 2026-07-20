@@ -7,6 +7,8 @@ from typing import List, Optional, Tuple
 
 from hierwalk.inst_scan import coarse_hierarchy_path, inst_base_name
 
+from hgpath.simple_exist import is_simple_exist_spec, slash_spec_to_dots
+
 
 @dataclass(frozen=True)
 class NormSpec:
@@ -40,7 +42,10 @@ def _segments_after_top(coarse: str, top: str) -> List[str]:
 def normalize_spec(spec: str, *, top: str) -> NormSpec:
     """Split *spec* into top + inst segments; last segment may be leaf tail."""
     raw = str(spec or "").strip()
-    coarse = coarse_hierarchy_path(raw)
+    if is_simple_exist_spec(raw):
+        coarse = slash_spec_to_dots(raw)
+    else:
+        coarse = coarse_hierarchy_path(raw)
     top_name = inst_base_name(top.strip())
     segs = _segments_after_top(coarse, top_name)
     inst_key = ".".join(segs)

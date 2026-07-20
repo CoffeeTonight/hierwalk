@@ -401,6 +401,14 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     conn.add_argument(
+        "--check-pyslangwalk",
+        metavar="FILE",
+        help=(
+            "pyslang hierarchy walk (module-index scoped file open); "
+            "JSON or text pairs; reuses grep_hie.json unless --refresh-cache"
+        ),
+    )
+    conn.add_argument(
         "--connect-trace",
         action="store_true",
         help=(
@@ -544,17 +552,31 @@ def main(argv=None) -> int:
         )
         return 0
     run_json_arg = args.filelist or os.environ.get("HIERWALK_CONFIG")
-    if not run_json_arg and not args.check_connect_batch and not args.check_hgrep:
+    if (
+        not run_json_arg
+        and not args.check_connect_batch
+        and not args.check_hgrep
+        and not getattr(args, "check_pyslangwalk", None)
+    ):
         ap.error(
             "pass RUN.json or FILELIST.f (or set HIERWALK_CONFIG), "
-            "or --check-connect-batch / --check-hgrep BATCH.json"
+            "or --check-connect-batch / --check-hgrep / --check-pyslangwalk BATCH.json"
         )
-    if args.check_connect and (args.check_connect_batch or args.check_hgrep):
+    if args.check_connect and (
+        args.check_connect_batch
+        or args.check_hgrep
+        or getattr(args, "check_pyslangwalk", None)
+    ):
         ap.error(
-            "use either --check-connect or --check-connect-batch/--check-hgrep, not both"
+            "use either --check-connect or "
+            "--check-connect-batch/--check-hgrep/--check-pyslangwalk, not both"
         )
     if args.check_connect_batch and args.check_hgrep:
         ap.error("use either --check-connect-batch or --check-hgrep, not both")
+    if args.check_connect_batch and getattr(args, "check_pyslangwalk", None):
+        ap.error("use either --check-connect-batch or --check-pyslangwalk, not both")
+    if args.check_hgrep and getattr(args, "check_pyslangwalk", None):
+        ap.error("use either --check-hgrep or --check-pyslangwalk, not both")
     if args.fanin_cone and args.fanout_cone:
         ap.error("use either --fanin-cone or --fanout-cone, not both")
 
@@ -605,7 +627,11 @@ def main(argv=None) -> int:
 
     connect_batch_jobs_source: Optional[str] = None
     connect_batch_path: Optional[Path] = None
-    hgrep_batch_path = cfg.check_hgrep or cfg.check_connect_batch
+    hgrep_batch_path = (
+        cfg.check_hgrep
+        or cfg.check_pyslangwalk
+        or cfg.check_connect_batch
+    )
     if hgrep_batch_path:
         connect_batch_path = Path(hgrep_batch_path)
         (
@@ -664,7 +690,12 @@ def main(argv=None) -> int:
                 file=sys.stderr,
             )
         elif connect_batch_path is not None:
-            batch_label = "hgrep-batch" if cfg.check_hgrep else "connect-batch"
+            if cfg.check_hgrep:
+                batch_label = "hgrep-batch"
+            elif cfg.check_pyslangwalk:
+                batch_label = "pyslangwalk-batch"
+            else:
+                batch_label = "connect-batch"
             print(
                 f"run: {batch_label}={connect_batch_path.resolve()} jobs={jobs_res.note} "
                 f"(source={jobs_res.source})",

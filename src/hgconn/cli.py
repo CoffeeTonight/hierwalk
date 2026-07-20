@@ -25,6 +25,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--top", default="", help="top module (or JSON top)")
     ap.add_argument("--filelist", default="", help="optional filelist if flat DB missing")
     ap.add_argument("--index-cwd", default="", help="override JSON index-cwd")
+    ap.add_argument(
+        "--simple-exist",
+        action="store_true",
+        help="slash paths: comment-strip only + \\bsegment\\b existence",
+    )
     args = ap.parse_args(argv)
 
     t0 = time.perf_counter()
@@ -40,6 +45,7 @@ def main(argv: list[str] | None = None) -> int:
         filelist_cli=args.filelist,
         top_cli=args.top,
         index_cwd_cli=args.index_cwd,
+        simple_exist_cli=args.simple_exist,
     )
     tree = TreeDb.load(work)
     need_filelist = not tree.entries
@@ -105,22 +111,27 @@ def main(argv: list[str] | None = None) -> int:
         cached = load_grep_hie(flat_path)
         session = HierarchyGrepSession.from_grep_hie_cache(cached, cache_path=flat_path)
 
-    batch = run_batch(checks, top=cfg.top, session=session, tree=tree, on_log=on_log)
+    batch = run_batch(
+        checks,
+        top=cfg.top,
+        session=session,
+        tree=tree,
+        on_log=on_log,
+        simple_exist=cfg.simple_exist,
+    )
     results = run_bloom_batch(batch.check_results, on_log=on_log)
 
     connected = sum(1 for r in results if r.connected)
     report = ReportBuilder(title="hgconn report", tool="hgconn", started_at=t0)
-    report.add(f"top: {cfg.top}")
-    report.add(f"checks: {len(checks)}")
     append_hgconn_summary(
         report,
+        top=cfg.top,
         entries=batch.entries,
         check_results=batch.check_results,
         conn_results=results,
     )
     report.add("")
-    report.add("--- timing ---")
-    report.add(f"total_elapsed: {format_elapsed_sec(t0)}")
+    report.add(f"  total_elapsed: {format_elapsed_sec(t0)}")
     report_path = work / "hgconn.report"
     report.finish(report_path)
 

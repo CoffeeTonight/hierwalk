@@ -1239,11 +1239,20 @@ class PathWalkState:
             return out
         best_name = ""
         best_edge = None
+        best_rank = -1
         for name, edge in self._expanded_inst_pairs(row):
             if self._remainder_matches_inst(remainder, name):
-                if len(name) > len(best_name):
+                rank = (
+                    2
+                    if self.index.get_module(edge.child_module) is not None
+                    else 0
+                )
+                if len(name) > len(best_name) or (
+                    len(name) == len(best_name) and rank > best_rank
+                ):
                     best_name = name
                     best_edge = edge
+                    best_rank = rank
         if best_edge is not None:
             out = (best_name, best_edge)
             if ubpat_relevant(
@@ -2904,7 +2913,6 @@ def _pipeline_path_walk_text_conn(
         announce_hgrep_gate_report_path,
         gate_connect_check,
         prepare_hierarchy_grep_session,
-        scoped_sources_for_gate,
         text_check_from_gate,
     )
     from hierwalk.connect.pipeline.artifacts import prepare_text_connect_request
@@ -2952,6 +2960,25 @@ def _pipeline_path_walk_text_conn(
             )
             pre_gates[idx] = gate
             state._emit_walk(gate.log_line)
+        try:
+            from hierwalk.connect.hgrep_pathwalk_handoff import (
+                resolve_pathwalk_handoff_path,
+                write_handoff_from_gates,
+            )
+
+            handoff_path = resolve_pathwalk_handoff_path(
+                conn_session.hgrep_gate_report_path
+            )
+            if handoff_path is not None:
+                write_handoff_from_gates(
+                    pre_gates,
+                    request.checks,
+                    top=conn_session.top,
+                    path=handoff_path,
+                )
+                state._emit_walk(f"hgrep-pathwalk-handoff path={handoff_path}")
+        except Exception as exc:
+            state._emit_walk(f"hgrep-pathwalk-handoff write-skip err={exc!r}")
 
     state._emit_walk(
         f"connect-coi begin checks={total} "
@@ -2981,32 +3008,48 @@ def _pipeline_path_walk_text_conn(
                     state=state,
                 )
                 if gate_result is not None:
-                    results[idx] = gate_result
-                    coi_done += 1
-                    hierarchy_ready += 1
-                    walk_ms = (time.perf_counter() - t_walk) * 1000.0
-                    fast = gate.use_grep_fast_path
-                    fast_line = (
-                        f"connect-pipeline hgrep-{'fast' if fast else 'reject'} "
-                        f"check={chk.check_id or idx} ms={walk_ms:.1f} "
+                    # reject / fast-fail always final. pass+connected keeps fast path.
+                    # pass+text-miss falls through to full path-walk (hgrep seed ok,
+                    # but COI/scope recovery must not be blocked by partial RTL).
+                    keep_gate = gate.fast_fail_result is not None
+                    if not keep_gate:
+                        if gate_result.sub_results:
+                            keep_gate = all(
+                                sr.connected for sr in gate_result.sub_results
+                            )
+                        else:
+                            keep_gate = bool(gate_result.connected)
+                    if keep_gate:
+                        results[idx] = gate_result
+                        coi_done += 1
+                        hierarchy_ready += 1
+                        walk_ms = (time.perf_counter() - t_walk) * 1000.0
+                        fast = gate.use_grep_fast_path
+                        fast_line = (
+                            f"connect-pipeline hgrep-"
+                            f"{'fast' if fast else 'reject'} "
+                            f"check={chk.check_id or idx} ms={walk_ms:.1f} "
+                            f"scoped_files={len(gate.scoped_files or ())}"
+                        )
+                        state._emit_walk(fast_line)
+                        record_connect_check(
+                            check_id=chk.check_id,
+                            endpoint_a=str(chk.endpoint_a),
+                            endpoint_b=str(chk.endpoint_b),
+                            elapsed_sec=walk_ms / 1000.0,
+                        )
+                        continue
+                    state._emit_walk(
+                        f"connect-pipeline hgrep-fast-miss "
+                        f"check={chk.check_id or idx} "
+                        f"→ full path-walk "
                         f"scoped_files={len(gate.scoped_files or ())}"
                     )
-                    state._emit_walk(fast_line)
-                    record_connect_check(
-                        check_id=chk.check_id,
-                        endpoint_a=str(chk.endpoint_a),
-                        endpoint_b=str(chk.endpoint_b),
-                        elapsed_sec=walk_ms / 1000.0,
-                    )
-                    continue
 
-            scoped_sources = conn_session.sources
-            if gate is not None and gate.scoped_files:
-                scoped_sources = scoped_sources_for_gate(
-                    gate,
-                    conn_session.sources or (),
-                    index=conn_session.index,
-                )
+            # Full hierarchy walk: never shrink the RTL pool to partial hgrep
+            # scoped_files (fallback / fast-miss). Incomplete gate scopes were
+            # trapping walks at intermediate hops (e.g. scope u_a without u_b).
+            scoped_sources = list(conn_session.sources or ())
 
             prev_pool = getattr(state.mod_db, "_override_queue_pool", None)
             if scoped_sources:
@@ -3767,10 +3810,12 @@ def run_path_walk_connect(
     defines.update(request.defines)
     phase = (
         connect_phase
-        if connect_phase in ("text", "logical", "both", "hgrep")
+        if connect_phase
+        in ("text", "logical", "both", "hgrep", "pyslangwalk")
         else "both"
     )
     do_hgrep = phase == "hgrep"
+    do_pyslangwalk = phase == "pyslangwalk"
     do_text = phase in ("text", "both")
     do_logical = phase in ("logical", "both")
     effective_connect_jobs = connect_jobs if connect_jobs != 0 else connect_jobs_from_env()
@@ -3786,7 +3831,7 @@ def run_path_walk_connect(
             reuse_suite_session=reuse_suite_session,
         )
     try:
-        if do_hgrep:
+        if do_hgrep or do_pyslangwalk:
             from hierwalk.connect.hierarchy_grep_gate import run_hgrep_connect_batch
             from hierwalk.connect.pipeline.artifacts import resolve_connect_output_dir
             from hierwalk.index import DesignIndex
@@ -3810,7 +3855,120 @@ def run_path_walk_connect(
 
                     emit_path_walk_log(msg, stream=trace_log_fh)
 
-            batch, index = run_hgrep_connect_batch(
+            if do_pyslangwalk:
+                from hierwalk.connect.pyslang_walk_gate import (
+                    run_pyslangwalk_connect_batch,
+                )
+                from hierwalk.connect.shared.request import ConnectivityRequest
+                from hierwalk.models import ConnectResult as CR
+
+                # Stage 1: pyslang hierarchy gate (fast, module-index scoped open)
+                hier_batch, _hier_index = run_pyslangwalk_connect_batch(
+                    request,
+                    sources,
+                    top=top_name,
+                    connect_output_dir=resolved_output_dir,
+                    connect_output_name=connect_output_name,
+                    refresh_cache=refresh_cache,
+                    on_emit=_emit_hgrep,
+                    text_coi=False,
+                )
+                hier_results = list(hier_batch.results)
+                survivors = [
+                    chk
+                    for chk, hr in zip(request.checks, hier_results)
+                    if hr.connected
+                ]
+                _emit_hgrep(
+                    f"pyslangwalk hierarchy-gate pass="
+                    f"{len(survivors)}/{len(request.checks)} → text-COI"
+                )
+
+                # Stage 2: full path-walk text-COI on hierarchy survivors
+                text_by_id: Dict[str, Any] = {}
+                if survivors:
+                    sub_req = ConnectivityRequest(
+                        checks=tuple(survivors),
+                        top=request.top or top_name,
+                        defines=dict(request.defines or {}),
+                        include_ff=request.include_ff,
+                        trace=request.trace,
+                        connect_log=request.connect_log,
+                        strict_generate=request.strict_generate,
+                        over_approximate_if=request.over_approximate_if,
+                    )
+                    text_batch, index, state = run_path_walk_connect(
+                        sub_req,
+                        fl,
+                        top=top_name,
+                        extra_defines=defines,
+                        ignore_paths=ignore_paths,
+                        ignore_path_files=ignore_path_files,
+                        ignore_modules=ignore_modules,
+                        ignore_filelists=ignore_filelists,
+                        cache_dir=cache_dir,
+                        no_cache=no_cache,
+                        on_progress=on_progress,
+                        trace_stream=trace_stream,
+                        trace_log_path=None,
+                        reuse_suite_session=reuse_suite_session,
+                        jobs=jobs,
+                        connect_jobs=connect_jobs,
+                        connect_output_dir=resolved_output_dir,
+                        connect_output_name=connect_output_name,
+                        connect_phase="text",
+                        refresh_cache=False,
+                    )
+                    for r in text_batch.results:
+                        text_by_id[r.check_id or ""] = CR(
+                            r.endpoint_a,
+                            r.endpoint_b,
+                            r.connected,
+                            "pyslangwalk+text",
+                            hops=list(r.hops or []),
+                            errors=list(r.errors or []),
+                            note=f"pyslangwalk→text {r.note or r.mode}",
+                            check_id=r.check_id,
+                            sub_results=r.sub_results,
+                            connected_text=(
+                                r.connected_text
+                                if r.connected_text is not None
+                                else r.connected
+                            ),
+                            walk_notes=list(r.walk_notes or []),
+                        )
+                else:
+                    index = DesignIndex({})
+                    mod_db = PathWalkModuleDb(
+                        sources,
+                        index,
+                        defines=defines,
+                        cache_dir=cache_dir,
+                        no_cache=no_cache,
+                    )
+                    state = PathWalkState(
+                        index=index,
+                        top=top_name,
+                        mod_db=mod_db,
+                        trace_stream=trace_stream,
+                        _trace_log=trace_log_fh,
+                    )
+
+                merged: List[Any] = []
+                for chk, hr in zip(request.checks, hier_results):
+                    if not hr.connected:
+                        merged.append(hr)
+                    elif chk.check_id in text_by_id:
+                        merged.append(text_by_id[chk.check_id])
+                    else:
+                        merged.append(hr)
+                batch = ConnectivityBatchResult(
+                    results=tuple(merged),
+                    modules_cached=0,
+                )
+                return batch, index, state
+
+            batch, index, hgrep_rows = run_hgrep_connect_batch(
                 request,
                 sources,
                 top=top_name,
@@ -3833,6 +3991,48 @@ def run_path_walk_connect(
                 trace_stream=trace_stream,
                 _trace_log=trace_log_fh,
             )
+            # Gate FlatRows → instance-row map for human report / TSV provenance.
+            for path, row in (hgrep_rows or {}).items():
+                if path and path not in state.rows_by_path:
+                    state.rows_by_path[path] = row
+            state.stats.checks_run = len(batch.results)
+            state.stats.modules_loaded = len(
+                {r.module for r in state.rows_by_path.values() if r.module}
+            )
+            # Persist connect TSV (hgrep-only phase has no text/logical writer).
+            if resolved_output_dir is not None:
+                from hierwalk.connect.pipeline.artifacts import (
+                    connect_output_paths,
+                    require_connect_phase_tsv,
+                    format_connect_hierarchy_tsv,
+                )
+
+                out_paths = connect_output_paths(
+                    resolved_output_dir,
+                    connect_output_name or "conn.tsv",
+                )
+                written = require_connect_phase_tsv(
+                    out_paths.logical_tsv,
+                    list(batch.results),
+                    phase="hgrep",
+                    modules_cached=batch.modules_cached,
+                    rows_by_path=state.rows_by_path,
+                )
+                out_paths.hierarchy_logical_tsv.write_text(
+                    format_connect_hierarchy_tsv(
+                        list(batch.results),
+                        state.rows_by_path,
+                        phase="hgrep",
+                        signal_tails=state._signal_tail_records,
+                        index=index,
+                        top=top_name,
+                    ),
+                    encoding="utf-8",
+                )
+                _emit_hgrep(
+                    f"connect-hgrep written {written.resolve()} "
+                    f"hierarchy={out_paths.hierarchy_logical_tsv.resolve()}"
+                )
             return batch, index, state
 
         if reuse_suite_session:

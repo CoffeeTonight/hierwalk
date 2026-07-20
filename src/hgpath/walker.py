@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, Mapping, Optional
 from hierwalk.hierarchy_grep import HierarchyGrepSession
 
 from hgpath.path_norm import NormSpec, normalize_spec
+from hgpath.simple_exist import is_simple_exist_spec, resolve_simple_exist
 from hgpath.tree_db import TreeDb, TreeEntry
 
 LogFn = Optional[Callable[[str], None]]
@@ -20,6 +21,7 @@ def resolve_with_tree(
     session: HierarchyGrepSession,
     tree: TreeDb,
     on_log: LogFn = None,
+    simple_exist: bool = False,
 ) -> TreeEntry:
     norm = normalize_spec(spec, top=top)
     key = norm.coarse
@@ -42,7 +44,12 @@ def resolve_with_tree(
         )
 
     t0 = time.perf_counter()
-    result = session.resolve(key, top=top)
+    if simple_exist and is_simple_exist_spec(spec):
+        result = resolve_simple_exist(session, spec, top=top)
+        mode = "simple"
+    else:
+        result = session.resolve(key, top=top)
+        mode = "full"
     port_tail = ""
     nodes = list(result.get("nodes") or [])
     if nodes and nodes[-1].get("kind") in ("port", "signal") and norm.leaf_tail:
@@ -58,8 +65,10 @@ def resolve_with_tree(
                 leaf = f"leaf={last.kind}:{last.segment}"
             elif last.role == "inst":
                 leaf = "leaf=inst"
+        preprocess = "comments-only" if mode == "simple" else "full"
         on_log(
-            f"resolve spec={key!r} ok={entry.ok} inst_hops={norm.inst_hop_count} "
-            f"{leaf} files={len(entry.scoped_files)} elapsed_ms={ms:.1f}"
+            f"resolve spec={key!r} ok={entry.ok} mode={mode} preprocess={preprocess} "
+            f"inst_hops={norm.inst_hop_count} {leaf} "
+            f"files={len(entry.scoped_files)} elapsed_ms={ms:.1f}"
         )
     return entry

@@ -158,9 +158,12 @@ def _gate_report_payload(
         "rows": [
             {
                 "full_path": r.full_path,
+                "inst_leaf": r.inst_leaf,
                 "module": r.module,
+                "depth": r.depth,
                 "file": r.file,
                 "parent_path": r.parent_path,
+                "refine_status": r.refine_status or "grep",
             }
             for r in gate.rows
         ],
@@ -257,6 +260,29 @@ def write_hierarchy_grep_gate_report(
             fh.write(text)
             fh.write("\n\n")
     emit_hgrep_gate_log(f"hgrep-gate-report check={check_id or '-'} path={path}")
+    # Stream path-walk handoff JSON beside the human gate report.
+    try:
+        from hierwalk.connect.hgrep_pathwalk_handoff import (
+            check_gate_to_handoff,
+            resolve_pathwalk_handoff_path,
+            upsert_pathwalk_handoff_check,
+        )
+        from hierwalk.connect.shared.request import ConnectivityCheck
+
+        handoff_path = resolve_pathwalk_handoff_path(path)
+        if handoff_path is not None:
+            chk = ConnectivityCheck(
+                str(endpoint_a),
+                str(endpoint_b),
+                check_id=str(check_id or ""),
+            )
+            upsert_pathwalk_handoff_check(
+                handoff_path,
+                check_gate_to_handoff(gate, chk, top=str(top or "")),
+                top=str(top or ""),
+            )
+    except Exception:
+        pass
     return path
 
 
@@ -1041,14 +1067,21 @@ def scoped_sources_for_gate(
     all_sources: Sequence[str],
     *,
     index: Optional[DesignIndex] = None,
+    for_fast_path_only: bool = True,
 ) -> Sequence[str]:
     """
     Return grep-implicated RTL paths for text COI (tier0 gate survivor files).
 
     Only absolute paths recorded by hierarchy_grep resolve are opened — not the
     whole design or an entire filelist subtree.
+
+    When *for_fast_path_only* is True (default) and the gate is not on the hgrep
+    fast path (``fallback`` / incomplete resolve), return *all_sources* so full
+    path-walk is not trapped on a partial hop scope.
     """
     del index  # kept for call-site compatibility
+    if for_fast_path_only and not gate.use_grep_fast_path:
+        return tuple(str(s) for s in all_sources if s)
     if not gate.scoped_files:
         return all_sources
     allowed = {abs_rtl_path(s) for s in all_sources if s}
@@ -1109,25 +1142,81 @@ def text_check_from_gate(
     return result
 
 
+def _endpoint_from_hgrep_gate(
+    spec: str,
+    eg: Optional[HierarchyGrepEndpointGate],
+) -> ConnectEndpoint:
+    """Build a ConnectEndpoint so hierarchy reports can show inst/port hit/miss."""
+    raw = str(spec or "").strip()
+    if eg is None:
+        return ConnectEndpoint(
+            spec=raw,
+            inst_path="",
+            port_name="",
+            module="",
+            port_found=False,
+        )
+    hier = (eg.hierarchy or eg.hierarchy_input or "").strip()
+    port = (eg.port_tail or "").strip()
+    module = ""
+    if eg.rows:
+        # Prefer the deepest inst row (leaf of hierarchy chain).
+        module = str(eg.rows[-1].module or "").strip()
+    return ConnectEndpoint(
+        spec=raw,
+        inst_path=hier,
+        port_name=port,
+        module=module,
+        port_found=bool(eg.ok and port),
+    )
+
+
 def connect_result_from_hgrep_gate(
     chk: ConnectivityCheck,
     gate: HierarchyGrepCheckGate,
 ) -> ConnectResult:
     """Map a tier0 gate outcome to a connect TSV row (hgrep-only phase)."""
     if gate.fast_fail_result is not None:
-        return gate.fast_fail_result
-    ep_a = ConnectEndpoint(
-        spec=str(chk.endpoint_a),
-        inst_path="",
-        port_name="",
-        module="",
-    )
-    ep_b = ConnectEndpoint(
-        spec=str(chk.endpoint_b),
-        inst_path="",
-        port_name="",
-        module="",
-    )
+        # Enrich endpoints when fast-fail only filled one side.
+        ff = gate.fast_fail_result
+        eg_by_spec = {
+            str(eg.spec).strip(): eg for eg in (gate.endpoint_gates or ())
+        }
+        ep_a = ff.endpoint_a
+        ep_b = ff.endpoint_b
+        if not (ep_a.inst_path or ep_a.port_name):
+            ep_a = _endpoint_from_hgrep_gate(
+                ep_a.spec or str(chk.endpoint_a),
+                eg_by_spec.get(str(chk.endpoint_a).strip())
+                or (gate.endpoint_gates[0] if gate.endpoint_gates else None),
+            )
+        if not (ep_b.inst_path or ep_b.port_name):
+            ep_b = _endpoint_from_hgrep_gate(
+                ep_b.spec or str(chk.endpoint_b),
+                eg_by_spec.get(str(chk.endpoint_b).strip())
+                or (
+                    gate.endpoint_gates[1]
+                    if len(gate.endpoint_gates) > 1
+                    else None
+                ),
+            )
+        return ConnectResult(
+            ep_a,
+            ep_b,
+            ff.connected,
+            ff.mode or "hgrep",
+            hops=list(ff.hops or []),
+            errors=list(ff.errors or []),
+            note=ff.note or "",
+            check_id=ff.check_id or chk.check_id,
+            sub_results=ff.sub_results,
+            connected_text=ff.connected_text,
+            walk_notes=list(ff.walk_notes or []),
+        )
+    eg_a = gate.endpoint_gates[0] if len(gate.endpoint_gates) > 0 else None
+    eg_b = gate.endpoint_gates[1] if len(gate.endpoint_gates) > 1 else None
+    ep_a = _endpoint_from_hgrep_gate(str(chk.endpoint_a), eg_a)
+    ep_b = _endpoint_from_hgrep_gate(str(chk.endpoint_b), eg_b)
     ok = gate.status == "pass"
     return ConnectResult(
         ep_a,
@@ -1192,12 +1281,14 @@ def run_hgrep_connect_batch(
     results: List[ConnectResult] = []
     total_checks = len(request.checks)
     milestone_state: Dict[str, int] = {}
+    rows_by_path: Dict[str, FlatRow] = {}
     _emit_hgrep_check_milestones(
         0,
         total_checks,
         on_emit=on_emit,
         state=milestone_state,
     )
+    gates: List[HierarchyGrepCheckGate] = []
     for idx, chk in enumerate(request.checks, start=1):
         gate = gate_connect_check(
             chk,
@@ -1207,6 +1298,14 @@ def run_hgrep_connect_batch(
             report_path=report_path,
             module_body_cache=module_body_cache,
         )
+        gates.append(gate)
+        for row in gate.rows or ():
+            if row.full_path and row.full_path not in rows_by_path:
+                rows_by_path[row.full_path] = row
+        for eg in gate.endpoint_gates or ():
+            for row in eg.rows or ():
+                if row.full_path and row.full_path not in rows_by_path:
+                    rows_by_path[row.full_path] = row
         _emit_hgrep_trace(gate.log_line, on_emit=on_emit)
         results.append(connect_result_from_hgrep_gate(chk, gate))
         _emit_hgrep_check_milestones(
@@ -1216,13 +1315,46 @@ def run_hgrep_connect_batch(
             state=milestone_state,
         )
 
+    try:
+        from hierwalk.connect.hgrep_pathwalk_handoff import (
+            resolve_pathwalk_handoff_path,
+            write_handoff_from_gates,
+        )
+
+        handoff_path = resolve_pathwalk_handoff_path(
+            report_path or connect_output_dir
+        )
+        if handoff_path is not None:
+            write_handoff_from_gates(
+                gates,
+                request.checks,
+                top=top_name,
+                path=handoff_path,
+                extra={
+                    "grep_hie": str(
+                        getattr(session, "cache_key", None)
+                        or (connect_output_dir / "grep_hie.json" if connect_output_dir else "")
+                    )
+                },
+            )
+            _emit_hgrep_trace(
+                f"hgrep-pathwalk-handoff path={handoff_path}",
+                on_emit=on_emit,
+            )
+    except Exception as exc:
+        _emit_hgrep_trace(
+            f"hgrep-pathwalk-handoff write-skip err={exc!r}",
+            on_emit=on_emit,
+        )
+
     _emit_hgrep_trace(
         f"connect-hgrep done checks={len(results)} "
         f"pass={sum(1 for r in results if r.connected)} "
-        f"report={report_path}",
+        f"report={report_path} hierarchy_rows={len(rows_by_path)}",
         on_emit=on_emit,
     )
     return (
         ConnectivityBatchResult(results=tuple(results), modules_cached=0),
         index,
+        rows_by_path,
     )

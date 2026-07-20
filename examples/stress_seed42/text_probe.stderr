@@ -1,0 +1,226 @@
+run: hier-walk 0.3.28 (/home/user/Desktop/hierwalk/src/hierwalk)
+run: flat suite JSON — run_on_full_index | run_conn_check | run_io_trace | run_cone_trace; block mode full-index|path-walk; JSONC // ok; --help-config
+run: enable-audit: run_on_full_index block not found in parsed JSON (check key spelling: run_on_full_index or run_on_full_db)
+run: config-env: === run environment (after JSON env, before filelist parse) ===
+run: config-env: JSON env block: (none)
+run: config-env: verilog-defines from JSON top-level: STRESS_ALT=0; STRESS_USE_IN=1
+run: config-env: index-ifdef-policy: active-at-index (inactive ifndef/ifdef branches removed at index; HIERWALK_LAZY_IFDEF=0 to defer)
+run: config-env: derived: lazy_processing=1 lazy_index_ifdef=1 include_warm=0 low_memory_auto_threshold=1500 body_param_scan_max=524288 log_large_modules=0 slow_file_log_sec=off pp_log_level=1 pp_log_slow_ms=1000 pw_trace_verbose=0 pw_heartbeat_sec=off hgrep_heartbeat_sec=30.0 connect_jobs_env=0
+run: config-env: behavioral HIERWALK_* / HCH_INDEX_CWD (effective):
+run: config-env:   HIERWALK_LAZY=1 source=default — master lazy switch (1=defer ifdef/macro at index; 0=eager full index+ifdef)
+run: config-env:   HIERWALK_LAZY_IFDEF=0 source=default — when lazy=1: apply Verilog ifdef at index (1=strip inactive ifndef branches)
+run: config-env:   HIERWALK_JOBS=(unset) source=default — worker count override (unset=auto); also settable via JSON jobs
+run: config-env:   HIERWALK_CACHE_DIR=(unset) source=default — override work/cache root (unset=.db_{TOP} under index-cwd or cwd)
+run: config-env:   HIERWALK_IGNORE_PATH=(unset) source=default — default --ignore-path globs (comma-separated)
+run: config-env:   HIERWALK_IGNORE_MODULE=(unset) source=default — default --ignore-module names (comma-separated)
+run: config-env:   HIERWALK_IGNORE_FILELIST=(unset) source=default — default --ignore-filelist patterns (comma-separated)
+run: config-env:   HIERWALK_INCLUDE_WARM=0 source=default — opt-in shared-include warm before parallel index (1=enable)
+run: config-env:   HIERWALK_NO_INCLUDE_WARM=0 source=default — skip include discovery/warm entirely (1=skip)
+run: config-env:   HIERWALK_INCLUDE_WARM_MAX=200 source=default — max includes to warm (0=no limit)
+run: config-env:   HIERWALK_PW_DB_BUILD=off source=default — post-verify full path-walk DB: off | after_verify
+run: config-env:   HIERWALK_PW_DB_PREFETCH=0 source=default — legacy alias: 1 => after_verify full DB build
+run: config-env:   HIERWALK_PW_DB_PREFETCH_WAIT=1 source=default — wait for tier-1 prefetch thread before returning (0=detach)
+run: config-env:   HIERWALK_PW_DB_PREFETCH_MAX=0 source=default — cap tier-1 prefetch files per run (0=no limit)
+run: config-env:   HIERWALK_PW_TRACE_VERBOSE=0 source=default — emit tier0/tier1 pw-db search trace on stderr (1=on)
+run: config-env:   HIERWALK_PW_HEARTBEAT=(unset) source=default — pw-db / connect-coi heartbeat interval (1=30s)
+run: config-env:   HIERWALK_HGREP_HEARTBEAT=(unset) source=default — grep_hie.json module-grep heartbeat interval (default 30s; 0=off)
+run: config-env:   HIERWALK_CONNECT_JOBS=(unset) source=default — path-walk connect-COI worker count (0=auto)
+run: config-env:   HIERWALK_PP_LOG=1 source=default — preprocessing stderr tags: 0=off 1=brief 2=all (grep: [hier-walk pp])
+run: config-env:   HIERWALK_PP_LOG_SLOW_MS=1000 source=default — min ms to log pp-closure at brief level
+run: config-env:   HIERWALK_LOG_SLOW_FILES=(unset) source=default — log slow per-file index timing (1=10s threshold, or seconds)
+run: config-env:   HIERWALK_LOW_MEMORY_AUTO=1500 source=default — auto fused low-memory index above N sources (0=off)
+run: config-env:   HIERWALK_BODY_PARAM_SCAN_MAX=524288 source=default — max module body bytes for param scan at index (0=always)
+run: config-env:   HIERWALK_LOG_LARGE_MODULES=0 source=default — stderr when large modules skip body param collection
+run: config-env:   HCH_INDEX_CWD=(unset) source=default — EDA cwd for -F nested filelists (filelist index cwd)
+run: config-env: note: full effective RTL macros logged after filelist parse (run: verilog-defines: ...)
+run: config=/home/user/Desktop/hierwalk/examples/stress_seed42/_run_text_probe.json jobs=auto (source=default:auto)
+run: test-suite 1 step(s) from /home/user/Desktop/hierwalk/examples/stress_seed42/_run_text_probe.json
+run: enable-trace: stage=parse_flat_suite full_index_block_enabled=False scheduled_steps=1
+run: enable-trace: block=run_conn_check raw_enable=1 parsed_enable=1 action=SCHEDULE block_mode=path-walk
+run: enable-trace: stage=build_config step=0 kind=run_conn_check cfg.mode=check-connect-batch cfg.index_strategy=path-walk merge_full_index_settings=0
+run: enable-trace: stage=pre_execute step=0 kind=run_conn_check index_path=path-walk
+run: test run_conn_check[0] kind=run_conn_check mode=path-walk index=path-walk output=/home/user/Desktop/hierwalk/examples/stress_seed42/text_probe_conn.tsv phase=text
+2026-07-20 07:57:21 [hier-walk] index: lazy (ifdef at index; connect/elab on-demand; HIERWALK_LAZY=0 to disable)
+2026-07-20 07:57:21 [hier-walk] filelist: expanding filelist.f
+2026-07-20 07:57:21 [hier-walk] filelist: reading filelist.f (top)
+2026-07-20 07:57:21 [hier-walk] filelist: done — 1 sources, 1 .f files, 1 incdirs, 0 defines
+run: work-dir: /home/user/Desktop/hierwalk/examples/stress_seed42/.db_stress_top (top=stress_top)
+run: archived run config: _run_text_probe.json
+run: verilog-defines: effective RTL macros (JSON + filelist +define+ + connect)
+run: verilog-defines: from JSON defines (2): STRESS_ALT='0'; STRESS_USE_IN='1'
+run: verilog-defines: from connect batch (2): STRESS_ALT='0'; STRESS_USE_IN='1'
+run: verilog-defines: merged (2):
+run: verilog-defines:   STRESS_ALT='0' source=json+connect active=0
+run: verilog-defines:   STRESS_USE_IN='1' source=json+connect active=1
+run: enable-trace: stage=execute_run effective_mode=check-connect-batch index_strategy=path-walk index_loader=path-walk
+2026-07-20 07:57:21 [hier-walk] path-walk: on-demand index (endpoint paths only)
+2026-07-20 07:57:21 [hier-walk] path-walk: pw-db init (1 sources, lazy defines)
+2026-07-20 07:57:21 [hier-walk] pw-db v14 root=/home/user/Desktop/hierwalk/examples/stress_seed42/.db_stress_top/path-walk-db/ac74827f3644785eed84c347081c02a721056e9469f8a2b11bbeb98b14a1364c module_map=0 cache_hit=0+0
+2026-07-20 07:57:21 [hier-walk] path-walk: mapping — top stress_top
+[hier-walk pp] pp-t0 stress_42_d8.v 70ms names=10 sync root:confident
+2026-07-20 07:57:21 [hier-walk] path-walk: seed top stress_top (stress_42_d8.v)
+2026-07-20 07:57:21 [hier-walk] path-walk: parsing — stress_42_d8.v
+[hier-walk pp] pp-defines stress_42_d8.v start files=1 thru=1/1
+[hier-walk pp] pp-closure stress_42_d8.v start direct
+[hier-walk pp] pp-miss stress_42_d8.v 56ms 0.0MiB no-inc
+[hier-walk pp] pp-t1 stress_42_d8.v 404ms mods=10 inst=44
+2026-07-20 07:57:22 [hier-walk path-walk] ok stress_top  module=stress_top  rtl=/home/user/Desktop/hierwalk/examples/stress_seed42/stress_42_d8.v  via_filelist=/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f  filelist_chain=/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f
+2026-07-20 07:57:22 [hier-walk] path-walk: 1 instance row(s), 0 module(s) loaded, cache=0+0
+2026-07-20 07:57:22 [hier-walk path-walk] hgrep-hie milestone filelist-ready sources=1 top=stress_top
+2026-07-20 07:57:22 [hier-walk path-walk] hgrep-hie milestone filelist-ready sources=1 top=stress_top
+2026-07-20 07:57:22 [hier-walk path-walk] hgrep-cache hit path=/home/user/Desktop/hierwalk/examples/stress_seed42/.db_stress_top/grep_hie.json
+2026-07-20 07:57:22 [hier-walk path-walk] hgrep-cache hit path=/home/user/Desktop/hierwalk/examples/stress_seed42/.db_stress_top/grep_hie.json
+2026-07-20 07:57:22 [hier-walk path-walk] hgrep-hie milestone grep-hie-loaded from=cache modules=10 rtl_files=1 path=/home/user/Desktop/hierwalk/examples/stress_seed42/.db_stress_top/grep_hie.json
+2026-07-20 07:57:22 [hier-walk path-walk] hgrep-hie milestone grep-hie-loaded from=cache modules=10 rtl_files=1 path=/home/user/Desktop/hierwalk/examples/stress_seed42/.db_stress_top/grep_hie.json
+2026-07-20 07:57:22 [hier-walk path-walk] connect-pipeline begin checks=2 hierarchy_jobs=0 connect_jobs=2
+2026-07-20 07:57:22 [hier-walk path-walk] connect-pipeline hgrep-gate-report path=/home/user/Desktop/hierwalk/examples/stress_seed42/.db_stress_top/text_probe_hgrep_gate.report
+2026-07-20 07:57:22 [hier-walk path-walk] connect-pipeline hgrep-gate-report path=/home/user/Desktop/hierwalk/examples/stress_seed42/.db_stress_top/text_probe_hgrep_gate.report
+2026-07-20 07:57:23 [hier-walk path-walk] hgrep-gate-report check=port_port path=/home/user/Desktop/hierwalk/examples/stress_seed42/.db_stress_top/text_probe_hgrep_gate.report
+2026-07-20 07:57:23 [hier-walk path-walk] hgrep-gate check=port_port endpoints=2 'stress_top.probe_in':ok=True:amb=False:files=1:hier='stress_top':port='probe_in' 'stress_top.u_spine.u_spine.probe_out':ok=True:amb=False:files=1:hier='stress_top.u_spine.u_spine':port='probe_out' status=pass scoped_files=1
+2026-07-20 07:57:23 [hier-walk path-walk] hgrep-gate-report check=missing_hierarchy path=/home/user/Desktop/hierwalk/examples/stress_seed42/.db_stress_top/text_probe_hgrep_gate.report
+2026-07-20 07:57:24 [hier-walk path-walk] hgrep-gate check=missing_hierarchy endpoints=2 'stress_top.u_missing.probe_in':ok=False:amb=False:files=1:hier='stress_top.u_missing.probe_in' 'stress_top.u_spine.probe_out':ok=True:amb=False:files=1:hier='stress_top.u_spine':port='probe_out' status=reject reason=grep-miss
+2026-07-20 07:57:24 [hier-walk path-walk] hgrep-pathwalk-handoff write-skip err=TypeError('Object of type PosixPath is not JSON serializable')
+2026-07-20 07:57:24 [hier-walk path-walk] connect-coi begin checks=2 hgrep_gated=2 connect_jobs=2
+[hier-walk pp] pp-t1-hit stress_42_d8.v mods=10 inst=44 mem
+2026-07-20 07:57:24 [hier-walk path-walk] connect-pipeline hgrep-fast-miss check=port_port → full path-walk scoped_files=1
+2026-07-20 07:57:24 [hier-walk] path-walk: searching — stress_top
+2026-07-20 07:57:25 [hier-walk path-walk] connect-pipeline hierarchy-ready check=port_port ms=933.9 hgrep_pass=False scoped_files=1
+[hier-walk verify-timing]   item id=port_port stress_top.probe_in -> stress_top.u_spine.u_spine.probe_out 124ms
+2026-07-20 07:57:25 [hier-walk path-walk] connect-pipeline hgrep-reject check=missing_hierarchy ms=0.0 scoped_files=1
+[hier-walk verify-timing]   item id=missing_hierarchy stress_top.u_missing.probe_in -> stress_top.u_spine.probe_out 0ms
+2026-07-20 07:57:25 [hier-walk] connect: text-coi dedup leaves=2 unique=1 saved=1
+2026-07-20 07:57:25 [hier-walk] connect: text-walk cache grep_mods=3 scope_idx=3 decl_net=0
+2026-07-20 07:57:25 [hier-walk] connect: text-walk profile expand=6 equiv_scans=43 grep_miss=3 rep_adj_capped=0 verdict_hits=0 goal_shortcut=0 scope_shortcut=0
+2026-07-20 07:57:25 [hier-walk path-walk] connect-pipeline done checks=2 workers=2
+2026-07-20 07:57:25 [hier-walk path-walk] connect-coi done checks=2 modules_cached=0 ms=2737.7
+2026-07-20 07:57:25 [hier-walk path-walk] connect-text-conn done checks=2 ms=2737.7
+2026-07-20 07:57:25 [hier-walk path-walk] connect-text-conn written /home/user/Desktop/hierwalk/examples/stress_seed42/.db_stress_top/text_probe_conn.text.tsv
+[hier-walk verify-timing] step connect-coi kind=text-conn done 2.8s (2 items)
+2026-07-20 07:57:25 [hier-walk hierarchy] path-walk instance rows (rtl + filelist)
+2026-07-20 07:57:25 [hier-walk hierarchy]   stress_top  module=stress_top  rtl=/home/user/Desktop/hierwalk/examples/stress_seed42/stress_42_d8.v  via_filelist=/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f  filelist_chain=/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f
+2026-07-20 07:57:25 [hier-walk hierarchy]   stress_top.u_spine  module=stress_spine_0  rtl=/home/user/Desktop/hierwalk/examples/stress_seed42/stress_42_d8.v  via_filelist=/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f  filelist_chain=/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f
+2026-07-20 07:57:25 [hier-walk hierarchy]   stress_top.u_spine.u_spine  module=stress_spine_1  rtl=/home/user/Desktop/hierwalk/examples/stress_seed42/stress_42_d8.v  via_filelist=/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f  filelist_chain=/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f
+2026-07-20 07:57:25 [hier-walk connect] [port_port] stress_top.probe_in -> stress_top.u_spine.u_spine.probe_out
+2026-07-20 07:57:25 [hier-walk connect] [port_port]   A: stress_top  module=stress_top  rtl=/home/user/Desktop/hierwalk/examples/stress_seed42/stress_42_d8.v  via_filelist=/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f  filelist_chain=/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f  port=probe_in
+2026-07-20 07:57:25 [hier-walk connect] [port_port]   B: stress_top.u_spine.u_spine  module=stress_spine_1  rtl=/home/user/Desktop/hierwalk/examples/stress_seed42/stress_42_d8.v  via_filelist=/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f  filelist_chain=/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f  port=probe_out
+2026-07-20 07:57:25 [hier-walk connect] [port_port]   not connected (no path; 3 module(s))
+2026-07-20 07:57:25 [hier-walk connect] [port_port] path hierarchy (rtl + filelist):
+2026-07-20 07:57:25 [hier-walk connect] [port_port]     stress_top  module=stress_top  rtl=/home/user/Desktop/hierwalk/examples/stress_seed42/stress_42_d8.v  via_filelist=/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f  filelist_chain=/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f
+2026-07-20 07:57:25 [hier-walk connect] [port_port]     stress_top.u_spine  module=stress_spine_0  rtl=/home/user/Desktop/hierwalk/examples/stress_seed42/stress_42_d8.v  via_filelist=/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f  filelist_chain=/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f
+2026-07-20 07:57:25 [hier-walk connect] [port_port]     stress_top.u_spine.u_spine  module=stress_spine_1  rtl=/home/user/Desktop/hierwalk/examples/stress_seed42/stress_42_d8.v  via_filelist=/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f  filelist_chain=/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f
+2026-07-20 07:57:25 [hier-walk connect] [port_port] connect walk (COI search):
+2026-07-20 07:57:25 [hier-walk connect] [port_port]   nearest from A: stress_top.u_spine.u_spine:noise_1 (2 hop(s) shown)
+2026-07-20 07:57:25 [hier-walk connect] [port_port]     stress_top.u_spine.u_spine  module=stress_spine_1  rtl=/home/user/Desktop/hierwalk/examples/stress_seed42/stress_42_d8.v  via_filelist=/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f  filelist_chain=/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f
+2026-07-20 07:57:25 [hier-walk connect] [port_port]   nearest from B: stress_top:probe_out (2 hop(s) shown)
+2026-07-20 07:57:25 [hier-walk connect] [port_port]     stress_top  module=stress_top  rtl=/home/user/Desktop/hierwalk/examples/stress_seed42/stress_42_d8.v  via_filelist=/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f  filelist_chain=/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f
+2026-07-20 07:57:25 [hier-walk connect] [port_port]   walk from A (toward B):
+2026-07-20 07:57:25 [hier-walk connect] [port_port]     1. [child-down] stress_top:probe_in -> stress_top.u_spine:probe_in (instance u_spine port .probe_in in stress_top) [bit-precise]
+2026-07-20 07:57:25 [hier-walk connect] [port_port]        stress_top  module=stress_top  rtl=/home/user/Desktop/hierwalk/examples/stress_seed42/stress_42_d8.v  via_filelist=/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f  filelist_chain=/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f
+2026-07-20 07:57:25 [hier-walk connect] [port_port]        stress_top.u_spine  module=stress_spine_0  rtl=/home/user/Desktop/hierwalk/examples/stress_seed42/stress_42_d8.v  via_filelist=/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f  filelist_chain=/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f
+2026-07-20 07:57:25 [hier-walk connect] [port_port]     2. [child-down] stress_top.u_spine:link -> stress_top.u_spine.u_spine:probe_in (instance u_spine port .probe_in in stress_spine_0) [bit-precise]
+2026-07-20 07:57:25 [hier-walk connect] [port_port]        stress_top.u_spine  module=stress_spine_0  rtl=/home/user/Desktop/hierwalk/examples/stress_seed42/stress_42_d8.v  via_filelist=/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f  filelist_chain=/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f
+2026-07-20 07:57:25 [hier-walk connect] [port_port]        stress_top.u_spine.u_spine  module=stress_spine_1  rtl=/home/user/Desktop/hierwalk/examples/stress_seed42/stress_42_d8.v  via_filelist=/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f  filelist_chain=/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f
+2026-07-20 07:57:25 [hier-walk connect] [port_port]   walk from B (toward A):
+2026-07-20 07:57:25 [hier-walk connect] [port_port]     1. [parent-up] stress_top.u_spine.u_spine:probe_out -> stress_top.u_spine:probe_out (port map u_spine.probe_out = probe_out in parent stress_spine_0) [bit-precise]
+2026-07-20 07:57:25 [hier-walk connect] [port_port]        stress_top.u_spine.u_spine  module=stress_spine_1  rtl=/home/user/Desktop/hierwalk/examples/stress_seed42/stress_42_d8.v  via_filelist=/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f  filelist_chain=/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f
+2026-07-20 07:57:25 [hier-walk connect] [port_port]        stress_top.u_spine  module=stress_spine_0  rtl=/home/user/Desktop/hierwalk/examples/stress_seed42/stress_42_d8.v  via_filelist=/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f  filelist_chain=/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f
+2026-07-20 07:57:25 [hier-walk connect] [port_port]     2. [parent-up] stress_top.u_spine:probe_out -> stress_top:probe_out (port map u_spine.probe_out = probe_out in parent stress_top) [bit-precise]
+2026-07-20 07:57:25 [hier-walk connect] [port_port]        stress_top.u_spine  module=stress_spine_0  rtl=/home/user/Desktop/hierwalk/examples/stress_seed42/stress_42_d8.v  via_filelist=/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f  filelist_chain=/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f
+2026-07-20 07:57:25 [hier-walk connect] [port_port]        stress_top  module=stress_top  rtl=/home/user/Desktop/hierwalk/examples/stress_seed42/stress_42_d8.v  via_filelist=/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f  filelist_chain=/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f
+2026-07-20 07:57:25 [hier-walk connect] [port_port]   scopes visited (3):
+2026-07-20 07:57:25 [hier-walk connect] [port_port]     stress_top  module=stress_top  rtl=/home/user/Desktop/hierwalk/examples/stress_seed42/stress_42_d8.v  via_filelist=/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f  filelist_chain=/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f
+2026-07-20 07:57:25 [hier-walk connect] [port_port]     stress_top.u_spine  module=stress_spine_0  rtl=/home/user/Desktop/hierwalk/examples/stress_seed42/stress_42_d8.v  via_filelist=/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f  filelist_chain=/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f
+2026-07-20 07:57:25 [hier-walk connect] [port_port]     stress_top.u_spine.u_spine  module=stress_spine_1  rtl=/home/user/Desktop/hierwalk/examples/stress_seed42/stress_42_d8.v  via_filelist=/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f  filelist_chain=/home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f
+2026-07-20 07:57:25 [hier-walk connect] [port_port]   note: COI from A: reached stress_top.u_spine.u_spine:noise_1 (2 hop(s))
+2026-07-20 07:57:25 [hier-walk connect] [port_port]   note: COI from B: reached stress_top:probe_out (2 hop(s))
+2026-07-20 07:57:25 [hier-walk connect] [port_port]   note: gap: A frontier stress_top.u_spine.u_spine:noise_1 vs B frontier stress_top:probe_out (start stress_top:probe_in goal stress_top.u_spine.u_spine:probe_out)
+2026-07-20 07:57:25 [hier-walk connect] [port_port]   note: scopes visited: 3
+2026-07-20 07:57:25 [hier-walk connect] [port_port]   note: modules parsed: 3
+2026-07-20 07:57:25 [hier-walk connect] [port_port]   note: rtl touched: 1 file(s)
+2026-07-20 07:57:25 [hier-walk connect] [missing_hierarchy] stress_top.u_missing.probe_in -> stress_top.u_spine.probe_out
+2026-07-20 07:57:25 [hier-walk connect] [missing_hierarchy]   A: stress_top.u_missing.probe_in  inst=stress_top.u_missing.probe_in  (no elaboration row)
+2026-07-20 07:57:25 [hier-walk connect] [missing_hierarchy]   B: stress_top.u_spine.probe_out  (no elaboration row)
+2026-07-20 07:57:25 [hier-walk connect] [missing_hierarchy]   error: instance stress_top.u_missing not found
+2026-07-20 07:57:25 [hier-walk connect] [missing_hierarchy]   not connected (tier0 hierarchy_grep miss)
+2026-07-20 07:57:25 [hier-walk connect] [missing_hierarchy] path hierarchy (rtl + filelist):
+2026-07-20 07:57:25 [hier-walk connect] [missing_hierarchy]     stress_top.u_missing.probe_in  (no elaboration row)
+2026-07-20 07:57:25 [hier-walk connect] [missing_hierarchy] connect walk (COI search):
+2026-07-20 07:57:25 [hier-walk connect] [missing_hierarchy]   (no hop detail; enable connect_trace / connect_log for COI steps)
+2026-07-20 07:57:25 [hier-walk] path-walk: done 2 check(s), 3 row(s), 0 module(s), 4.1s
+=== hier-walk report ===
+Tool:          hier-walk 0.3.28
+User:          user
+Started:       2026-07-20 07:57:25 +0000
+Working dir:   /home/user/Desktop/hierwalk/examples/stress_seed42
+Command:       /home/user/Desktop/hierwalk/src/hierwalk/__main__.py _run_text_probe.json
+
+--- summary ---
+Total elapsed: 4.1s
+Step timings:  2.8s (recorded steps; excludes gaps between steps)
+Connect phases (reported separately, not merged):
+  grep-hierarchy: (not run)
+  text-conn:     2.8s
+  logical-conn:  (not run)
+
+--- details ---
+Mode:          path-walk
+Filelist:      /home/user/Desktop/hierwalk/examples/stress_seed42/filelist.f
+Index cwd:     /home/user/Desktop/hierwalk/examples/stress_seed42
+Output:        /home/user/Desktop/hierwalk/examples/stress_seed42/.db_stress_top/text_probe_conn.text.tsv
+
+Inventory
+  RTL sources:   1
+  Modules:       10
+  Filelists:     1
+  Include dirs:  1
+  Defines:       2
+  Index body:    2.0 KB (in memory)
+
+Filelist linking
+  (none)
+
+Index cache
+  Status:        disabled (--no-cache)
+
+Execution
+  Index workers: 1
+  Elab tops:     stress_top
+  Instances:     3
+
+Connectivity (hierarchy analysis)
+  Phase:         text
+  Elements:      inst / port / wire / logic / reg (hit or miss)
+  [port_port] stress_top.probe_in -> stress_top.u_spine.u_spine.probe_out
+    a inst stress_top                               hit (stress_top)
+    a inst stress_top.probe_in                      miss (stress_top)
+    a port stress_top.probe_in                      hit (stress_top)
+    b inst stress_top                               hit (stress_top)
+    b inst stress_top.u_spine                       hit (stress_spine_0)
+    b inst stress_top.u_spine.u_spine               hit (stress_spine_1)
+    b inst stress_top.u_spine.u_spine.probe_out     miss (stress_spine_1)
+    b port stress_top.u_spine.u_spine.probe_out     hit (stress_spine_1)
+    coi(text): FAIL
+    note: no path; 3 module(s)
+  [missing_hierarchy] stress_top.u_missing.probe_in -> stress_top.u_spine.probe_out
+    a inst stress_top                               hit (stress_top)
+    a inst stress_top.u_missing                     miss
+    a inst stress_top.u_missing.probe_in            miss
+    a wire stress_top.u_missing.probe_in            miss
+    b inst stress_top                               hit (stress_top)
+    b inst stress_top.u_spine                       hit (stress_spine_0)
+    b inst stress_top.u_spine.probe_out             miss
+    b port stress_top.u_spine.probe_out             miss
+    coi(text): FAIL
+    note: instance stress_top.u_missing not found
+---
+2026-07-20 07:57:25 [hier-walk] report logged: /home/user/Desktop/hierwalk/examples/stress_seed42/.db_stress_top/text_probe_conn.text.hier-walk.log
+[hier-walk verify-timing] --- summary ---
+[hier-walk verify-timing] Total elapsed: 2.8s
+[hier-walk verify-timing] Connect phases (reported separately, not merged):
+[hier-walk verify-timing]   grep-hierarchy: (not run)
+[hier-walk verify-timing]   text-conn:     2.8s
+[hier-walk verify-timing]   logical-conn:  (not run)
+[hier-walk verify-timing] 
+[hier-walk verify-timing] step connect-coi kind=text-conn done 2.8s (2 items)
+[hier-walk verify-timing]   item id=port_port stress_top.probe_in -> stress_top.u_spine.u_spine.probe_out 124ms
+[hier-walk verify-timing]   item id=missing_hierarchy stress_top.u_missing.probe_in -> stress_top.u_spine.probe_out 0ms

@@ -79,8 +79,14 @@ from hierwalk.verification_timing import (
 def _verification_phase(cfg: RunConfig) -> str:
     if cfg.check_hgrep:
         return "hgrep"
+    if cfg.check_pyslangwalk:
+        return "pyslangwalk"
     phase = (cfg.verification_phase or "both").strip().lower()
-    return phase if phase in ("text", "logical", "both", "hgrep") else "both"
+    return (
+        phase
+        if phase in ("text", "logical", "both", "hgrep", "pyslangwalk")
+        else "both"
+    )
 
 
 def _fail_if_missing_verification_artifacts(
@@ -103,12 +109,18 @@ def _fail_if_missing_verification_artifacts(
 
 def execute_run(cfg: RunConfig, ap) -> int:
     connect_request: Optional[ConnectivityRequest] = None
-    if cfg.check_connect_batch or cfg.connect_inline or cfg.check_hgrep:
+    if (
+        cfg.check_connect_batch
+        or cfg.connect_inline
+        or cfg.check_hgrep
+        or cfg.check_pyslangwalk
+    ):
         connect_request = resolve_connectivity_request(cfg)
 
     effective_mode = resolve_effective_run_mode(cfg, connect_request)
     index_strategy = resolve_effective_index_strategy(cfg, effective_mode)
     hgrep_mode = index_strategy == "hgrep"
+    pyslangwalk_mode = index_strategy == "pyslangwalk"
     path_walk_mode = index_strategy == "path-walk"
     cone_mode = effective_mode == "cone"
     inst_trace_mode = effective_mode == "inst-trace"
@@ -116,6 +128,7 @@ def execute_run(cfg: RunConfig, ap) -> int:
         "check-connect",
         "check-connect-batch",
         "check-hgrep",
+        "check-pyslangwalk",
         "path-walk",
     )
     if cfg.check_connect and connect_request is not None:
@@ -320,10 +333,14 @@ def execute_run(cfg: RunConfig, ap) -> int:
             file=sys.stderr,
         )
 
-    if hgrep_mode or path_walk_mode:
+    if hgrep_mode or path_walk_mode or pyslangwalk_mode:
         if hgrep_mode and on_progress:
             on_progress(
                 "hgrep: hierarchy_grep gate only (no path-walk index; grep_hie.json)"
+            )
+        elif pyslangwalk_mode and on_progress:
+            on_progress(
+                "pyslangwalk: module-index + open only path RTL with pyslang"
             )
         elif path_walk_mode and on_progress:
             on_progress("path-walk: on-demand index (endpoint paths only)")
@@ -519,6 +536,7 @@ def execute_run(cfg: RunConfig, ap) -> int:
                     )
             phase = _verification_phase(cfg)
             do_hgrep = phase == "hgrep"
+            do_pyslangwalk = phase == "pyslangwalk"
             do_text = phase in ("text", "both")
             do_logical = phase in ("logical", "both")
             try:
@@ -549,6 +567,9 @@ def execute_run(cfg: RunConfig, ap) -> int:
                         file=sys.stderr,
                     )
                     return 2
+            elif do_pyslangwalk:
+                # Hierarchy-only; no text/logical TSV pair artifacts required.
+                pass
             else:
                 artifact_rc = _fail_if_missing_verification_artifacts(
                     cfg,
@@ -559,6 +580,8 @@ def execute_run(cfg: RunConfig, ap) -> int:
                     return artifact_rc
             if do_hgrep:
                 stdout_phase = "hgrep"
+            elif do_pyslangwalk:
+                stdout_phase = "pyslangwalk"
             elif do_logical and not do_text:
                 stdout_phase = "logical"
             else:
@@ -592,6 +615,12 @@ def execute_run(cfg: RunConfig, ap) -> int:
                 trace_title = "connectivity path evidence"
             if cfg.output == "-":
                 sys.stdout.write(body)
+            elif do_hgrep and cfg.output:
+                # path-walk text/logical write under work_dir via require_*;
+                # hgrep also mirrors the configured output path when set.
+                out_file = Path(cfg.output)
+                out_file.parent.mkdir(parents=True, exist_ok=True)
+                out_file.write_text(body, encoding="utf-8")
             if log_path is not None:
                 with open(log_path, "a", encoding="utf-8") as fh:
                     fh.write(f"\n# connect execution ({stdout_phase})\n")
