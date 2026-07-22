@@ -880,18 +880,41 @@ def _fast_fail_result(
     *,
     spec: str,
     gate: HierarchyGrepEndpointGate,
+    miss_side: str = "a",
+    other_gate: Optional[HierarchyGrepEndpointGate] = None,
 ) -> ConnectResult:
-    ep = ConnectEndpoint(
+    """Build a failed ConnectResult with the miss on the correct a/b side."""
+    miss_ep = ConnectEndpoint(
         spec=spec,
-        inst_path=gate.hierarchy,
-        port_name="",
-        module="",
+        inst_path=(gate.hierarchy or gate.hierarchy_input or "").strip(),
+        port_name=(gate.port_tail or "").strip(),
+        module=(gate.rows[-1].module if gate.rows else ""),
         port_found=False,
     )
     err = gate.error or f"hierarchy grep miss: {gate.hierarchy_input}"
+    if other_gate is not None:
+        other_spec = (
+            str(chk.endpoint_b) if miss_side == "a" else str(chk.endpoint_a)
+        )
+        other_ep = _endpoint_from_hgrep_gate(other_spec, other_gate)
+    else:
+        other_spec = (
+            str(chk.endpoint_b) if miss_side == "a" else str(chk.endpoint_a)
+        )
+        other_ep = ConnectEndpoint(
+            spec=other_spec,
+            inst_path="",
+            port_name="",
+            module="",
+            port_found=False,
+        )
+    if miss_side == "b":
+        ep_a, ep_b = other_ep, miss_ep
+    else:
+        ep_a, ep_b = miss_ep, other_ep
     return ConnectResult(
-        ep,
-        ConnectEndpoint(spec=chk.endpoint_b, inst_path="", port_name="", module=""),
+        ep_a,
+        ep_b,
         False,
         "unknown",
         errors=[err],
@@ -997,7 +1020,19 @@ def gate_connect_check(
                     endpoint_gates=gates,
                 )
             )
-        miss = next(g for g in gates if not g.ok)
+        n_a = len(specs_a)
+        gates_a = gates[:n_a]
+        gates_b = gates[n_a:]
+        # Prefer reporting the first failing side (a before b) but never
+        # attach a b-side miss onto endpoint_a.
+        if any(not g.ok for g in gates_a):
+            miss = next(g for g in gates_a if not g.ok)
+            miss_side = "a"
+            other = next((g for g in gates_b if g.ok), gates_b[0] if gates_b else None)
+        else:
+            miss = next(g for g in gates_b if not g.ok)
+            miss_side = "b"
+            other = next((g for g in gates_a if g.ok), gates_a[0] if gates_a else None)
         return _finish(
             HierarchyGrepCheckGate(
                 status="reject",
@@ -1008,6 +1043,8 @@ def gate_connect_check(
                     chk,
                     spec=miss.spec,
                     gate=miss,
+                    miss_side=miss_side,
+                    other_gate=other,
                 ),
             )
         )
@@ -1171,34 +1208,72 @@ def _endpoint_from_hgrep_gate(
     )
 
 
+def _split_endpoint_gates(
+    chk: ConnectivityCheck,
+    gates: Sequence[HierarchyGrepEndpointGate],
+) -> Tuple[Tuple[HierarchyGrepEndpointGate, ...], Tuple[HierarchyGrepEndpointGate, ...]]:
+    """Split flattened endpoint gates back into a-side / b-side groups."""
+    specs_a = _specs_for_gate(chk.endpoint_a)
+    n_a = len(specs_a)
+    if n_a <= 0:
+        return (), tuple(gates)
+    return tuple(gates[:n_a]), tuple(gates[n_a:])
+
+
+def _primary_gate(
+    gates: Sequence[HierarchyGrepEndpointGate],
+    *,
+    prefer_ok: bool = True,
+) -> Optional[HierarchyGrepEndpointGate]:
+    if not gates:
+        return None
+    if prefer_ok:
+        for g in gates:
+            if g.ok:
+                return g
+    for g in gates:
+        if not g.ok:
+            return g
+    return gates[0]
+
+
 def connect_result_from_hgrep_gate(
     chk: ConnectivityCheck,
     gate: HierarchyGrepCheckGate,
 ) -> ConnectResult:
     """Map a tier0 gate outcome to a connect TSV row (hgrep-only phase)."""
+    gates_a, gates_b = _split_endpoint_gates(chk, gate.endpoint_gates or ())
     if gate.fast_fail_result is not None:
-        # Enrich endpoints when fast-fail only filled one side.
         ff = gate.fast_fail_result
-        eg_by_spec = {
-            str(eg.spec).strip(): eg for eg in (gate.endpoint_gates or ())
-        }
+        # Keep fail-side placement from _fast_fail_result; fill empty other side.
         ep_a = ff.endpoint_a
         ep_b = ff.endpoint_b
-        if not (ep_a.inst_path or ep_a.port_name):
+        if not (ep_a.inst_path or ep_a.port_name or ep_a.spec):
             ep_a = _endpoint_from_hgrep_gate(
-                ep_a.spec or str(chk.endpoint_a),
-                eg_by_spec.get(str(chk.endpoint_a).strip())
-                or (gate.endpoint_gates[0] if gate.endpoint_gates else None),
+                str(chk.endpoint_a),
+                _primary_gate(gates_a, prefer_ok=True),
             )
-        if not (ep_b.inst_path or ep_b.port_name):
+        if not (ep_b.inst_path or ep_b.port_name or ep_b.spec):
             ep_b = _endpoint_from_hgrep_gate(
-                ep_b.spec or str(chk.endpoint_b),
-                eg_by_spec.get(str(chk.endpoint_b).strip())
-                or (
-                    gate.endpoint_gates[1]
-                    if len(gate.endpoint_gates) > 1
-                    else None
-                ),
+                str(chk.endpoint_b),
+                _primary_gate(gates_b, prefer_ok=True),
+            )
+        # Prefer display specs from the check (list/concat keep brackets).
+        if str(chk.endpoint_a).strip():
+            ep_a = ConnectEndpoint(
+                spec=str(chk.endpoint_a),
+                inst_path=ep_a.inst_path,
+                port_name=ep_a.port_name,
+                module=ep_a.module,
+                port_found=ep_a.port_found,
+            )
+        if str(chk.endpoint_b).strip():
+            ep_b = ConnectEndpoint(
+                spec=str(chk.endpoint_b),
+                inst_path=ep_b.inst_path,
+                port_name=ep_b.port_name,
+                module=ep_b.module,
+                port_found=ep_b.port_found,
             )
         return ConnectResult(
             ep_a,
@@ -1213,8 +1288,9 @@ def connect_result_from_hgrep_gate(
             connected_text=ff.connected_text,
             walk_notes=list(ff.walk_notes or []),
         )
-    eg_a = gate.endpoint_gates[0] if len(gate.endpoint_gates) > 0 else None
-    eg_b = gate.endpoint_gates[1] if len(gate.endpoint_gates) > 1 else None
+    # Pass (or non-fast-fail): use first ok gate per side for provenance.
+    eg_a = _primary_gate(gates_a, prefer_ok=True)
+    eg_b = _primary_gate(gates_b, prefer_ok=True)
     ep_a = _endpoint_from_hgrep_gate(str(chk.endpoint_a), eg_a)
     ep_b = _endpoint_from_hgrep_gate(str(chk.endpoint_b), eg_b)
     ok = gate.status == "pass"

@@ -1011,12 +1011,17 @@ def apply_connect_logical_phase(
 
 def _endpoint_inst_spine(ep: ConnectEndpoint) -> List[str]:
     """Instance spine paths; expands ``[a, b]`` display specs into real paths."""
-    specs = hierarchy_endpoint_specs(
-        ep.spec,
-        inst_path=ep.inst_path,
-        port_name=ep.port_name,
-        port_found=ep.port_found,
-    )
+    # Prefer resolved inst_path so a port tail is not treated as an instance
+    # segment (e.g. top.clk → spine stops at top, not top.clk as inst).
+    if ep.inst_path and (ep.port_found or ep.port_name):
+        specs = (ep.inst_path,)
+    else:
+        specs = hierarchy_endpoint_specs(
+            ep.spec,
+            inst_path=ep.inst_path,
+            port_name=ep.port_name,
+            port_found=ep.port_found,
+        )
     out: List[str] = []
     seen: set[str] = set()
     for spec_path in specs:
@@ -1522,7 +1527,24 @@ def collect_hierarchy_evidence(
                     spec_paths = (fallback,)
             for spec_path in spec_paths:
                 signal_ep = ep
-                if spec_path != (ep.spec or "").strip() and index is not None:
+                # List/concat display specs expand to real paths; keep the
+                # already-resolved endpoint when the expanded path matches
+                # (hgrep often has an empty DesignIndex — re-resolve would
+                # wrongly mark a known port as miss and look like "top fail").
+                expanded_matches_ep = bool(
+                    ep.port_found
+                    and ep.inst_path
+                    and ep.port_name
+                    and (
+                        spec_path == f"{ep.inst_path}.{ep.port_name}"
+                        or spec_path == ep.inst_path
+                    )
+                )
+                if (
+                    spec_path != (ep.spec or "").strip()
+                    and not expanded_matches_ep
+                    and index is not None
+                ):
                     signal_ep = _resolve_endpoint_for_spec(
                         spec_path,
                         rows_by_path,
@@ -1530,7 +1552,11 @@ def collect_hierarchy_evidence(
                         top=top,
                         rows=list(rows_by_path.values()),
                     )
-                signal_path = (signal_ep.spec or spec_path).strip()
+                signal_path = (
+                    f"{ep.inst_path}.{ep.port_name}"
+                    if expanded_matches_ep and ep.port_name
+                    else (signal_ep.spec or spec_path)
+                ).strip()
                 if not signal_path:
                     continue
                 _add(

@@ -76,9 +76,12 @@ def test_hierarchy_tsv_includes_signal_tail_hits(tmp_path: Path):
         signal_tails=tails,
     )
     rows = [ln for ln in body.splitlines() if ln.startswith("t\t")]
-    assert len(rows) == 2
+    # inst spine (top) + signal row per side
+    assert len(rows) >= 2
     assert "top.clk" in body
     assert "top.c" in body
+    assert any("\tinst\ttop\t" in ln for ln in rows)
+    assert any("\tport\ttop.clk\t" in ln or "\twire\ttop.c\t" in ln for ln in rows)
 
 
 def test_collect_hierarchy_evidence_includes_inst_port_wire_reg(tmp_path: Path):
@@ -149,8 +152,13 @@ def test_collect_hierarchy_evidence_includes_inst_port_wire_reg(tmp_path: Path):
     assert any("port" in line for line in report)
     assert any("wire" in line for line in report)
     compact = compact_hierarchy_evidence(evidence)
-    assert len([r for r in compact if r.check_id == "t" and r.side == "a"]) == 1
-    assert len([r for r in compact if r.check_id == "t" and r.side == "b"]) == 1
+    # Keep inst spine + one compact signal row per side.
+    a_rows = [r for r in compact if r.check_id == "t" and r.side == "a"]
+    b_rows = [r for r in compact if r.check_id == "t" and r.side == "b"]
+    assert any(r.kind == "inst" for r in a_rows)
+    assert any(r.kind == "port" for r in a_rows)
+    assert any(r.kind == "inst" for r in b_rows)
+    assert any(r.kind == "wire" for r in b_rows)
 
 
 def test_hierarchy_tsv_expands_list_endpoint_display(tmp_path: Path):
