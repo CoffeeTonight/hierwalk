@@ -71,6 +71,24 @@ def test_list_with_literals_rejected():
         build_expand_meta(["top.a", "1'b0", "top.b"], "top.bus_b[1:0]")
 
 
+def test_single_element_json_list_must_expand():
+    """JSON ``a: ["top.x"]`` must not stay as display ``[top.x]`` for resolve."""
+    from hierwalk.connect.shared.expand import needs_expansion
+
+    meta = build_expand_meta(["top.a.b.c"], ["top.a.b.o"])
+    assert meta.list_a and meta.list_b
+    assert needs_expansion(meta)
+    pairs = expand_check_to_pairs(
+        "[top.a.b.c]",
+        "[top.a.b.o]",
+        expand=meta,
+    )
+    assert len(pairs) == 1
+    assert pairs[0].endpoint_a == "top.a.b.c"
+    assert pairs[0].endpoint_b == "top.a.b.o"
+    assert not pairs[0].endpoint_a.startswith("[")
+
+
 def test_parse_connect_request_loop_without_kind():
     req = parse_connect_request_json(
         {

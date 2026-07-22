@@ -1817,6 +1817,57 @@ def format_hierarchy_evidence_report(
     return lines
 
 
+def _format_endpoint_spec_lines(side: str, spec: str, *, indent: str = "    ") -> List[str]:
+    """Break ``[p1, p2, …]`` list display into readable multi-line hierarchy list."""
+    from hierwalk.connect.shared.expand import parse_list_display_spec
+
+    text = str(spec or "").strip()
+    if not text:
+        return []
+    listed = parse_list_display_spec(text)
+    if listed is not None and len(listed) > 1:
+        out = [f"{indent}{side}  list[{len(listed)}]:"]
+        for i, path in enumerate(listed):
+            out.append(f"{indent}      [{i}] {path}")
+        return out
+    if listed is not None and len(listed) == 1:
+        return [f"{indent}{side}  {listed[0]}"]
+    return [f"{indent}{side}  {text}"]
+
+
+def _format_hgrep_ep_notes(walk_notes: Sequence[str], *, indent: str = "    ") -> List[str]:
+    """Render ``hgrep-ep a[i] PASS|FAIL path …`` walk notes as a status table."""
+    rows: List[Tuple[str, str, str, str]] = []
+    for raw in walk_notes or ():
+        text = str(raw or "").strip()
+        if not text.startswith("hgrep-ep "):
+            continue
+        rest = text[len("hgrep-ep ") :].strip()
+        # label STATUS path [— reason | detail…]
+        parts = rest.split(None, 2)
+        if len(parts) < 3:
+            continue
+        label, status, tail = parts[0], parts[1], parts[2]
+        path = tail
+        reason = ""
+        if " — " in tail:
+            path, reason = tail.split(" — ", 1)
+        rows.append((label, status, path.strip(), reason.strip()))
+    if not rows:
+        return []
+    lines = [f"{indent}endpoint hierarchy status:"]
+    for label, status, path, reason in rows:
+        mark = "PASS" if status.upper() == "PASS" else "FAIL"
+        if reason:
+            lines.append(f"{indent}  {label:8} {mark:4}  {path}")
+            lines.append(f"{indent}           reason: {reason}")
+        else:
+            # drop optional "hier=… port=…" from display path tail for PASS
+            path_only = path.split(" hier=", 1)[0].strip()
+            lines.append(f"{indent}  {label:8} {mark:4}  {path_only}")
+    return lines
+
+
 def format_connect_results_report(
     results: Sequence[ConnectResult],
     *,
@@ -1834,10 +1885,15 @@ def format_connect_results_report(
         _connected_text_value,
     )
 
-    leaf_results = flatten_connect_results_for_output(results)
-    if not leaf_results:
-        return ["  (no checks)"]
     phase_label = str(phase).strip().lower() or "logical"
+    # hgrep multi-endpoint: keep parent rows (walk_notes list status). Other
+    # phases flatten expand sub_results as before.
+    if phase_label == "hgrep":
+        report_results = list(results)
+    else:
+        report_results = flatten_connect_results_for_output(results)
+    if not report_results:
+        return ["  (no checks)"]
     lines: List[str] = []
     lookup = rows_by_path or {}
     evidence = (
@@ -1857,22 +1913,48 @@ def format_connect_results_report(
     for row in evidence:
         evidence_by_check.setdefault(row.check_id or "", []).append(row)
 
-    for result in leaf_results:
+    for result in report_results:
         cid = result.check_id or ""
-        pair = f"{result.endpoint_a.spec} -> {result.endpoint_b.spec}"
-        header = f"  [{cid}] {pair}" if cid else f"  {pair}"
-        lines.append(header)
-        check_evidence = evidence_by_check.get(cid, [])
-        if check_evidence:
-            for ev in check_evidence:
-                mod = f" ({ev.module})" if ev.module else ""
-                lines.append(
-                    f"    {ev.side} {ev.kind:4} {ev.path:40} {ev.status}{mod}"
-                )
+        spec_a = result.endpoint_a.spec if result.endpoint_a else ""
+        spec_b = result.endpoint_b.spec if result.endpoint_b else ""
+        hgrep_notes = [
+            n
+            for n in (result.walk_notes or [])
+            if str(n).startswith("hgrep-ep ")
+        ]
+        multi_list = bool(hgrep_notes) and (
+            "[" in (spec_a or "") or "[" in (spec_b or "") or len(hgrep_notes) > 2
+        )
+
+        if multi_list or (phase_label == "hgrep" and hgrep_notes):
+            header = f"  [{cid}]" if cid else "  [—]"
+            lines.append(header)
+            lines.extend(_format_endpoint_spec_lines("a", spec_a))
+            lines.extend(_format_endpoint_spec_lines("b", spec_b))
+            lines.extend(_format_hgrep_ep_notes(hgrep_notes))
         else:
-            for side, ep in (("a", result.endpoint_a), ("b", result.endpoint_b)):
-                if ep.spec:
-                    lines.append(f"    {side} ---- {ep.spec:40} (unresolved)")
+            pair = f"{spec_a} -> {spec_b}"
+            header = f"  [{cid}] {pair}" if cid else f"  {pair}"
+            lines.append(header)
+            check_evidence = evidence_by_check.get(cid, [])
+            # Also match leaf evidence under parent/id prefixes.
+            if not check_evidence and cid:
+                for key, rows in evidence_by_check.items():
+                    if key.startswith(f"{cid}/") or key.startswith(f"{cid}["):
+                        check_evidence.extend(rows)
+            if check_evidence:
+                for ev in check_evidence:
+                    mod = f" ({ev.module})" if ev.module else ""
+                    lines.append(
+                        f"    {ev.side} {ev.kind:4} {ev.path:40} {ev.status}{mod}"
+                    )
+            else:
+                for side, ep in (("a", result.endpoint_a), ("b", result.endpoint_b)):
+                    if ep and ep.spec:
+                        lines.append(f"    {side} ---- {ep.spec:40} (unresolved)")
+            if hgrep_notes:
+                lines.extend(_format_hgrep_ep_notes(hgrep_notes))
+
         text_ok = _connected_text_value(result)
         logical_ok = _connected_logical_value(result)
         if phase_label == "hgrep":
@@ -1890,8 +1972,12 @@ def format_connect_results_report(
                 f"logical={'PASS' if logical_ok else 'FAIL'}"
             )
         if result.errors:
-            err = " | ".join(result.errors)
-            lines.append(f"    note: {err}")
+            if len(result.errors) == 1:
+                lines.append(f"    note: {result.errors[0]}")
+            else:
+                lines.append(f"    fail detail ({len(result.errors)}):")
+                for err in result.errors:
+                    lines.append(f"      - {err}")
         elif result.note:
             lines.append(f"    note: {result.note}")
     return lines

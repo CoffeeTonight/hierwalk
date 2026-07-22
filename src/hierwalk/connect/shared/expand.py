@@ -522,6 +522,13 @@ def needs_expansion(meta: Optional[CheckExpandMeta]) -> bool:
         return True
     if meta.loop:
         return True
+    # JSON list / ``[…]`` display must always expand — even a single-element
+    # list stores display ``[top.sig]``. Leaving that as the endpoint string
+    # makes hierarchy resolve look for a literal path starting with ``[``,
+    # which fails as "hierarchy not found" / "missing instance prefix" while
+    # multi-element lists (which do expand) appear to work.
+    if meta.list_a or meta.list_b or meta.concat_a or meta.concat_b:
+        return True
     if meta.map_kind in ("array", "fanout", "concat"):
         if len(meta.elements_a) > 1 or len(meta.elements_b) > 1:
             return True

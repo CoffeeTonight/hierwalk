@@ -170,6 +170,18 @@ def _gate_report_payload(
     }
 
 
+def _format_list_field(label: str, raw: Any) -> List[str]:
+    """Pretty-print list/concat endpoint display for gate report files."""
+    text = str(raw or "").strip()
+    listed = parse_list_display_spec(text) if text else None
+    if listed is not None and len(listed) > 1:
+        out = [f"  {label}: list[{len(listed)}]"]
+        for i, path in enumerate(listed):
+            out.append(f"    [{i}] {path}")
+        return out
+    return [f"  {label}: {text or '-'}"]
+
+
 def format_hierarchy_grep_gate_report(
     gate: "HierarchyGrepCheckGate",
     *,
@@ -185,27 +197,38 @@ def format_hierarchy_grep_gate_report(
         f"  resolved_at: {_utc_now_iso()}",
         f"  check_id: {cid}",
         f"  top: {top}",
-        f"  endpoint_a: {endpoint_a}",
-        f"  endpoint_b: {endpoint_b}",
-        f"  status: {gate.status}",
-        f"  use_grep_fast_path: {gate.use_grep_fast_path}",
-        f"  scoped_files: {len(gate.scoped_files)}",
     ]
+    lines.extend(_format_list_field("endpoint_a", endpoint_a))
+    lines.extend(_format_list_field("endpoint_b", endpoint_b))
+    lines.extend(
+        [
+            f"  status: {gate.status}",
+            f"  use_grep_fast_path: {gate.use_grep_fast_path}",
+            f"  scoped_files: {len(gate.scoped_files)}",
+        ]
+    )
     for fpath in gate.scoped_files:
         lines.append(f"    - {fpath}")
-    lines.append("  endpoints:")
-    for g in gate.endpoint_gates:
-        flag = "OK" if g.ok else "MISS"
+    # Group endpoint gates by a/b when possible (specs order: a* then b*).
+    lines.append("  endpoint hierarchy (per item):")
+    specs_a = _specs_for_gate(endpoint_a)
+    n_a = len(specs_a) if specs_a else 0
+    for i, g in enumerate(gate.endpoint_gates):
+        if n_a > 0 and i < n_a:
+            side = f"a[{i}]" if n_a > 1 else "a"
+        elif n_a > 0:
+            bi = i - n_a
+            side = f"b[{bi}]" if (len(gate.endpoint_gates) - n_a) > 1 else "b"
+        else:
+            side = f"[{i}]"
+        flag = "PASS" if g.ok else "FAIL"
         amb = " ambiguous" if g.ambiguous else ""
-        tail = f" port_tail={g.port_tail!r}" if g.port_tail else ""
-        lines.append(
-            f"    [{flag}{amb}] {g.spec!r} hier={g.hierarchy!r}{tail} "
-            f"files={len(g.scoped_files)}"
-        )
-        if g.hierarchy_input != g.hierarchy:
-            lines.append(f"         hierarchy_input={g.hierarchy_input!r}")
+        tail = f" port={g.port_tail}" if g.port_tail else ""
+        lines.append(f"    {side:8} {flag}{amb}  {g.spec}{tail}")
+        if g.hierarchy and g.hierarchy != g.spec:
+            lines.append(f"             hier={g.hierarchy}")
         if g.error:
-            lines.append(f"         error={g.error}")
+            lines.append(f"             reason: {g.error}")
     if gate.rows:
         lines.append("  rows:")
         for row in gate.rows:
@@ -1237,75 +1260,125 @@ def _primary_gate(
     return gates[0]
 
 
+def _hgrep_endpoint_status_lines(
+    side: str,
+    gates: Sequence[HierarchyGrepEndpointGate],
+) -> Tuple[List[str], List[str], List[ConnectResult]]:
+    """
+    Per-list-element status for human reports and aggregate errors.
+
+    walk_notes use a stable prefix ``hgrep-ep`` so the report formatter can
+    render multi-hierarchy lists without packing them into one ``[a, b, c]`` line.
+    """
+    notes: List[str] = []
+    errors: List[str] = []
+    subs: List[ConnectResult] = []
+    multi = len(gates) > 1
+    for i, g in enumerate(gates):
+        label = f"{side}[{i}]" if multi else side
+        ok = bool(g.ok)
+        status = "PASS" if ok else "FAIL"
+        why = (g.error or "").strip() or ("hierarchy miss" if not ok else "")
+        if ok:
+            detail = ""
+            if g.port_tail:
+                detail = f" hier={g.hierarchy} port={g.port_tail}"
+            elif g.hierarchy:
+                detail = f" hier={g.hierarchy}"
+            note = f"hgrep-ep {label} {status} {g.spec}{detail}"
+        else:
+            note = f"hgrep-ep {label} {status} {g.spec} — {why}"
+            errors.append(f"{label} {g.spec}: {why}")
+        notes.append(note)
+        ep = _endpoint_from_hgrep_gate(g.spec, g)
+        subs.append(
+            ConnectResult(
+                ep,
+                ep,
+                ok,
+                "hgrep",
+                errors=() if ok else (why,),
+                note=f"hgrep endpoint {label}",
+                check_id=label,
+                walk_notes=[note],
+            )
+        )
+    return notes, errors, subs
+
+
 def connect_result_from_hgrep_gate(
     chk: ConnectivityCheck,
     gate: HierarchyGrepCheckGate,
 ) -> ConnectResult:
     """Map a tier0 gate outcome to a connect TSV row (hgrep-only phase)."""
     gates_a, gates_b = _split_endpoint_gates(chk, gate.endpoint_gates or ())
-    if gate.fast_fail_result is not None:
-        ff = gate.fast_fail_result
-        # Keep fail-side placement from _fast_fail_result; fill empty other side.
-        ep_a = ff.endpoint_a
-        ep_b = ff.endpoint_b
-        if not (ep_a.inst_path or ep_a.port_name or ep_a.spec):
-            ep_a = _endpoint_from_hgrep_gate(
-                str(chk.endpoint_a),
-                _primary_gate(gates_a, prefer_ok=True),
-            )
-        if not (ep_b.inst_path or ep_b.port_name or ep_b.spec):
-            ep_b = _endpoint_from_hgrep_gate(
-                str(chk.endpoint_b),
-                _primary_gate(gates_b, prefer_ok=True),
-            )
-        # Prefer display specs from the check (list/concat keep brackets).
-        if str(chk.endpoint_a).strip():
-            ep_a = ConnectEndpoint(
-                spec=str(chk.endpoint_a),
-                inst_path=ep_a.inst_path,
-                port_name=ep_a.port_name,
-                module=ep_a.module,
-                port_found=ep_a.port_found,
-            )
-        if str(chk.endpoint_b).strip():
-            ep_b = ConnectEndpoint(
-                spec=str(chk.endpoint_b),
-                inst_path=ep_b.inst_path,
-                port_name=ep_b.port_name,
-                module=ep_b.module,
-                port_found=ep_b.port_found,
-            )
-        return ConnectResult(
-            ep_a,
-            ep_b,
-            ff.connected,
-            ff.mode or "hgrep",
-            hops=list(ff.hops or []),
-            errors=list(ff.errors or []),
-            note=ff.note or "",
-            check_id=ff.check_id or chk.check_id,
-            sub_results=ff.sub_results,
-            connected_text=ff.connected_text,
-            walk_notes=list(ff.walk_notes or []),
-        )
-    # Pass (or non-fast-fail): use first ok gate per side for provenance.
-    eg_a = _primary_gate(gates_a, prefer_ok=True)
-    eg_b = _primary_gate(gates_b, prefer_ok=True)
+    notes_a, errs_a, subs_a = _hgrep_endpoint_status_lines("a", gates_a)
+    notes_b, errs_b, subs_b = _hgrep_endpoint_status_lines("b", gates_b)
+    walk_notes = notes_a + notes_b
+    all_errs = errs_a + errs_b
+
+    # Parent endpoints keep display form (list brackets); provenance from
+    # first OK gate when available, else first miss.
+    eg_a = _primary_gate(gates_a, prefer_ok=True) or _primary_gate(
+        gates_a, prefer_ok=False
+    )
+    eg_b = _primary_gate(gates_b, prefer_ok=True) or _primary_gate(
+        gates_b, prefer_ok=False
+    )
     ep_a = _endpoint_from_hgrep_gate(str(chk.endpoint_a), eg_a)
     ep_b = _endpoint_from_hgrep_gate(str(chk.endpoint_b), eg_b)
-    ok = gate.status == "pass"
+    # Keep original display specs (including ``[…]`` list form).
+    if str(chk.endpoint_a).strip():
+        ep_a = ConnectEndpoint(
+            spec=str(chk.endpoint_a),
+            inst_path=ep_a.inst_path,
+            port_name=ep_a.port_name,
+            module=ep_a.module,
+            port_found=ep_a.port_found,
+        )
+    if str(chk.endpoint_b).strip():
+        ep_b = ConnectEndpoint(
+            spec=str(chk.endpoint_b),
+            inst_path=ep_b.inst_path,
+            port_name=ep_b.port_name,
+            module=ep_b.module,
+            port_found=ep_b.port_found,
+        )
+
+    ok = gate.status == "pass" and not all_errs
+    if gate.fast_fail_result is not None and gate.fast_fail_result.errors:
+        # Prefer concrete miss messages collected above; fall back to ff.
+        if not all_errs:
+            all_errs = list(gate.fast_fail_result.errors)
+
+    n_fail = sum(1 for g in (*gates_a, *gates_b) if not g.ok)
+    n_total = len(gates_a) + len(gates_b)
+    if ok:
+        note = (
+            f"hgrep-gate pass; endpoints={n_total}; "
+            f"scoped_files={len(gate.scoped_files)}; "
+            f"fast_path={gate.use_grep_fast_path}"
+        )
+    else:
+        note = (
+            f"hgrep-gate fail; {n_fail}/{n_total} endpoint(s) miss; "
+            f"scoped_files={len(gate.scoped_files)}"
+        )
+
+    # Per-endpoint detail lives in walk_notes / errors (human report). Avoid
+    # sub_results self-pairs that would pollute flattened TSV as fake a→a rows.
+    _ = (subs_a, subs_b)
+
     return ConnectResult(
         ep_a,
         ep_b,
         ok,
         "hgrep",
-        errors=() if ok else (f"hgrep-gate status={gate.status}",),
+        errors=tuple(all_errs) if all_errs else (),
+        note=note,
         check_id=chk.check_id,
-        note=(
-            f"hgrep-gate {gate.status}; "
-            f"scoped_files={len(gate.scoped_files)}; "
-            f"fast_path={gate.use_grep_fast_path}"
-        ),
+        walk_notes=walk_notes,
+        connected_text=ok,
     )
 
 

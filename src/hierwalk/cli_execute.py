@@ -194,47 +194,20 @@ def execute_run(cfg: RunConfig, ap) -> int:
             f"HIERWALK_LAZY=0 to disable)"
         )
 
-    fl = None
-    if hgrep_mode and not cfg.refresh_cache:
-        from hierwalk.filelist import filelist_result_from_grep_hie
-        from hierwalk.hierarchy_grep import load_grep_hie, resolve_grep_hie_path
-
-        top_guess = (
-            cfg.top
-            or (connect_request.top if connect_request else "")
-            or ""
-        ).strip()
-        if top_guess:
-            work_early = resolve_run_work_dir(
-                top_guess,
-                base=work_base_dir(cfg.index_cwd),
-                explicit_cache_dir=cfg.cache_dir,
-            )
-            cache_path = resolve_grep_hie_path(work_early)
-            if cache_path.is_file():
-                try:
-                    cached = load_grep_hie(cache_path)
-                    fl = filelist_result_from_grep_hie(
-                        cached,
-                        top=top_guess,
-                        defines=extra_defines,
-                    )
-                    if on_progress:
-                        on_progress(
-                            f"hgrep: skip filelist expand "
-                            f"(grep_hie.json sources={len(fl.source_files)})"
-                        )
-                except (OSError, ValueError, json.JSONDecodeError):
-                    fl = None
-    if fl is None:
-        fl = parse_filelist(
-            cfg.filelist,
-            index_cwd=cfg.index_cwd,
-            extra_defines=extra_defines,
-            on_progress=on_progress,
-            ignore_filelists=list(cfg.ignore_filelist),
-            defer_source_exists=lazy_filelist_defer_exists(),
-        )
+    # Always expand the *current* filelist. Reusing grep_hie.json RTL paths
+    # without comparing sources reuses a previous design when only the top
+    # name matches (same ``.db_{TOP}/``), which surfaces as bogus hierarchy
+    # misses (e.g. list ``a`` fails while ``b`` paths look related).
+    # Cache reuse of the module index still happens inside
+    # ``prepare_hierarchy_grep_session`` via ``grep_hie_sources_match``.
+    fl = parse_filelist(
+        cfg.filelist,
+        index_cwd=cfg.index_cwd,
+        extra_defines=extra_defines,
+        on_progress=on_progress,
+        ignore_filelists=list(cfg.ignore_filelist),
+        defer_source_exists=lazy_filelist_defer_exists(),
+    )
     if not fl.source_files:
         print("No sources in filelist", file=sys.stderr)
         return 1
