@@ -56,21 +56,25 @@ def _checks_items(doc: Mapping[str, Any]) -> List[Mapping[str, Any]]:
 
 
 def parse_checks(doc: Any, *, top: str = "") -> List[ConnectivityCheck]:
+    """
+    Parse checks[] into ConnectivityCheck rows.
+
+    JSON list endpoints must go through the same expand path as hier-walk
+    (``_parse_check_endpoints``). Using ``str(list)`` produces Python repr
+    ``"['xa.b.c', 'xa.d.e.r']"`` — not JSON display ``[xa.b.c, xa.d.e.r]`` —
+    so LPM logs show quoted specs like ``'xa.b.c'`` / ``instance xa.'xa not found``.
+    """
+    from hierwalk.connect.shared.request import _parse_check_item
+
     if isinstance(doc, list):
-        items = [c for c in doc if isinstance(c, Mapping)]
+        items = list(doc)
     elif isinstance(doc, Mapping):
-        items = _checks_items(doc)
+        items = list(_checks_items(doc))
     else:
         raise SystemExit("checks JSON must be list or object with checks[]")
     out: List[ConnectivityCheck] = []
     for i, item in enumerate(items):
-        out.append(
-            ConnectivityCheck(
-                str(item.get("a", item.get("endpoint_a", ""))),
-                str(item.get("b", item.get("endpoint_b", ""))),
-                check_id=str(item.get("id", item.get("check_id", f"hg{i}"))),
-            )
-        )
+        out.append(_parse_check_item(item, index=i))
     return out
 
 
