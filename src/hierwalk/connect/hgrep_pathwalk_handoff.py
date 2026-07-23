@@ -73,22 +73,34 @@ def path_walk_action_for_gate(gate: HierarchyGrepCheckGate) -> str:
     return "full_path_walk"
 
 
+def _json_str(value: Any) -> str:
+    """Coerce paths / other objects to plain str for JSON handoff."""
+    if value is None:
+        return ""
+    if isinstance(value, Path):
+        return str(value)
+    return str(value)
+
+
 def flat_row_to_dict(row: FlatRow) -> Dict[str, Any]:
     return {
-        "full_path": row.full_path,
-        "inst_leaf": row.inst_leaf,
-        "module": row.module,
+        "full_path": _json_str(row.full_path),
+        "inst_leaf": _json_str(row.inst_leaf),
+        "module": _json_str(row.module),
         "depth": int(row.depth),
-        "parent_path": row.parent_path,
+        "parent_path": _json_str(row.parent_path) if row.parent_path else None,
         "file": abs_rtl_path(row.file) if row.file else "",
-        "stop_reason": row.stop_reason or "",
-        "via_filelist": row.via_filelist or "",
-        "filelist_chain": row.filelist_chain or "",
-        "param_ctx": dict(row.param_ctx or {}),
+        "stop_reason": _json_str(row.stop_reason or ""),
+        # via_filelist / filelist_chain may be Path on path-walk rows
+        "via_filelist": _json_str(row.via_filelist or ""),
+        "filelist_chain": _json_str(row.filelist_chain or ""),
+        "param_ctx": {
+            _json_str(k): _json_str(v) for k, v in dict(row.param_ctx or {}).items()
+        },
         "param_ctx_folded": bool(row.param_ctx_folded),
-        "refine_status": row.refine_status or "grep",
-        "activation": row.activation or "",
-        "walk_note": row.walk_note or "",
+        "refine_status": _json_str(row.refine_status or "grep"),
+        "activation": _json_str(row.activation or ""),
+        "walk_note": _json_str(row.walk_note or ""),
     }
 
 
@@ -231,7 +243,13 @@ def write_pathwalk_handoff(
     out = Path(path).expanduser().resolve()
     out.parent.mkdir(parents=True, exist_ok=True)
     payload = build_handoff_batch(top=top, checks=checks, extra=extra)
-    text = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+
+    def _default(obj: Any) -> str:
+        if isinstance(obj, Path):
+            return str(obj)
+        return str(obj)
+
+    text = json.dumps(payload, indent=2, ensure_ascii=False, default=_default) + "\n"
     with _HANDOFF_LOCK:
         out.write_text(text, encoding="utf-8")
     return out

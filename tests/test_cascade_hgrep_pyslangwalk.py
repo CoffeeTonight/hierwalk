@@ -30,6 +30,47 @@ def test_parse_cascade_phase_aliases():
     assert parse_connect_phase_value("hgrep-then-pyslangwalk") == HGREP_THEN_PYSLANGWALK
 
 
+def test_array_hgrep_only_does_not_fall_through_to_both(tmp_path: Path):
+    """``connect_phase: [\"hgrep\"]`` must be pure hgrep, not str(list)→both."""
+    rtl = _write(
+        tmp_path,
+        "top.sv",
+        """
+        module top;
+          logic s0, bus;
+        endmodule
+        """,
+    )
+    (tmp_path / "filelist.f").write_text("top.sv\n", encoding="utf-8")
+    fl = parse_filelist(str(tmp_path / "filelist.f"), index_cwd=str(tmp_path))
+    req = parse_connect_request_json(
+        {
+            "top": "top",
+            "checks": [
+                {"id": "ok", "a": "top.s0", "b": "top.bus"},
+            ],
+        }
+    )
+    logs: list[str] = []
+    work = tmp_path / "db"
+    batch, _, _ = run_path_walk_connect(
+        req,
+        fl,
+        top="top",
+        connect_phase=["hgrep"],
+        connect_output_dir=work,
+        no_cache=True,
+        on_progress=logs.append,
+    )
+    joined = "\n".join(logs)
+    assert "connect-hgrep begin" in joined or "hgrep-gate" in joined
+    assert "cascade begin" not in joined
+    assert "pyslangwalk" not in joined.lower()
+    assert "connect-text-conn" not in joined
+    assert all(r.mode == "hgrep" for r in batch.results)
+    assert not (work / "pyslangwalk.report").exists()
+
+
 def test_cascade_skips_pyslangwalk_on_hgrep_miss(tmp_path: Path):
     rtl = _write(
         tmp_path,
@@ -77,8 +118,12 @@ def test_cascade_skips_pyslangwalk_on_hgrep_miss(tmp_path: Path):
     assert by["ok"].mode.startswith("pyslangwalk") or "pyslangwalk" in (
         by["ok"].note or ""
     )
-    assert any("cascade" in m and "hgrep" in m for m in logs)
-    assert any("→ pyslangwalk" in m or "pyslangwalk" in m for m in logs)
+    assert any(m.startswith("cascade begin") for m in logs)
+    assert any("cascade hgrep pass=" in m for m in logs)
+    assert any(m.startswith("cascade done") for m in logs)
+    # Quiet cascade: no per-check hgrep-gate spam on progress channel
+    assert not any("hgrep-gate check=" in m for m in logs)
+    assert not any("hgrep-hie milestone" in m for m in logs)
     # Electrical report from pyslangwalk stage
     assert (work / "pyslangwalk.report").is_file()
     report = (work / "pyslangwalk.report").read_text(encoding="utf-8")

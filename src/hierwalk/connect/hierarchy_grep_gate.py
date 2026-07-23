@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import contextvars
 import json
 import os
 import sys
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,10 +38,27 @@ if TYPE_CHECKING:
 _GATE_REPORT_LOCK = threading.Lock()
 _GATE_REPORT_HEADERS: Set[str] = set()
 
+# When False, hgrep gate/trace skip timestamped stderr (cascade quiet).
+_hgrep_trace_stderr: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "hgrep_trace_stderr", default=True
+)
+
+
+@contextmanager
+def hgrep_trace_quiet():
+    """Suppress stderr dual-log from hgrep gate/trace (on_emit still works if set)."""
+    token = _hgrep_trace_stderr.set(False)
+    try:
+        yield
+    finally:
+        _hgrep_trace_stderr.reset(token)
+
 
 def emit_hgrep_gate_log(log_line: str) -> None:
     """Emit tier0 gate lines to stderr with the standard hier-walk timestamp."""
     if not log_line:
+        return
+    if not _hgrep_trace_stderr.get():
         return
     from hierwalk.hierarchy_log import emit_path_walk_log
 
@@ -84,7 +103,8 @@ def emit_hgrep_trace(log_line: str, *, on_emit: Optional[Any] = None) -> None:
     """stderr (timestamped) plus optional trace hook (log file / tests)."""
     if not log_line:
         return
-    emit_hgrep_gate_log(log_line)
+    if _hgrep_trace_stderr.get():
+        emit_hgrep_gate_log(log_line)
     if on_emit is not None:
         on_emit(log_line)
 

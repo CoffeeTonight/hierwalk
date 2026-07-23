@@ -249,6 +249,16 @@ def _emit_hgrep_build_log(
 ) -> None:
     if not message:
         return
+    # Cascade quiet: skip stderr (still forward on_emit if provided).
+    try:
+        from hierwalk.connect.hierarchy_grep_gate import _hgrep_trace_stderr
+
+        if not _hgrep_trace_stderr.get():
+            if on_emit is not None:
+                on_emit(message)
+            return
+    except Exception:
+        pass
     from hierwalk.hierarchy_log import emit_path_walk_log
 
     emit_path_walk_log(message, stream=sys.stderr)

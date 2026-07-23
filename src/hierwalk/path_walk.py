@@ -284,6 +284,8 @@ class PathWalkState:
     _hierarchy_logical_writer: object = field(default=None, repr=False)
     _hierarchy_flush_phase: str = field(default="", repr=False)
     _connect_elab_index: object = field(default=None, repr=False)
+    # When True, text pipeline skips re-running hgrep gate (already done upstream).
+    skip_hgrep_pregate: bool = field(default=False, repr=False)
 
     def _trace_streams(self) -> List[TextIO]:
         out: List[TextIO] = []
@@ -2949,7 +2951,8 @@ def _pipeline_path_walk_text_conn(
     )
 
     pre_gates: List[Optional[Any]] = [None] * total
-    if hgrep_session is not None:
+    skip_pre = bool(getattr(state, "skip_hgrep_pregate", False))
+    if hgrep_session is not None and not skip_pre:
         for idx, chk in enumerate(request.checks):
             gate = gate_connect_check(
                 chk,
@@ -2979,11 +2982,17 @@ def _pipeline_path_walk_text_conn(
                 state._emit_walk(f"hgrep-pathwalk-handoff path={handoff_path}")
         except Exception as exc:
             state._emit_walk(f"hgrep-pathwalk-handoff write-skip err={exc!r}")
+    elif skip_pre:
+        state._emit_walk(
+            "connect-pipeline skip-hgrep-pregate "
+            "(upstream cascade/pyslang hierarchy already passed)"
+        )
 
     state._emit_walk(
         f"connect-coi begin checks={total} "
         f"hgrep_gated={sum(1 for g in pre_gates if g is not None)} "
         f"connect_jobs={workers}"
+        + (" skip_pregate=1" if skip_pre else "")
     )
 
     with _ConnectCoiHeartbeat(
@@ -3795,6 +3804,7 @@ def run_path_walk_connect(
     connect_output_name: str = "conn.tsv",
     connect_phase: str = "both",
     refresh_cache: bool = False,
+    skip_hgrep_pregate: bool = False,
 ) -> Tuple[ConnectivityBatchResult, DesignIndex, PathWalkState]:
     """
     Path-walk batch connectivity: on-demand RTL + shared :class:`ConnectivitySession`.
@@ -3802,27 +3812,27 @@ def run_path_walk_connect(
     Hierarchy walk honors ``jobs`` at trie branch points. ``connect_jobs`` runs
     text-COI in parallel (shared ``mod_cache``); pipeline mode interleaves
     per-check hierarchy with connect workers when ``connect_jobs`` > 1.
+
+    ``skip_hgrep_pregate``: when True, text pipeline does not re-run hgrep gate
+    (use after cascade/pyslangwalk already proved hierarchy).
     """
     from hierwalk.connect.session import _resolve_connect_jobs
     from hierwalk.perf import connect_jobs_from_env
     defines = dict(fl.defines)
     defines.update(extra_defines or {})
     defines.update(request.defines)
-    from hierwalk.run_request import HGREP_THEN_PYSLANGWALK
+    from hierwalk.run_request import (
+        HGREP_THEN_PYSLANGWALK,
+        parse_connect_phase_value,
+    )
 
-    raw_phase = str(connect_phase or "both").strip().lower().replace(" ", "")
-    raw_phase = raw_phase.replace("_", "-")
-    if raw_phase in (
-        "hgrep+pyslangwalk",
-        "hgrep-pyslangwalk",
-        "hgrep+pyslang",
-        "hgrep-then-pyslangwalk",
-        "cascade-hgrep-pyslangwalk",
-    ):
-        phase = HGREP_THEN_PYSLANGWALK
-    elif raw_phase in ("text", "logical", "both", "hgrep", "pyslangwalk"):
-        phase = raw_phase
-    else:
+    # Accept str or list (e.g. ["hgrep"] / ["hgrep","pyslangwalk"]).
+    # Do NOT str(list) — that becomes "['hgrep']" and falls through to both.
+    try:
+        phase = parse_connect_phase_value(
+            connect_phase if connect_phase not in (None, "") else "both"
+        )
+    except ValueError:
         phase = "both"
     do_cascade = phase == HGREP_THEN_PYSLANGWALK
     do_hgrep = phase == "hgrep"
@@ -3846,10 +3856,12 @@ def run_path_walk_connect(
         # Cascade: fast hgrep typo gate → pyslangwalk only on survivors
         # ------------------------------------------------------------------
         if do_cascade:
+            from hierwalk.connect.hierarchy_grep_gate import hgrep_trace_quiet
             from hierwalk.connect.shared.request import ConnectivityRequest
             from hierwalk.models import ConnectResult as CR
 
             def _emit_cascade(msg: str) -> None:
+                """Compact cascade progress only (no per-milestone spam)."""
                 if on_progress is not None:
                     on_progress(msg)
                 if trace_log_fh is not None:
@@ -3857,46 +3869,53 @@ def run_path_walk_connect(
 
                     emit_path_walk_log(msg, stream=trace_log_fh)
 
+            n_checks = len(request.checks)
             _emit_cascade(
-                f"cascade begin phase={HGREP_THEN_PYSLANGWALK} "
-                f"checks={len(request.checks)} (hgrep → pyslangwalk survivors)"
+                f"cascade begin checks={n_checks} [hgrep → pyslangwalk]"
             )
-            hgrep_batch, hgrep_index, hgrep_state = run_path_walk_connect(
-                request,
-                fl,
-                top=top,
-                extra_defines=extra_defines,
-                ignore_paths=ignore_paths,
-                ignore_path_files=ignore_path_files,
-                ignore_modules=ignore_modules,
-                ignore_filelists=ignore_filelists,
-                cache_dir=cache_dir,
-                no_cache=no_cache,
-                on_progress=on_progress,
-                trace_stream=trace_stream,
-                trace_log_path=None,
-                reuse_suite_session=reuse_suite_session,
-                jobs=jobs,
-                connect_jobs=connect_jobs,
-                connect_output_dir=connect_output_dir,
-                connect_output_name=connect_output_name,
-                connect_phase="hgrep",
-                refresh_cache=refresh_cache,
-            )
+            # Quiet child stages: summaries only at cascade level.
+            with hgrep_trace_quiet():
+                hgrep_batch, hgrep_index, hgrep_state = run_path_walk_connect(
+                    request,
+                    fl,
+                    top=top,
+                    extra_defines=extra_defines,
+                    ignore_paths=ignore_paths,
+                    ignore_path_files=ignore_path_files,
+                    ignore_modules=ignore_modules,
+                    ignore_filelists=ignore_filelists,
+                    cache_dir=cache_dir,
+                    no_cache=no_cache,
+                    on_progress=None,
+                    trace_stream=None,
+                    trace_log_path=None,
+                    reuse_suite_session=reuse_suite_session,
+                    jobs=jobs,
+                    connect_jobs=connect_jobs,
+                    connect_output_dir=connect_output_dir,
+                    connect_output_name=connect_output_name,
+                    connect_phase="hgrep",
+                    refresh_cache=refresh_cache,
+                )
             hgrep_results = list(hgrep_batch.results)
             survivors = [
                 chk
                 for chk, hr in zip(request.checks, hgrep_results)
                 if hr.connected
             ]
+            n_hgrep_pass = len(survivors)
+            n_hgrep_fail = n_checks - n_hgrep_pass
             _emit_cascade(
-                f"cascade hgrep pass={len(survivors)}/{len(request.checks)} "
-                f"→ pyslangwalk"
+                f"cascade hgrep pass={n_hgrep_pass}/{n_checks} "
+                f"fail={n_hgrep_fail}"
             )
             if not survivors:
-                _emit_cascade("cascade done (no survivors; skip pyslangwalk)")
+                _emit_cascade("cascade done (no survivors)")
                 return hgrep_batch, hgrep_index, hgrep_state
 
+            _emit_cascade(
+                f"cascade pyslangwalk survivors={n_hgrep_pass}"
+            )
             sub_req = ConnectivityRequest(
                 checks=tuple(survivors),
                 top=request.top or top,
@@ -3907,29 +3926,30 @@ def run_path_walk_connect(
                 strict_generate=request.strict_generate,
                 over_approximate_if=request.over_approximate_if,
             )
-            pw_batch, pw_index, pw_state = run_path_walk_connect(
-                sub_req,
-                fl,
-                top=top,
-                extra_defines=extra_defines,
-                ignore_paths=ignore_paths,
-                ignore_path_files=ignore_path_files,
-                ignore_modules=ignore_modules,
-                ignore_filelists=ignore_filelists,
-                cache_dir=cache_dir,
-                no_cache=no_cache,
-                on_progress=on_progress,
-                trace_stream=trace_stream,
-                trace_log_path=None,
-                reuse_suite_session=reuse_suite_session,
-                jobs=jobs,
-                connect_jobs=connect_jobs,
-                connect_output_dir=connect_output_dir,
-                connect_output_name=connect_output_name,
-                connect_phase="pyslangwalk",
-                # Reuse grep_hie.json built by the hgrep stage.
-                refresh_cache=False,
-            )
+            with hgrep_trace_quiet():
+                pw_batch, pw_index, pw_state = run_path_walk_connect(
+                    sub_req,
+                    fl,
+                    top=top,
+                    extra_defines=extra_defines,
+                    ignore_paths=ignore_paths,
+                    ignore_path_files=ignore_path_files,
+                    ignore_modules=ignore_modules,
+                    ignore_filelists=ignore_filelists,
+                    cache_dir=cache_dir,
+                    no_cache=no_cache,
+                    on_progress=None,
+                    trace_stream=None,
+                    trace_log_path=None,
+                    reuse_suite_session=reuse_suite_session,
+                    jobs=jobs,
+                    connect_jobs=connect_jobs,
+                    connect_output_dir=connect_output_dir,
+                    connect_output_name=connect_output_name,
+                    connect_phase="pyslangwalk",
+                    # Reuse grep_hie.json built by the hgrep stage.
+                    refresh_cache=False,
+                )
             pw_by_id: Dict[str, Any] = {
                 (r.check_id or ""): r for r in pw_batch.results
             }
@@ -3973,8 +3993,7 @@ def run_path_walk_connect(
                 )
             n_pass = sum(1 for r in merged if r.connected)
             _emit_cascade(
-                f"cascade done pass={n_pass}/{len(merged)} "
-                f"(hgrep survivors={len(survivors)})"
+                f"cascade done pass={n_pass}/{n_checks}"
             )
             # Seed hgrep rows into pw state for report provenance.
             for path, row in (hgrep_state.rows_by_path or {}).items():
@@ -4077,6 +4096,9 @@ def run_path_walk_connect(
                         connect_output_name=connect_output_name,
                         connect_phase="text",
                         refresh_cache=False,
+                        # Survivors already passed pyslang hierarchy (and
+                        # cascade already ran hgrep) — do not re-gate.
+                        skip_hgrep_pregate=True,
                     )
                     for r in text_batch.results:
                         text_by_id[r.check_id or ""] = CR(
@@ -4313,6 +4335,8 @@ def run_path_walk_connect(
                     jobs=jobs,
                 )
         state._sync_db_stats()
+        if skip_hgrep_pregate:
+            state.skip_hgrep_pregate = True
         if on_progress:
             on_progress(_path_walk_progress_stats_line(state))
 
