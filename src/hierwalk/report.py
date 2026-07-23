@@ -200,7 +200,14 @@ class RunReport:
             from hierwalk.connect.session import format_connect_results_report
 
             phase = (self.connect_phase or "logical").strip().lower()
-            if phase not in ("text", "logical", "both", "hgrep", "pyslangwalk"):
+            if phase not in (
+                "text",
+                "logical",
+                "both",
+                "hgrep",
+                "pyslangwalk",
+                "hgrep+pyslangwalk",
+            ):
                 phase = "logical"
             out.append("")
             out.append("Connectivity (hierarchy analysis)")
@@ -208,6 +215,11 @@ class RunReport:
                 out.append("  Phase:         grep-hierarchy")
             elif phase == "pyslangwalk":
                 out.append("  Phase:         pyslangwalk (+ text-COI when hierarchy passes)")
+            elif phase == "hgrep+pyslangwalk":
+                out.append(
+                    "  Phase:         cascade hgrep → pyslangwalk "
+                    "(coarse typo gate, then fine survivors)"
+                )
             elif phase in ("text", "logical"):
                 out.append(f"  Phase:         {phase}")
             out.append("  Elements:      inst / port / wire / logic / reg (hit or miss)")

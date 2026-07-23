@@ -253,13 +253,62 @@ class RunConfig:
         return [f"{k}={v}" if v != "1" else k for k, v in self.defines]
 
 
+# Coarse hierarchy (hgrep) then fine pyslangwalk on survivors only.
+HGREP_THEN_PYSLANGWALK = "hgrep+pyslangwalk"
+_HGREP_THEN_PYSLANGWALK_ALIASES = frozenset(
+    {
+        "hgrep+pyslangwalk",
+        "hgrep-pyslangwalk",
+        "hgrep+pyslang",
+        "hgrep-then-pyslangwalk",
+        "cascade-hgrep-pyslangwalk",
+    }
+)
+
+
 def parse_connect_phase_value(raw: Any) -> str:
-    """Parse connect/verification phase (text, logical, both, hgrep, pyslangwalk)."""
-    phase = str(raw or "both").strip().lower().replace("_", "-")
+    """
+    Parse connect/verification phase.
+
+    Preferred cascade form (JSON array — no ``+`` string join)::
+
+        "connect_phase": ["hgrep", "pyslangwalk"]
+
+    Still accepted for compatibility::
+
+        "connect_phase": "hgrep+pyslangwalk"
+
+    Single phases: text, logical, both, hgrep, pyslangwalk.
+    """
+    # Array cascade: clean ordered steps (recommended).
+    if isinstance(raw, (list, tuple)):
+        steps = [
+            str(x).strip().lower().replace(" ", "").replace("_", "-")
+            for x in raw
+            if str(x).strip()
+        ]
+        if not steps:
+            raise ValueError("connect_phase array must not be empty")
+        if len(steps) == 1:
+            return parse_connect_phase_value(steps[0])
+        # hgrep then pyslangwalk (pyslang alias for pyslangwalk)
+        norm = ["pyslangwalk" if s in ("pyslang", "pyslang-walk") else s for s in steps]
+        if norm == ["hgrep", "pyslangwalk"]:
+            return HGREP_THEN_PYSLANGWALK
+        raise ValueError(
+            'connect_phase array currently supports only ["hgrep", "pyslangwalk"] '
+            f"(got {raw!r})"
+        )
+
+    phase = str(raw or "both").strip().lower().replace(" ", "")
+    phase = phase.replace("_", "-")
+    if phase in _HGREP_THEN_PYSLANGWALK_ALIASES:
+        return HGREP_THEN_PYSLANGWALK
     if phase in ("text", "logical", "both", "hgrep", "pyslangwalk"):
         return phase
     raise ValueError(
-        "connect_phase must be text, logical, both, hgrep, or pyslangwalk "
+        "connect_phase must be text, logical, both, hgrep, pyslangwalk, "
+        '["hgrep", "pyslangwalk"], or hgrep+pyslangwalk '
         f"(got {raw!r})"
     )
 
@@ -516,7 +565,10 @@ def resolve_effective_index_strategy(
     ``connect_phase: hgrep`` uses ``hgrep`` strategy — no path-walk index, only
     hierarchy_grep gate + ``grep_hie.json`` cache.
     """
-    phase = (cfg.verification_phase or "").strip().lower()
+    phase = (cfg.verification_phase or "").strip().lower().replace("_", "-")
+    if phase in _HGREP_THEN_PYSLANGWALK_ALIASES or phase == HGREP_THEN_PYSLANGWALK:
+        # Cascade still enters path-walk connect with phase=hgrep+pyslangwalk.
+        return "pyslangwalk"
     if phase == "hgrep" or effective_mode == "check-hgrep":
         return "hgrep"
     if phase == "pyslangwalk" or effective_mode == "check-pyslangwalk":

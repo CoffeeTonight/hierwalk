@@ -77,16 +77,22 @@ from hierwalk.verification_timing import (
 
 
 def _verification_phase(cfg: RunConfig) -> str:
+    from hierwalk.run_request import parse_connect_phase_value
+
     if cfg.check_hgrep:
         return "hgrep"
     if cfg.check_pyslangwalk:
-        return "pyslangwalk"
-    phase = (cfg.verification_phase or "both").strip().lower()
-    return (
-        phase
-        if phase in ("text", "logical", "both", "hgrep", "pyslangwalk")
-        else "both"
-    )
+        # Allow cascade when JSON set verification_phase to hgrep+pyslangwalk.
+        try:
+            return parse_connect_phase_value(
+                cfg.verification_phase or "pyslangwalk"
+            )
+        except ValueError:
+            return "pyslangwalk"
+    try:
+        return parse_connect_phase_value(cfg.verification_phase or "both")
+    except ValueError:
+        return "both"
 
 
 def _fail_if_missing_verification_artifacts(
@@ -510,6 +516,7 @@ def execute_run(cfg: RunConfig, ap) -> int:
             phase = _verification_phase(cfg)
             do_hgrep = phase == "hgrep"
             do_pyslangwalk = phase == "pyslangwalk"
+            do_cascade = phase == "hgrep+pyslangwalk"
             do_text = phase in ("text", "both")
             do_logical = phase in ("logical", "both")
             try:
@@ -532,7 +539,7 @@ def execute_run(cfg: RunConfig, ap) -> int:
             connect_results = batch.results
             endpoint_rows = pw_state.rows_by_path
             conn_paths = connect_output_paths(work_dir, cfg.output)
-            if do_hgrep:
+            if do_hgrep or do_cascade:
                 if not conn_paths.hgrep_gate_report.is_file():
                     print(
                         f"connect: missing hgrep gate report "
@@ -553,6 +560,8 @@ def execute_run(cfg: RunConfig, ap) -> int:
                     return artifact_rc
             if do_hgrep:
                 stdout_phase = "hgrep"
+            elif do_cascade:
+                stdout_phase = "hgrep+pyslangwalk"
             elif do_pyslangwalk:
                 stdout_phase = "pyslangwalk"
             elif do_logical and not do_text:

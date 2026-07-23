@@ -1937,7 +1937,7 @@ def format_connect_results_report(
     phase_label = str(phase).strip().lower() or "logical"
     # hgrep / pyslangwalk: keep parent rows when present so expand parents
     # are not only shown as leaf pairs (still flatten pure leaf-only batches).
-    if phase_label in ("hgrep", "pyslangwalk"):
+    if phase_label in ("hgrep", "pyslangwalk", "hgrep+pyslangwalk"):
         report_results = list(results)
     else:
         report_results = flatten_connect_results_for_output(results)
@@ -1976,7 +1976,8 @@ def format_connect_results_report(
         )
 
         if multi_list or (
-            phase_label in ("hgrep", "pyslangwalk") and hgrep_notes
+            phase_label in ("hgrep", "pyslangwalk", "hgrep+pyslangwalk")
+            and hgrep_notes
         ):
             header = f"  [{cid}]" if cid else "  [—]"
             lines.append(header)
@@ -2011,19 +2012,27 @@ def format_connect_results_report(
         if phase_label == "hgrep":
             gate_ok = bool(result.connected)
             lines.append(f"    hgrep-gate: {'PASS' if gate_ok else 'FAIL'}")
-        elif phase_label == "pyslangwalk":
+        elif phase_label in ("pyslangwalk", "hgrep+pyslangwalk"):
             gate_ok = bool(result.connected)
             mode = (result.mode or "").strip()
-            if mode == "pyslangwalk+text" or (
+            if phase_label == "hgrep+pyslangwalk" and mode == "hgrep":
+                lines.append(f"    cascade-hgrep: {'PASS' if gate_ok else 'FAIL'}")
+            elif mode == "pyslangwalk+text" or (
                 result.connected_text is not None and "text" in mode
             ):
-                lines.append(
-                    f"    pyslangwalk+text: {'PASS' if gate_ok else 'FAIL'}"
+                prefix = (
+                    "cascade-pyslangwalk+text"
+                    if phase_label == "hgrep+pyslangwalk"
+                    else "pyslangwalk+text"
                 )
+                lines.append(f"    {prefix}: {'PASS' if gate_ok else 'FAIL'}")
             else:
-                lines.append(
-                    f"    pyslangwalk-hierarchy: {'PASS' if gate_ok else 'FAIL'}"
+                prefix = (
+                    "cascade-pyslangwalk"
+                    if phase_label == "hgrep+pyslangwalk"
+                    else "pyslangwalk-hierarchy"
                 )
+                lines.append(f"    {prefix}: {'PASS' if gate_ok else 'FAIL'}")
         elif phase_label == "text":
             coi = "PASS" if text_ok else "FAIL"
             lines.append(f"    coi(text): {coi}")

@@ -39,6 +39,7 @@ hier-walk run.json -o out.tsv
 | `both` | Text then logical (default-ish path-walk) | text + logical | same |
 | `hgrep` | **Hierarchy gate only** via hierarchy_grep (no text-COI) | hierarchy_grep gate만 | `--check-hgrep FILE` |
 | `pyslangwalk` | **grep_hie + pyslang hierarchy**, then **text-COI** on survivors | grep_hie + pyslang → text | `--check-pyslangwalk FILE` |
+| `["hgrep", "pyslangwalk"]` | **Cascade:** fast **hgrep** → **pyslangwalk** on survivors | hgrep 통과분만 pyslangwalk | JSON array (preferred); string `hgrep+pyslangwalk` also OK |
 
 **EN** CLI flags `--check-hgrep`, `--check-pyslangwalk`, and `--check-connect-batch` are mutually exclusive.  
 **KO** `--check-hgrep` / `--check-pyslangwalk` / `--check-connect-batch` 는 서로 배타입니다.
@@ -122,6 +123,9 @@ grep_hie.json (module → file)
 | Hierarchy miss | `pyslangwalk` |
 | Hierarchy ok + text | `pyslangwalk+text` |
 
+**EN** Electrical (structural) bit-slice p2p is written to **`pyslangwalk.report`** under the run db: one line per `a → b[slice]` (port map + pure `assign` only; no logic ops).  
+**KO** 전기적(구조) bit-slice p2p는 작업 dir의 **`pyslangwalk.report`**: `a → b[slice]` 한 줄씩 (포트맵 + pure assign만, 로직 연산 제외).
+
 ### JSON (RUN — recommended)
 
 ```json
@@ -148,6 +152,9 @@ grep_hie.json (module → file)
 
 **EN** Key switch: `"connect_phase": "pyslangwalk"` (alias: `"connect-phase"`).  
 **KO** 스위치: `"connect_phase": "pyslangwalk"` (`"connect-phase"` 동일).
+
+**EN Cascade (recommended):** `"connect_phase": ["hgrep", "pyslangwalk"]` — ordered pipeline, no string join. Legacy string: `"hgrep+pyslangwalk"`.  
+**KO 연쇄 (권장):** `"connect_phase": ["hgrep", "pyslangwalk"]` (배열). 구형 문자열 `"hgrep+pyslangwalk"` 도 동일.
 
 ```bash
 hier-walk run_pyslangwalk.json

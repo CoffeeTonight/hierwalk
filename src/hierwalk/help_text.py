@@ -526,6 +526,9 @@ Text-conn vs logical-conn (path-walk / suite)
   ``connect_phase: pyslangwalk`` walks hierarchy with pyslang, opening only
   module-index files on the path (same ``grep_hie.json`` module→file map).
   Standalone: ``--check-pyslangwalk BATCH.json``.
+  ``connect_phase: ["hgrep", "pyslangwalk"]`` (preferred array pipeline) or
+  legacy string ``hgrep+pyslangwalk``: cascade — fast hgrep typo gate first,
+  then pyslangwalk only on survivors (recommended workflow).
 
 Path evidence kinds (hops / connect-log)
 ----------------------------------------

@@ -23,6 +23,12 @@ from hierwalk.connect.session import ConnectivityBatchResult, ConnectivitySessio
 from hierwalk.filelist import FilelistResult
 from hierwalk.index import DesignIndex
 from hierwalk.models import ConnectEndpoint, ConnectResult, FlatRow
+from hierwalk.connect.pyslang_electrical import (
+    ElectricalP2PRow,
+    build_electrical_graph,
+    query_a_to_b,
+    write_electrical_report,
+)
 from hierwalk.pyslang_walk import (
     PyslangWalkResult,
     PyslangWalkSession,
@@ -30,6 +36,39 @@ from hierwalk.pyslang_walk import (
 )
 
 LogFn = Optional[Callable[[str], None]]
+
+
+def _modules_from_results(*results: PyslangWalkResult) -> List[str]:
+    mods: List[str] = []
+    seen = set()
+    for res in results:
+        if not res:
+            continue
+        for n in res.nodes or ():
+            for m in (n.module, n.child_module):
+                if m and m not in seen:
+                    seen.add(m)
+                    mods.append(m)
+    return mods
+
+
+def _a_fail_map(
+    specs_a: Sequence[str],
+    res_a: Sequence[PyslangWalkResult],
+) -> Dict[str, Tuple[str, str]]:
+    """Map a-spec → (fail_node, fail_rtl) for hierarchy misses."""
+    out: Dict[str, Tuple[str, str]] = {}
+    for spec, res in zip(specs_a, res_a):
+        if res.ok:
+            continue
+        node = res.fail_segment or spec
+        rtl = ""
+        if res.nodes:
+            rtl = res.nodes[-1].file or ""
+        elif res.scoped_files:
+            rtl = res.scoped_files[-1]
+        out[spec] = (node, rtl)
+    return out
 
 
 def _endpoint_resolve(
@@ -343,9 +382,55 @@ def run_pyslangwalk_connect_batch(
     results: List[ConnectResult] = []
     # Collect hierarchy FlatRows for report/TSV provenance (path_walk state seed).
     gate_rows: Dict[str, FlatRow] = {}
+    electrical_rows: List[ElectricalP2PRow] = []
+    # Cache electrical graphs by frozenset(files) within this batch.
+    elec_cache: Dict[Tuple[str, ...], Any] = {}
+
+    def _run_electrical(
+        *,
+        cid: str,
+        specs_a: Sequence[str],
+        specs_b: Sequence[str],
+        res_a: Sequence[PyslangWalkResult],
+        res_b: Sequence[PyslangWalkResult],
+    ) -> List[ElectricalP2PRow]:
+        mods = _modules_from_results(*res_a, *res_b)
+        files: List[str] = []
+        seen_f: set = set()
+        for m in mods:
+            for f in pw.lookup_module_files(m)[:1]:
+                af = str(Path(f).resolve()) if f else ""
+                if af and af not in seen_f and Path(af).is_file():
+                    seen_f.add(af)
+                    files.append(af)
+        # Always include path-scoped files from resolve.
+        for f in _scoped_files(*res_a, *res_b):
+            af = str(Path(f).resolve()) if f else ""
+            if af and af not in seen_f and Path(af).is_file():
+                seen_f.add(af)
+                files.append(af)
+        key = tuple(sorted(files))
+        if key not in elec_cache:
+            uf, _diags = build_electrical_graph(
+                files,
+                top=top_name,
+                defines=defs,
+                on_log=on_emit,
+            )
+            elec_cache[key] = uf
+        uf = elec_cache[key]
+        return query_a_to_b(
+            uf,
+            check_id=cid,
+            a_specs=specs_a,
+            b_specs=specs_b,
+            a_fail=_a_fail_map(specs_a, res_a),
+        )
 
     for chk in request.checks:
         cid = chk.check_id or ""
+        specs_a = _side_specs(chk.endpoint_a)
+        specs_b = _side_specs(chk.endpoint_b)
         hier_ok, walk_notes, hier_errors, res_a, res_b = _hierarchy_and_gate(
             pw,
             endpoint_a=chk.endpoint_a,
@@ -353,11 +438,37 @@ def run_pyslangwalk_connect_batch(
             top=top_name,
             check_id=cid,
         )
-        n_ep = len(_side_specs(chk.endpoint_a)) + len(_side_specs(chk.endpoint_b))
+        n_ep = len(specs_a) + len(specs_b)
         seed_rows = _merge_rows(*res_a, *res_b)
         seed_scoped = _scoped_files(*res_a, *res_b)
         for row in seed_rows:
             gate_rows.setdefault(row.full_path, row)
+
+        # Structural electrical p2p (always; hierarchy-fail a rows → FAIL).
+        try:
+            electrical_rows.extend(
+                _run_electrical(
+                    cid=cid,
+                    specs_a=specs_a,
+                    specs_b=specs_b,
+                    res_a=res_a,
+                    res_b=res_b,
+                )
+            )
+        except Exception as exc:
+            _log(f"pyslangwalk electrical error check={cid or '-'}: {exc}")
+            for a in specs_a:
+                electrical_rows.append(
+                    ElectricalP2PRow(
+                        check_id=cid,
+                        a=a,
+                        b_slice="",
+                        status="FAIL",
+                        fail_node=a,
+                        fail_rtl="",
+                        note=f"electrical error: {exc}",
+                    )
+                )
 
         if not hier_ok:
             n_fail = len(hier_errors)
@@ -480,8 +591,6 @@ def run_pyslangwalk_connect_batch(
             )
             continue
 
-        specs_a = _side_specs(chk.endpoint_a)
-        specs_b = _side_specs(chk.endpoint_b)
         result = _pair_text(
             pw,
             conn,
@@ -539,6 +648,20 @@ def run_pyslangwalk_connect_batch(
             gate_rows.setdefault(path, row)
 
     batch = ConnectivityBatchResult(results=tuple(results), modules_cached=0)
+
+    # Always write structural electrical report beside the run db.
+    if work is not None:
+        report_path = work / "pyslangwalk.report"
+        try:
+            write_electrical_report(report_path, electrical_rows, top=top_name)
+            n_pass = sum(1 for r in electrical_rows if r.status == "PASS")
+            n_fail = sum(1 for r in electrical_rows if r.status == "FAIL")
+            _log(
+                f"pyslangwalk.report written path={report_path} "
+                f"rows={len(electrical_rows)} pass={n_pass} fail={n_fail}"
+            )
+        except Exception as exc:
+            _log(f"pyslangwalk.report write failed: {exc}")
 
     _log(
         f"connect-pyslangwalk done checks={len(results)} "

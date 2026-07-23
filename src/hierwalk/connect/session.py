@@ -1447,10 +1447,15 @@ def format_connect_result_row(
             f"{b_prov.get('filelist_chain', '')}\t"
             f"text"
         )
-    if phase_label in ("hgrep", "pyslangwalk"):
+    if phase_label in ("hgrep", "pyslangwalk", "hgrep+pyslangwalk"):
         # Hierarchy gate (and pyslangwalk merge rows) — do not force logical COI label.
         gate_ok = bool(result.connected)
-        phase_out = "hgrep" if phase_label == "hgrep" else "pyslangwalk"
+        if phase_label == "hgrep":
+            phase_out = "hgrep"
+        elif phase_label == "hgrep+pyslangwalk":
+            phase_out = "hgrep+pyslangwalk"
+        else:
+            phase_out = "pyslangwalk"
         return (
             f"{result.check_id}\t{result.endpoint_a.spec}\t{result.endpoint_b.spec}\t"
             f"{gate_ok}\t{gate_ok}\t{gate_ok}\t"
