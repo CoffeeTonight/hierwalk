@@ -64,11 +64,35 @@ def _read_text(path: str | Path) -> str:
     return Path(path).read_text(encoding="utf-8", errors="ignore")
 
 
+# Hot path: resolve() hits the filesystem (lstat). Cache aggressively — RTL
+# paths are stable within a process, and uncached resolve dominated hgrep
+# gate cost after handoff/report paths started calling abs_rtl_path heavily.
+_ABS_RTL_PATH_CACHE: Dict[str, str] = {}
+
+
 def abs_rtl_path(path: str | Path) -> str:
-    """Return a resolved absolute RTL path string."""
+    """Return a resolved absolute RTL path string (cached)."""
     if not path:
         return ""
-    return str(Path(path).resolve())
+    key = path if isinstance(path, str) else str(path)
+    hit = _ABS_RTL_PATH_CACHE.get(key)
+    if hit is not None:
+        return hit
+    p = Path(key)
+    # Already absolute and no ``..`` → skip filesystem resolve.
+    if p.is_absolute() and ".." not in p.parts:
+        out = key if isinstance(path, str) and key.startswith("/") else str(p)
+    else:
+        out = str(p.resolve())
+    _ABS_RTL_PATH_CACHE[key] = out
+    # Also cache by output so repeated abs of already-absolute paths hit.
+    _ABS_RTL_PATH_CACHE[out] = out
+    return out
+
+
+def clear_abs_rtl_path_cache() -> None:
+    """Drop path cache (tests / after chdir)."""
+    _ABS_RTL_PATH_CACHE.clear()
 
 
 def normalize_rtl_paths(

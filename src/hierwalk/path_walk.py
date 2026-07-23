@@ -4191,8 +4191,8 @@ def run_path_walk_connect(
                 connect_output_name=connect_output_name,
                 refresh_cache=refresh_cache,
                 on_emit=_emit_hgrep,
-                # filelist path is not always available here; rtl_paths still
-                # invalidate cache via grep_hie_sources_match.
+                # Compile defines for ifdef-accurate inst hops (critical for speed).
+                defines=defines,
             )
             mod_db = PathWalkModuleDb(
                 [],

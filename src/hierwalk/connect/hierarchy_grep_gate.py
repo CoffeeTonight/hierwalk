@@ -266,8 +266,10 @@ def format_hierarchy_grep_gate_report(
         endpoint_b=endpoint_b,
         top=top,
     )
+    # Single-line JSON (no pretty-indent) — large batches used to spend
+    # seconds per check formatting multi-KB indented payloads.
     lines.append("json:")
-    lines.append(json.dumps(payload, indent=2, ensure_ascii=False))
+    lines.append(json.dumps(payload, ensure_ascii=False, separators=(", ", ": ")))
     return "\n".join(lines)
 
 
@@ -306,30 +308,9 @@ def write_hierarchy_grep_gate_report(
             fh.write(f"--- check {check_id or '-'} ---\n")
             fh.write(text)
             fh.write("\n\n")
-    emit_hgrep_gate_log(f"hgrep-gate-report check={check_id or '-'} path={path}")
-    # Stream path-walk handoff JSON beside the human gate report.
-    try:
-        from hierwalk.connect.hgrep_pathwalk_handoff import (
-            check_gate_to_handoff,
-            resolve_pathwalk_handoff_path,
-            upsert_pathwalk_handoff_check,
-        )
-        from hierwalk.connect.shared.request import ConnectivityCheck
-
-        handoff_path = resolve_pathwalk_handoff_path(path)
-        if handoff_path is not None:
-            chk = ConnectivityCheck(
-                str(endpoint_a),
-                str(endpoint_b),
-                check_id=str(check_id or ""),
-            )
-            upsert_pathwalk_handoff_check(
-                handoff_path,
-                check_gate_to_handoff(gate, chk, top=str(top or "")),
-                top=str(top or ""),
-            )
-    except Exception:
-        pass
+    # Note: do NOT upsert pathwalk handoff JSON here. Per-check full-file
+    # rewrite is O(n²) and made large hgrep batches multi× slower. Batch write
+    # once at end of run_hgrep_connect_batch / path-walk pipeline instead.
     return path
 
 
@@ -1415,11 +1396,16 @@ def run_hgrep_connect_batch(
     connect_output_name: str = "conn.tsv",
     refresh_cache: bool = False,
     on_emit: Optional[Any] = None,
+    defines: Optional[Mapping[str, str]] = None,
 ) -> Tuple[Any, DesignIndex]:
     """
     Run hierarchy_grep gate for every check — no path-walk, no connect-coi.
 
     Used when JSON sets ``connect_phase: hgrep``.
+
+    *defines* (or ``request.defines``) must be applied to the session so
+    instance hops use ``ifdef``-filtered bodies. Without defines, all ifdef
+    branches stay active and multi-file fanout becomes dramatically slower.
     """
     from hierwalk.connect.session import ConnectivityBatchResult
 
@@ -1430,9 +1416,14 @@ def run_hgrep_connect_batch(
     if not paths:
         raise ValueError("no RTL sources for connect_phase=hgrep")
 
+    defs = dict(defines or {})
+    if request.defines:
+        defs.update(dict(request.defines))
+
     _emit_hgrep_trace(
         "connect-hgrep begin "
         f"checks={len(request.checks)} sources={len(paths)} "
+        f"defines={len(defs)} "
         "(no path-walk index; grep_hie gate only)",
         on_emit=on_emit,
     )
@@ -1445,6 +1436,8 @@ def run_hgrep_connect_batch(
         refresh_cache=refresh_cache,
         on_emit=on_emit,
     )
+    if defs:
+        session.defines = dict(defs)
     report_path = resolve_hgrep_gate_report_path(
         connect_output_dir=connect_output_dir,
         connect_output_name=connect_output_name,
