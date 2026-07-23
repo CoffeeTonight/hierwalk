@@ -80,13 +80,17 @@ def _emit_hgrep_check_milestones(
     seen[key] = 1
 
 
-def _emit_hgrep_trace(log_line: str, *, on_emit: Optional[Any] = None) -> None:
+def emit_hgrep_trace(log_line: str, *, on_emit: Optional[Any] = None) -> None:
     """stderr (timestamped) plus optional trace hook (log file / tests)."""
     if not log_line:
         return
     emit_hgrep_gate_log(log_line)
     if on_emit is not None:
         on_emit(log_line)
+
+
+# Back-compat alias used by older call sites.
+_emit_hgrep_trace = emit_hgrep_trace
 
 
 def announce_hgrep_gate_report_path(
@@ -174,7 +178,7 @@ def _format_list_field(label: str, raw: Any) -> List[str]:
     """Pretty-print list/concat endpoint display for gate report files."""
     text = str(raw or "").strip()
     listed = parse_list_display_spec(text) if text else None
-    if listed is not None and len(listed) > 1:
+    if listed is not None:
         out = [f"  {label}: list[{len(listed)}]"]
         for i, path in enumerate(listed):
             out.append(f"    [{i}] {path}")

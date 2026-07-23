@@ -412,6 +412,9 @@ def parse_list_display_spec(spec: str) -> Optional[Tuple[str, ...]]:
     """
     Parse a JSON list display string like ``[top.a, top.b]`` into endpoint paths.
 
+    Also accepts accidental Python ``str(list)`` form (``['top.a', 'top.b']``)
+    by stripping matching quotes around each element.
+
     Returns ``None`` when *spec* is a plain scalar path (not bracket-wrapped).
     """
     text = str(spec or "").strip()
@@ -420,8 +423,16 @@ def parse_list_display_spec(spec: str) -> Optional[Tuple[str, ...]]:
     inner = text[1:-1].strip()
     if not inner:
         return ()
-    parts = tuple(part.strip() for part in inner.split(",") if part.strip())
-    return parts if parts else ()
+    parts: List[str] = []
+    for part in inner.split(","):
+        p = part.strip()
+        if not p:
+            continue
+        if len(p) >= 2 and p[0] == p[-1] and p[0] in ("'", '"'):
+            p = p[1:-1].strip()
+        if p:
+            parts.append(p)
+    return tuple(parts) if parts else ()
 
 
 def hierarchy_endpoint_specs(

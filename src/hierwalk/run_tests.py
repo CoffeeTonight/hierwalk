@@ -533,6 +533,9 @@ def run_config_for_test(
         if conn_phase == "hgrep":
             exec_mode = "check-hgrep"
             index_strategy = "hgrep"
+        elif conn_phase == "pyslangwalk":
+            exec_mode = "check-pyslangwalk"
+            index_strategy = "pyslangwalk"
         return replace(
             cfg,
             mode=exec_mode,
@@ -1066,7 +1069,8 @@ def expand_suite_verification_plan(
             continue
         name = run_cfg.verification_step_name or entry.name or f"{entry.kind}[{entry.index}]"
         phase = (run_cfg.verification_phase or "both").strip().lower()
-        if phase == "hgrep":
+        # hierarchy-only gates: keep as a single step (do not split text/logical)
+        if phase in ("hgrep", "pyslangwalk"):
             expanded.append((entry, run_cfg))
             continue
         if phase in ("text", "both"):

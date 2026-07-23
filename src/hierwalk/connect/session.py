@@ -1434,7 +1434,8 @@ def format_connect_result_row(
     )
     text_connected = _connected_text_value(result)
     logical_connected = _connected_logical_value(result)
-    if str(phase).strip().lower() == "text":
+    phase_label = str(phase).strip().lower() or "logical"
+    if phase_label == "text":
         return (
             f"{result.check_id}\t{result.endpoint_a.spec}\t{result.endpoint_b.spec}\t"
             f"{text_connected}\t{result.mode}\t{result.note}\t"
@@ -1445,6 +1446,22 @@ def format_connect_result_row(
             f"{b_prov.get('rtl', '')}\t{b_prov.get('via_filelist', '')}\t"
             f"{b_prov.get('filelist_chain', '')}\t"
             f"text"
+        )
+    if phase_label in ("hgrep", "pyslangwalk"):
+        # Hierarchy gate (and pyslangwalk merge rows) — do not force logical COI label.
+        gate_ok = bool(result.connected)
+        phase_out = "hgrep" if phase_label == "hgrep" else "pyslangwalk"
+        return (
+            f"{result.check_id}\t{result.endpoint_a.spec}\t{result.endpoint_b.spec}\t"
+            f"{gate_ok}\t{gate_ok}\t{gate_ok}\t"
+            f"{result.mode}\t{result.note}\t{logical_notes}\t"
+            f"{err_text}\t"
+            f"{hop_text}\t"
+            f"{a_prov.get('rtl', '')}\t{a_prov.get('via_filelist', '')}\t"
+            f"{a_prov.get('filelist_chain', '')}\t"
+            f"{b_prov.get('rtl', '')}\t{b_prov.get('via_filelist', '')}\t"
+            f"{b_prov.get('filelist_chain', '')}\t"
+            f"{phase_out}"
         )
     return (
         f"{result.check_id}\t{result.endpoint_a.spec}\t{result.endpoint_b.spec}\t"

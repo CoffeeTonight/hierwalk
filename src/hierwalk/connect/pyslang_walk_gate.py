@@ -1,4 +1,9 @@
-"""Batch connectivity: pyslangwalk hierarchy gate, then path-walk text-COI."""
+"""Batch connectivity: pyslangwalk hierarchy gate, then path-walk text-COI.
+
+Hierarchy list endpoints use **AND** semantics (like hgrep): every expanded
+path on side a and side b must resolve. Text-COI (when enabled) still uses
+pair expansion for connectivity after hierarchy passes.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +14,9 @@ from hierwalk.connect.hierarchy_grep_gate import prepare_hierarchy_grep_session
 from hierwalk.connect.shared.expand import (
     build_expand_meta,
     expand_check_to_pairs,
+    hierarchy_endpoint_specs,
     needs_expansion,
+    parse_list_display_spec,
 )
 from hierwalk.connect.shared.request import ConnectivityCheck, ConnectivityRequest
 from hierwalk.connect.session import ConnectivityBatchResult, ConnectivitySession
@@ -50,33 +57,97 @@ def _scoped_files(*results: PyslangWalkResult) -> List[str]:
     return sorted(files)
 
 
-def _hierarchy_fail(
+def _side_specs(raw: object) -> Tuple[str, ...]:
+    """Expand list/concat/scalar display into individual hierarchy paths."""
+    if isinstance(raw, (list, tuple)):
+        return tuple(str(x).strip() for x in raw if str(x).strip())
+    return hierarchy_endpoint_specs(str(raw or ""))
+
+
+def _is_list_display(raw: object) -> bool:
+    """True when the endpoint was authored as a JSON list (or multi-path)."""
+    if isinstance(raw, (list, tuple)):
+        return True
+    return parse_list_display_spec(str(raw or "")) is not None
+
+
+def _resolve_side(
+    pw: PyslangWalkSession,
     *,
-    endpoint_a: str,
-    endpoint_b: str,
-    check_id: str,
-    err_a: str,
-    err_b: str,
-    ok_a: bool,
-    ok_b: bool,
-    sub_id: str = "",
-) -> ConnectResult:
+    side: str,
+    specs: Sequence[str],
+    top: str,
+    list_form: bool = False,
+) -> Tuple[List[PyslangWalkResult], List[str], List[str]]:
+    """
+    Resolve every path on one side (AND).
+
+    Returns (results, walk_notes, errors).
+    List-form endpoints always use ``a[i]`` / ``b[i]`` labels so notes match
+    the ``[path, …]`` display (even for a single-element list).
+    """
+    results: List[PyslangWalkResult] = []
+    notes: List[str] = []
     errors: List[str] = []
-    if not ok_a:
-        errors.append(f"a: {err_a}")
-    if not ok_b:
-        errors.append(f"b: {err_b}")
-    cid = f"{check_id}:{sub_id}" if sub_id and check_id else (sub_id or check_id)
-    return ConnectResult(
-        ConnectEndpoint(endpoint_a, "", "", ""),
-        ConnectEndpoint(endpoint_b, "", "", ""),
-        False,
-        "pyslangwalk",
-        errors=errors,
-        check_id=cid,
-        note=f"pyslangwalk hierarchy-miss a_ok={ok_a} b_ok={ok_b}",
-        connected_text=False,
+    use_index = list_form or len(specs) > 1
+    for i, spec in enumerate(specs):
+        label = f"{side}[{i}]" if use_index else side
+        ok, err, res = _endpoint_resolve(pw, spec, top)
+        results.append(res)
+        if ok:
+            detail = ""
+            if res.nodes:
+                last = res.nodes[-1]
+                if last.kind:
+                    detail = f" hier={res.hierarchy} leaf={last.kind}:{last.segment}"
+                else:
+                    detail = f" hier={res.hierarchy}"
+            notes.append(f"pyslang-ep {label} PASS {spec}{detail}")
+        else:
+            why = (err or res.error or "hierarchy miss").strip()
+            notes.append(f"pyslang-ep {label} FAIL {spec} — {why}")
+            errors.append(f"{label} {spec}: {why}")
+    return results, notes, errors
+
+
+def _hierarchy_and_gate(
+    pw: PyslangWalkSession,
+    *,
+    endpoint_a: object,
+    endpoint_b: object,
+    top: str,
+    check_id: str,
+) -> Tuple[bool, List[str], List[str], List[PyslangWalkResult], List[PyslangWalkResult]]:
+    """AND-resolve all list elements on a and b (hgrep-compatible)."""
+    del check_id
+    specs_a = _side_specs(endpoint_a)
+    specs_b = _side_specs(endpoint_b)
+    if not specs_a or not specs_b:
+        return (
+            False,
+            [],
+            ["empty endpoint a or b"],
+            [],
+            [],
+        )
+    res_a, notes_a, err_a = _resolve_side(
+        pw,
+        side="a",
+        specs=specs_a,
+        top=top,
+        list_form=_is_list_display(endpoint_a),
     )
+    res_b, notes_b, err_b = _resolve_side(
+        pw,
+        side="b",
+        specs=specs_b,
+        top=top,
+        list_form=_is_list_display(endpoint_b),
+    )
+    notes = notes_a + notes_b
+    errors = err_a + err_b
+    ok = not errors and all(r.ok for r in res_a) and all(r.ok for r in res_b)
+    return ok, notes, errors, res_a, res_b
 
 
 def _pair_text(
@@ -90,39 +161,37 @@ def _pair_text(
     sub_id: str = "",
     dedup_cache: Dict,
     dedup_stats: List[int],
-    text_coi: bool,
     state: Any = None,
+    seed_rows: Optional[Sequence[FlatRow]] = None,
+    seed_scoped: Optional[Sequence[str]] = None,
 ) -> ConnectResult:
-    ok_a, err_a, res_a = _endpoint_resolve(pw, endpoint_a, top)
-    ok_b, err_b, res_b = _endpoint_resolve(pw, endpoint_b, top)
-    if not (ok_a and ok_b):
-        return _hierarchy_fail(
-            endpoint_a=endpoint_a,
-            endpoint_b=endpoint_b,
-            check_id=check_id,
-            err_a=err_a,
-            err_b=err_b,
-            ok_a=ok_a,
-            ok_b=ok_b,
-            sub_id=sub_id,
-        )
-
+    """Text-COI for one endpoint pair after hierarchy already passed."""
     cid = f"{check_id}:{sub_id}" if sub_id and check_id else (sub_id or check_id)
-    rows = _merge_rows(res_a, res_b)
-    scoped = _scoped_files(res_a, res_b)
+    rows = list(seed_rows or [])
+    scoped = list(seed_scoped or [])
 
-    if not text_coi:
-        return ConnectResult(
-            ConnectEndpoint(endpoint_a, res_a.hierarchy, "", ""),
-            ConnectEndpoint(endpoint_b, res_b.hierarchy, "", ""),
-            True,
-            "pyslangwalk",
-            errors=[],
-            check_id=cid,
-            note=f"pyslangwalk hierarchy-ok files={len(scoped)}",
-        )
+    if not rows:
+        ok_a, err_a, res_a = _endpoint_resolve(pw, endpoint_a, top)
+        ok_b, err_b, res_b = _endpoint_resolve(pw, endpoint_b, top)
+        if not (ok_a and ok_b):
+            errors: List[str] = []
+            if not ok_a:
+                errors.append(f"a: {err_a}")
+            if not ok_b:
+                errors.append(f"b: {err_b}")
+            return ConnectResult(
+                ConnectEndpoint(endpoint_a, "", "", ""),
+                ConnectEndpoint(endpoint_b, "", "", ""),
+                False,
+                "pyslangwalk",
+                errors=errors,
+                check_id=cid,
+                note=f"pyslangwalk hierarchy-miss a_ok={ok_a} b_ok={ok_b}",
+                connected_text=False,
+            )
+        rows = _merge_rows(res_a, res_b)
+        scoped = _scoped_files(res_a, res_b)
 
-    # Seed path-walk rows from pyslangwalk, then run text-COI.
     if state is not None:
         for row in rows:
             state.rows_by_path[row.full_path] = row
@@ -130,7 +199,6 @@ def _pair_text(
                 state._children_by_parent.setdefault(row.parent_path, set()).add(
                     row.full_path
                 )
-        # Ensure full hierarchy for endpoint specs (fills any gaps)
         try:
             from hierwalk.path_walk import _walk_hierarchy_for_check
             from hierwalk.connect.shared.request import ConnectivityCheck as CC
@@ -146,7 +214,6 @@ def _pair_text(
             pass
 
     chk = ConnectivityCheck(endpoint_a, endpoint_b, check_id=cid)
-    # Prefer scoped RTL; fall back to full sources on miss.
     text_res = conn.text_check_entry(
         chk,
         trace=False,
@@ -200,10 +267,13 @@ def run_pyslangwalk_connect_batch(
     defines: Optional[Dict[str, str]] = None,
     no_cache: bool = False,
     cache_dir: Optional[Path] = None,
-) -> Tuple[ConnectivityBatchResult, DesignIndex]:
+) -> Tuple[ConnectivityBatchResult, DesignIndex, Dict[str, FlatRow]]:
     """
-    1) pyslangwalk hierarchy (module-index + per-path pyslang)
-    2) if both OK and text_coi: path-walk text-COI with DesignIndex when available
+    1) pyslangwalk hierarchy — **AND** all list endpoints (like hgrep)
+    2) if hierarchy OK and text_coi: pair-expand + text-COI
+
+    Returns ``(batch, index, rows_by_path)`` where *rows_by_path* are hierarchy
+    FlatRows useful for report/TSV provenance.
     """
     del connect_output_name
     top_name = (request.top or top or "").strip() or "top"
@@ -211,8 +281,10 @@ def run_pyslangwalk_connect_batch(
     defs = dict(defines or request.defines or {})
 
     def _log(msg: str) -> None:
-        if on_emit is not None:
-            on_emit(msg)
+        # Match hgrep: timestamped stderr + optional on_emit (trace file / progress).
+        from hierwalk.connect.hierarchy_grep_gate import emit_hgrep_trace
+
+        emit_hgrep_trace(msg, on_emit=on_emit)
 
     _log(
         f"connect-pyslangwalk begin checks={len(request.checks)} "
@@ -269,9 +341,71 @@ def run_pyslangwalk_connect_batch(
     dedup_cache: Dict = {}
     dedup_stats = [0, 0]
     results: List[ConnectResult] = []
+    # Collect hierarchy FlatRows for report/TSV provenance (path_walk state seed).
+    gate_rows: Dict[str, FlatRow] = {}
 
     for chk in request.checks:
         cid = chk.check_id or ""
+        hier_ok, walk_notes, hier_errors, res_a, res_b = _hierarchy_and_gate(
+            pw,
+            endpoint_a=chk.endpoint_a,
+            endpoint_b=chk.endpoint_b,
+            top=top_name,
+            check_id=cid,
+        )
+        n_ep = len(_side_specs(chk.endpoint_a)) + len(_side_specs(chk.endpoint_b))
+        seed_rows = _merge_rows(*res_a, *res_b)
+        seed_scoped = _scoped_files(*res_a, *res_b)
+        for row in seed_rows:
+            gate_rows.setdefault(row.full_path, row)
+
+        if not hier_ok:
+            n_fail = len(hier_errors)
+            results.append(
+                ConnectResult(
+                    ConnectEndpoint(str(chk.endpoint_a), "", "", ""),
+                    ConnectEndpoint(str(chk.endpoint_b), "", "", ""),
+                    False,
+                    "pyslangwalk",
+                    errors=tuple(hier_errors[:12]),
+                    check_id=cid,
+                    note=(
+                        f"pyslangwalk hierarchy-miss; "
+                        f"{n_fail}/{n_ep} endpoint(s) fail"
+                    ),
+                    connected_text=False,
+                    walk_notes=walk_notes,
+                )
+            )
+            _log(
+                f"pyslangwalk check={cid or '-'} status=fail mode=pyslangwalk "
+                f"hier_fail={n_fail}/{n_ep}"
+            )
+            continue
+
+        if not text_coi:
+            results.append(
+                ConnectResult(
+                    ConnectEndpoint(str(chk.endpoint_a), "", "", ""),
+                    ConnectEndpoint(str(chk.endpoint_b), "", "", ""),
+                    True,
+                    "pyslangwalk",
+                    errors=[],
+                    check_id=cid,
+                    note=(
+                        f"pyslangwalk hierarchy-ok endpoints={n_ep} "
+                        f"files={len(seed_scoped)}"
+                    ),
+                    walk_notes=walk_notes,
+                )
+            )
+            _log(
+                f"pyslangwalk check={cid or '-'} status=pass mode=pyslangwalk "
+                f"endpoints={n_ep}"
+            )
+            continue
+
+        # Hierarchy OK → text-COI (pair expand for multi-list connectivity)
         expand = chk.expand
         if expand is None:
             auto = build_expand_meta(chk.endpoint_a, chk.endpoint_b)
@@ -297,6 +431,7 @@ def run_pyslangwalk_connect_batch(
                         check_id=cid,
                         note="pyslangwalk expand unsupported",
                         connected_text=False,
+                        walk_notes=walk_notes,
                     )
                 )
                 continue
@@ -311,8 +446,9 @@ def run_pyslangwalk_connect_batch(
                     sub_id=p.sub_id or f"e{i}",
                     dedup_cache=dedup_cache,
                     dedup_stats=dedup_stats,
-                    text_coi=text_coi,
                     state=state,
+                    seed_rows=seed_rows,
+                    seed_scoped=seed_scoped,
                 )
                 for i, p in enumerate(pairs)
             ]
@@ -326,15 +462,16 @@ def run_pyslangwalk_connect_batch(
                     ConnectEndpoint(str(chk.endpoint_a), "", "", ""),
                     ConnectEndpoint(str(chk.endpoint_b), "", "", ""),
                     all_ok,
-                    "pyslangwalk+text" if text_coi else "pyslangwalk",
+                    "pyslangwalk+text",
                     errors=errors[:8],
                     check_id=cid,
                     note=(
-                        f"pyslangwalk expand pairs={len(sub_results)} "
+                        f"pyslangwalk+text expand pairs={len(sub_results)} "
                         f"pass={sum(1 for s in sub_results if s.connected)}"
                     ),
                     sub_results=tuple(sub_results),
-                    connected_text=all_ok if text_coi else None,
+                    connected_text=all_ok,
+                    walk_notes=walk_notes,
                 )
             )
             _log(
@@ -343,17 +480,46 @@ def run_pyslangwalk_connect_batch(
             )
             continue
 
+        specs_a = _side_specs(chk.endpoint_a)
+        specs_b = _side_specs(chk.endpoint_b)
         result = _pair_text(
             pw,
             conn,
-            endpoint_a=str(chk.endpoint_a),
-            endpoint_b=str(chk.endpoint_b),
+            endpoint_a=specs_a[0],
+            endpoint_b=specs_b[0],
             top=top_name,
             check_id=cid,
             dedup_cache=dedup_cache,
             dedup_stats=dedup_stats,
-            text_coi=text_coi,
             state=state,
+            seed_rows=seed_rows,
+            seed_scoped=seed_scoped,
+        )
+        # Keep original display specs on the parent row.
+        result = ConnectResult(
+            ConnectEndpoint(
+                str(chk.endpoint_a),
+                result.endpoint_a.inst_path,
+                result.endpoint_a.port_name,
+                result.endpoint_a.module,
+                result.endpoint_a.port_found,
+            ),
+            ConnectEndpoint(
+                str(chk.endpoint_b),
+                result.endpoint_b.inst_path,
+                result.endpoint_b.port_name,
+                result.endpoint_b.module,
+                result.endpoint_b.port_found,
+            ),
+            result.connected,
+            result.mode,
+            hops=list(result.hops or []),
+            errors=list(result.errors or []),
+            note=result.note,
+            check_id=cid,
+            sub_results=result.sub_results,
+            connected_text=result.connected_text,
+            walk_notes=list(walk_notes) + list(result.walk_notes or []),
         )
         results.append(result)
         _log(
@@ -361,8 +527,21 @@ def run_pyslangwalk_connect_batch(
             f"status={'pass' if result.connected else 'fail'} mode={result.mode}"
         )
 
+    if state is not None:
+        for path, row in gate_rows.items():
+            state.rows_by_path.setdefault(path, row)
+            if row.parent_path:
+                state._children_by_parent.setdefault(row.parent_path, set()).add(
+                    path
+                )
+        index = state.index  # type: ignore[assignment]
+        for path, row in state.rows_by_path.items():
+            gate_rows.setdefault(path, row)
+
+    batch = ConnectivityBatchResult(results=tuple(results), modules_cached=0)
+
     _log(
         f"connect-pyslangwalk done checks={len(results)} "
         f"pass={sum(1 for r in results if r.connected)} text_coi={text_coi}"
     )
-    return ConnectivityBatchResult(results=tuple(results), modules_cached=0), index
+    return batch, index, dict(gate_rows)

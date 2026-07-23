@@ -1072,11 +1072,31 @@ def _fanout_inst_hop_branches(
     role: str,
     kind: Optional[str] = None,
     detail: str = "",
+    body_cache: Optional[Dict[Tuple[str, str], str]] = None,
+    file_cache: Optional[Dict[str, str]] = None,
+    prune_empty: bool = True,
 ) -> List["_Branch"]:
-    """Expand one branch per (child_module, decl_file) for multi-ifdef inst hops."""
+    """
+    Expand one branch per (child_module, decl_file) for multi-ifdef inst hops.
+
+    When *prune_empty* is true (default), empty shell declarations such as
+    ``module zz_scope_B; endmodule`` stubs are dropped so a single real RTL
+    file does not look ambiguous against a decoy.
+    """
     out: List[_Branch] = []
+    cache = body_cache if body_cache is not None else {}
     for child_mod in child_mods:
-        child_files = list(index.get(child_mod, ()))
+        child_files = _child_decl_candidates(
+            child_mod,
+            index,
+            cache,
+            prune_empty=prune_empty,
+            file_cache=file_cache,
+        )
+        if not child_files:
+            # All decls empty or missing — keep raw list so resolve can still fail
+            # with a concrete candidate set rather than "not found".
+            child_files = list(index.get(child_mod, ()))
         if not child_files:
             continue
         for child_file in child_files:
@@ -1515,7 +1535,13 @@ def resolve_hierarchy_grep(
                 if child_mods:
                     next_branches.extend(
                         _fanout_inst_hop_branches(
-                            br, seg, child_mods, index, role="inst"
+                            br,
+                            seg,
+                            child_mods,
+                            index,
+                            role="inst",
+                            body_cache=cache,
+                            file_cache=file_cache,
                         )
                     )
                     continue
@@ -1617,6 +1643,8 @@ def resolve_hierarchy_grep(
                             role="leaf",
                             kind="inst",
                             detail=detail,
+                            body_cache=cache,
+                            file_cache=file_cache,
                         )
                     )
             elif kind is not None:

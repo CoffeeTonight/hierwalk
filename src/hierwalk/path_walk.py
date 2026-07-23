@@ -3850,6 +3850,9 @@ def run_path_walk_connect(
             sources = [str(p) for p in fl.source_files]
 
             def _emit_hgrep(msg: str) -> None:
+                # Suite progress + trace file (stderr already handled by hgrep emit).
+                if on_progress is not None:
+                    on_progress(msg)
                 if trace_log_fh is not None:
                     from hierwalk.hierarchy_log import emit_path_walk_log
 
@@ -3862,8 +3865,10 @@ def run_path_walk_connect(
                 from hierwalk.connect.shared.request import ConnectivityRequest
                 from hierwalk.models import ConnectResult as CR
 
-                # Stage 1: pyslang hierarchy gate (fast, module-index scoped open)
-                hier_batch, _hier_index = run_pyslangwalk_connect_batch(
+                # Stage 1: hierarchy AND only (pyslang-ep notes, fast scoped open).
+                # Stage 2: full path-walk text-COI on survivors (more accurate than
+                # gate-internal scoped text alone — zigzag needs full walk).
+                hier_batch, _hier_index, hier_rows = run_pyslangwalk_connect_batch(
                     request,
                     sources,
                     top=top_name,
@@ -3884,7 +3889,6 @@ def run_path_walk_connect(
                     f"{len(survivors)}/{len(request.checks)} → text-COI"
                 )
 
-                # Stage 2: full path-walk text-COI on hierarchy survivors
                 text_by_id: Dict[str, Any] = {}
                 if survivors:
                     sub_req = ConnectivityRequest(
@@ -3954,17 +3958,51 @@ def run_path_walk_connect(
                         _trace_log=trace_log_fh,
                     )
 
+                for path, row in (hier_rows or {}).items():
+                    if path and path not in state.rows_by_path:
+                        state.rows_by_path[path] = row
+
                 merged: List[Any] = []
                 for chk, hr in zip(request.checks, hier_results):
                     if not hr.connected:
                         merged.append(hr)
-                    elif chk.check_id in text_by_id:
-                        merged.append(text_by_id[chk.check_id])
+                    elif (chk.check_id or "") in text_by_id:
+                        tr = text_by_id[chk.check_id or ""]
+                        hier_notes = list(hr.walk_notes or [])
+                        text_notes = list(tr.walk_notes or [])
+                        merged_notes = hier_notes + [
+                            n for n in text_notes if n not in hier_notes
+                        ]
+                        merged.append(
+                            CR(
+                                tr.endpoint_a,
+                                tr.endpoint_b,
+                                tr.connected,
+                                tr.mode,
+                                hops=list(tr.hops or []),
+                                errors=list(tr.errors or []),
+                                note=tr.note,
+                                check_id=tr.check_id,
+                                sub_results=tr.sub_results,
+                                connected_text=tr.connected_text,
+                                walk_notes=merged_notes,
+                            )
+                        )
                     else:
+                        # Hierarchy ok but missing from text batch (empty id collision)
                         merged.append(hr)
                 batch = ConnectivityBatchResult(
                     results=tuple(merged),
                     modules_cached=0,
+                )
+                n_pass = sum(1 for r in batch.results if r.connected)
+                _emit_hgrep(
+                    f"pyslangwalk done pass={n_pass}/{len(batch.results)} "
+                    f"(hierarchy AND + full text-COI)"
+                )
+                state.stats.checks_run = len(batch.results)
+                state.stats.modules_loaded = len(
+                    {r.module for r in state.rows_by_path.values() if r.module}
                 )
                 return batch, index, state
 
@@ -3976,6 +4014,8 @@ def run_path_walk_connect(
                 connect_output_name=connect_output_name,
                 refresh_cache=refresh_cache,
                 on_emit=_emit_hgrep,
+                # filelist path is not always available here; rtl_paths still
+                # invalidate cache via grep_hie_sources_match.
             )
             mod_db = PathWalkModuleDb(
                 [],
@@ -4026,6 +4066,9 @@ def run_path_walk_connect(
                         signal_tails=state._signal_tail_records,
                         index=index,
                         top=top_name,
+                        # Keep every list-element port/inst row (compact would
+                        # drop sibling paths on multi-endpoint checks).
+                        compact=False,
                     ),
                     encoding="utf-8",
                 )

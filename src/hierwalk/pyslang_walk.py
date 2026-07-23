@@ -137,7 +137,11 @@ class PyslangWalkSession:
                 strip_comments_for_instance_scan(raw),
                 self.defines,
             )
-        tree = pyslang.syntax.SyntaxTree.fromText(text, path=str(path))
+        # pyslang SourceManager rejects reusing the same path string for a
+        # second buffer (e.g. ifdef-filtered vs raw). Key the buffer path by
+        # defines fingerprint when text is rewritten.
+        buffer_path = str(path) if not defs_key else f"{path}#{hash(defs_key) & 0xFFFFFFFF:x}"
+        tree = pyslang.syntax.SyntaxTree.fromText(text, path=buffer_path)
         self._tree_cache[key] = tree
         return tree
 
@@ -296,14 +300,37 @@ class PyslangWalkSession:
             pref = abs_rtl_path(prefer_file)
             files = [pref] + [f for f in files if f != pref]
         want = inst_base_name(seg)
+        multi = len(files) > 1
+        if multi:
+            order = ",".join(Path(f).name for f in files)
+            self._log(
+                f"pyslangwalk module-files module={module} inst={want} "
+                f"candidates={len(files)} order={order}"
+            )
         for fpath in files:
             try:
                 insts = self._instances_in_module(module, fpath)
-            except (OSError, FileNotFoundError):
+            except (OSError, FileNotFoundError) as exc:
+                if multi:
+                    self._log(
+                        f"pyslangwalk try-module module={module} "
+                        f"file={Path(fpath).name} inst={want} skip={exc}"
+                    )
                 continue
             for iname, cmod in insts:
                 if iname == want or iname.lower() == want.lower():
+                    if multi:
+                        self._log(
+                            f"pyslangwalk try-module module={module} "
+                            f"file={Path(fpath).name} inst={want} hit "
+                            f"child={cmod}"
+                        )
                     return cmod, fpath
+            if multi:
+                self._log(
+                    f"pyslangwalk try-module module={module} "
+                    f"file={Path(fpath).name} inst={want} miss"
+                )
         return None
 
     def _leaf_in_module(

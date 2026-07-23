@@ -1009,23 +1009,43 @@ def apply_connect_logical_phase(
                 )
 
 
-def _endpoint_inst_spine(ep: ConnectEndpoint) -> List[str]:
+def _endpoint_inst_spine(
+    ep: ConnectEndpoint,
+    *,
+    rows_by_path: Optional[Mapping[str, FlatRow]] = None,
+) -> List[str]:
     """Instance spine paths; expands ``[a, b]`` display specs into real paths."""
-    # Prefer resolved inst_path so a port tail is not treated as an instance
-    # segment (e.g. top.clk → spine stops at top, not top.clk as inst).
-    if ep.inst_path and (ep.port_found or ep.port_name):
+    listed = hierarchy_endpoint_specs(
+        ep.spec,
+        inst_path=ep.inst_path,
+        port_name=ep.port_name,
+        port_found=ep.port_found,
+    )
+    multi = len(listed) > 1
+    # Single resolved endpoint: prefer inst_path so port tail is not an inst hop.
+    # Multi-list: walk each expanded path (primary inst_path alone drops siblings).
+    if (
+        not multi
+        and ep.inst_path
+        and (ep.port_found or ep.port_name)
+    ):
         specs = (ep.inst_path,)
     else:
-        specs = hierarchy_endpoint_specs(
-            ep.spec,
-            inst_path=ep.inst_path,
-            port_name=ep.port_name,
-            port_found=ep.port_found,
-        )
+        specs = listed
     out: List[str] = []
     seen: set[str] = set()
+    lookup = rows_by_path or {}
     for spec_path in specs:
-        for path in path_spine_prefixes(spec_path):
+        prefixes = list(path_spine_prefixes(spec_path))
+        # If deepest prefix is not an instance row but its parent is, treat
+        # deepest as port/signal (do not claim inst-miss on the leaf).
+        if (
+            len(prefixes) >= 2
+            and prefixes[-1] not in lookup
+            and prefixes[-2] in lookup
+        ):
+            prefixes = prefixes[:-1]
+        for path in prefixes:
             if path in seen:
                 continue
             seen.add(path)
@@ -1502,7 +1522,7 @@ def collect_hierarchy_evidence(
     for result in flat:
         check_id = result.check_id or ""
         for side, ep in (("a", result.endpoint_a), ("b", result.endpoint_b)):
-            for path in _endpoint_inst_spine(ep):
+            for path in _endpoint_inst_spine(ep, rows_by_path=rows_by_path):
                 row = rows_by_path.get(path)
                 _add(
                     check_id,
@@ -1527,10 +1547,15 @@ def collect_hierarchy_evidence(
                     spec_paths = (fallback,)
             for spec_path in spec_paths:
                 signal_ep = ep
-                # List/concat display specs expand to real paths; keep the
-                # already-resolved endpoint when the expanded path matches
-                # (hgrep often has an empty DesignIndex — re-resolve would
-                # wrongly mark a known port as miss and look like "top fail").
+                # List/concat display: each expanded path may differ from the
+                # primary endpoint's inst/port. Prefer rows_by_path (hgrep
+                # FlatRows) over empty DesignIndex re-resolve.
+                parent = ""
+                leaf = ""
+                if "." in spec_path:
+                    parent, leaf = spec_path.rsplit(".", 1)
+                parent_row = rows_by_path.get(parent) if parent else None
+                row_hit = parent_row is not None and leaf
                 expanded_matches_ep = bool(
                     ep.port_found
                     and ep.inst_path
@@ -1543,6 +1568,7 @@ def collect_hierarchy_evidence(
                 if (
                     spec_path != (ep.spec or "").strip()
                     and not expanded_matches_ep
+                    and not (row_hit and index is None)
                     and index is not None
                 ):
                     signal_ep = _resolve_endpoint_for_spec(
@@ -1552,25 +1578,43 @@ def collect_hierarchy_evidence(
                         top=top,
                         rows=list(rows_by_path.values()),
                     )
-                signal_path = (
-                    f"{ep.inst_path}.{ep.port_name}"
-                    if expanded_matches_ep and ep.port_name
-                    else (signal_ep.spec or spec_path)
-                ).strip()
+                if expanded_matches_ep and ep.port_name:
+                    signal_path = f"{ep.inst_path}.{ep.port_name}"
+                    port_ok = True
+                    mod = ep.module
+                elif row_hit and index is None:
+                    # hgrep-style: FlatRows only, no DesignIndex port kinds.
+                    signal_path = spec_path
+                    port_ok = True
+                    mod = parent_row.module if parent_row else ep.module
+                else:
+                    signal_path = (signal_ep.spec or spec_path).strip()
+                    port_ok = bool(signal_ep.port_found) or (
+                        row_hit and bool(signal_ep.port_found or leaf)
+                    )
+                    if row_hit and not signal_ep.port_found:
+                        # Parent inst row exists for expanded list path.
+                        port_ok = True
+                    mod = signal_ep.module or (
+                        parent_row.module if parent_row else ep.module
+                    )
                 if not signal_path:
                     continue
+                kind = _endpoint_signal_kind(
+                    signal_ep,
+                    rows_by_path,
+                    index=index,
+                    top=top,
+                )
+                if row_hit and index is None:
+                    kind = "port"
                 _add(
                     check_id,
                     side,
-                    _endpoint_signal_kind(
-                        signal_ep,
-                        rows_by_path,
-                        index=index,
-                        top=top,
-                    ),
+                    kind,
                     signal_path,
-                    "hit" if signal_ep.port_found else "miss",
-                    signal_ep.module or ep.module,
+                    "hit" if port_ok else "miss",
+                    mod,
                 )
 
     for rec in signal_tails:
@@ -1825,24 +1869,29 @@ def _format_endpoint_spec_lines(side: str, spec: str, *, indent: str = "    ") -
     if not text:
         return []
     listed = parse_list_display_spec(text)
-    if listed is not None and len(listed) > 1:
+    # Always expand list form (including single-element) so display matches
+    # walk_notes labels a[0]/b[0] from hierarchy gates.
+    if listed is not None:
         out = [f"{indent}{side}  list[{len(listed)}]:"]
         for i, path in enumerate(listed):
             out.append(f"{indent}      [{i}] {path}")
         return out
-    if listed is not None and len(listed) == 1:
-        return [f"{indent}{side}  {listed[0]}"]
     return [f"{indent}{side}  {text}"]
 
 
 def _format_hgrep_ep_notes(walk_notes: Sequence[str], *, indent: str = "    ") -> List[str]:
-    """Render ``hgrep-ep a[i] PASS|FAIL path …`` walk notes as a status table."""
+    """Render ``hgrep-ep`` / ``pyslang-ep`` walk notes as a status table."""
     rows: List[Tuple[str, str, str, str]] = []
     for raw in walk_notes or ():
         text = str(raw or "").strip()
-        if not text.startswith("hgrep-ep "):
+        prefix = ""
+        if text.startswith("hgrep-ep "):
+            prefix = "hgrep-ep "
+        elif text.startswith("pyslang-ep "):
+            prefix = "pyslang-ep "
+        else:
             continue
-        rest = text[len("hgrep-ep ") :].strip()
+        rest = text[len(prefix) :].strip()
         # label STATUS path [— reason | detail…]
         parts = rest.split(None, 2)
         if len(parts) < 3:
@@ -1862,8 +1911,8 @@ def _format_hgrep_ep_notes(walk_notes: Sequence[str], *, indent: str = "    ") -
             lines.append(f"{indent}  {label:8} {mark:4}  {path}")
             lines.append(f"{indent}           reason: {reason}")
         else:
-            # drop optional "hier=… port=…" from display path tail for PASS
-            path_only = path.split(" hier=", 1)[0].strip()
+            # drop optional "hier=… port=…" / "leaf=…" from display path
+            path_only = path.split(" hier=", 1)[0].split(" leaf=", 1)[0].strip()
             lines.append(f"{indent}  {label:8} {mark:4}  {path_only}")
     return lines
 
@@ -1886,9 +1935,9 @@ def format_connect_results_report(
     )
 
     phase_label = str(phase).strip().lower() or "logical"
-    # hgrep multi-endpoint: keep parent rows (walk_notes list status). Other
-    # phases flatten expand sub_results as before.
-    if phase_label == "hgrep":
+    # hgrep / pyslangwalk: keep parent rows when present so expand parents
+    # are not only shown as leaf pairs (still flatten pure leaf-only batches).
+    if phase_label in ("hgrep", "pyslangwalk"):
         report_results = list(results)
     else:
         report_results = flatten_connect_results_for_output(results)
@@ -1920,13 +1969,15 @@ def format_connect_results_report(
         hgrep_notes = [
             n
             for n in (result.walk_notes or [])
-            if str(n).startswith("hgrep-ep ")
+            if str(n).startswith("hgrep-ep ") or str(n).startswith("pyslang-ep ")
         ]
         multi_list = bool(hgrep_notes) and (
             "[" in (spec_a or "") or "[" in (spec_b or "") or len(hgrep_notes) > 2
         )
 
-        if multi_list or (phase_label == "hgrep" and hgrep_notes):
+        if multi_list or (
+            phase_label in ("hgrep", "pyslangwalk") and hgrep_notes
+        ):
             header = f"  [{cid}]" if cid else "  [—]"
             lines.append(header)
             lines.extend(_format_endpoint_spec_lines("a", spec_a))
@@ -1960,6 +2011,19 @@ def format_connect_results_report(
         if phase_label == "hgrep":
             gate_ok = bool(result.connected)
             lines.append(f"    hgrep-gate: {'PASS' if gate_ok else 'FAIL'}")
+        elif phase_label == "pyslangwalk":
+            gate_ok = bool(result.connected)
+            mode = (result.mode or "").strip()
+            if mode == "pyslangwalk+text" or (
+                result.connected_text is not None and "text" in mode
+            ):
+                lines.append(
+                    f"    pyslangwalk+text: {'PASS' if gate_ok else 'FAIL'}"
+                )
+            else:
+                lines.append(
+                    f"    pyslangwalk-hierarchy: {'PASS' if gate_ok else 'FAIL'}"
+                )
         elif phase_label == "text":
             coi = "PASS" if text_ok else "FAIL"
             lines.append(f"    coi(text): {coi}")
