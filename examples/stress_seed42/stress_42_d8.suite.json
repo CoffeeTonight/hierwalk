@@ -2,8 +2,7 @@
   "filelist": "filelist.f",
   "top": "stress_top",
   "defines": {
-    "STRESS_USE_IN": "1",
-    "STRESS_ALT": "0"
+    "STRESS_USE_IN": "1"
   },
   "run_on_full_index": {
     "enable": 0,

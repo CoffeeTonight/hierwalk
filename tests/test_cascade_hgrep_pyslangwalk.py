@@ -132,6 +132,209 @@ def test_cascade_skips_pyslangwalk_on_hgrep_miss(tmp_path: Path):
     assert "top.s0" in report or "ok" in report
 
 
+def test_parse_invalid_phase_raises():
+    with pytest.raises(ValueError):
+        parse_connect_phase_value("not-a-phase")
+    with pytest.raises(ValueError):
+        parse_connect_phase_value(["hgrep", "pyslang", "text"])
+
+
+def test_cli_verification_phase_raises_on_garbage():
+    """CLI phase helper must not swallow invalid phases into both."""
+    from hierwalk.cli_execute import _verification_phase
+    from hierwalk.run_request import RunConfig
+
+    cfg = RunConfig(filelist="x.f", verification_phase="not-a-real-phase")
+    with pytest.raises(ValueError):
+        _verification_phase(cfg)
+
+
+def test_skip_hgrep_pregate_does_not_rebuild_grep_session(tmp_path: Path, monkeypatch):
+    """Text pipeline with skip_hgrep_pregate must not prepare_hierarchy_grep_session."""
+    from hierwalk.connect import hierarchy_grep_gate as hgg
+
+    rtl = _write(
+        tmp_path,
+        "top.sv",
+        """
+        module top;
+          logic a, b;
+          assign b = a;
+        endmodule
+        """,
+    )
+    (tmp_path / "filelist.f").write_text("top.sv\n", encoding="utf-8")
+    fl = parse_filelist(str(tmp_path / "filelist.f"), index_cwd=str(tmp_path))
+    req = parse_connect_request_json(
+        {
+            "top": "top",
+            "include_ff": True,
+            "checks": [{"id": "c", "a": "top.a", "b": "top.b"}],
+        }
+    )
+    calls = {"n": 0}
+    real = hgg.prepare_hierarchy_grep_session
+
+    def _count(*a, **k):
+        calls["n"] += 1
+        return real(*a, **k)
+
+    monkeypatch.setattr(hgg, "prepare_hierarchy_grep_session", _count)
+    # Also patch path_walk import site if it binds locally — pipeline imports from gate.
+    import hierwalk.path_walk as pw
+
+    monkeypatch.setattr(
+        "hierwalk.connect.hierarchy_grep_gate.prepare_hierarchy_grep_session",
+        _count,
+    )
+    batch, _, _ = run_path_walk_connect(
+        req,
+        fl,
+        top="top",
+        connect_phase="text",
+        connect_output_dir=tmp_path / "db",
+        no_cache=True,
+        skip_hgrep_pregate=True,
+    )
+    assert batch.results[0].connected
+    assert calls["n"] == 0, f"unexpected prepare_hierarchy calls: {calls['n']}"
+
+
+def test_cascade_merge_by_index_empty_check_ids(tmp_path: Path):
+    """Empty/duplicate check_id must not collapse survivors in cascade merge."""
+    _write(
+        tmp_path,
+        "top.sv",
+        """
+        module top;
+          logic a, b, c, d;
+          assign b = a;
+          assign d = c;
+        endmodule
+        """,
+    )
+    (tmp_path / "filelist.f").write_text("top.sv\n", encoding="utf-8")
+    fl = parse_filelist(str(tmp_path / "filelist.f"), index_cwd=str(tmp_path))
+    req = parse_connect_request_json(
+        {
+            "top": "top",
+            "include_ff": True,
+            "checks": [
+                {"a": "top.a", "b": "top.b"},
+                {"a": "top.c", "b": "top.d"},
+                {"a": "top.NOPE", "b": "top.b"},
+            ],
+        }
+    )
+    # No id fields → all check_id empty
+    assert all(not (c.check_id or "") for c in req.checks)
+    work = tmp_path / "db"
+    batch, _, _ = run_path_walk_connect(
+        req,
+        fl,
+        top="top",
+        connect_phase=["hgrep", "pyslangwalk"],
+        connect_output_dir=work,
+        connect_output_name="conn.tsv",
+        no_cache=True,
+    )
+    assert len(batch.results) == 3
+    # Two survivors must both leave hgrep-only mode (merge by index).
+    modes = [r.mode for r in batch.results]
+    assert modes[2] == "hgrep"
+    assert not batch.results[2].connected
+    assert modes[0].startswith("pyslangwalk") or "pyslangwalk" in (
+        batch.results[0].note or ""
+    )
+    assert modes[1].startswith("pyslangwalk") or "pyslangwalk" in (
+        batch.results[1].note or ""
+    )
+    # Work-dir merged TSV written
+    assert (work / "conn.tsv").is_file() or list(work.rglob("conn.tsv"))
+
+
+def test_hgrep_fallback_note_not_zero_misses():
+    """fallback with ok endpoints must not claim '0/N endpoint(s) miss'."""
+    from hierwalk.connect.hierarchy_grep_gate import (
+        HierarchyGrepCheckGate,
+        HierarchyGrepEndpointGate,
+        connect_result_from_hgrep_gate,
+        hgrep_cascade_should_escalate,
+    )
+    from hierwalk.connect.shared.request import ConnectivityCheck
+
+    eg = HierarchyGrepEndpointGate(
+        spec="top.a",
+        hierarchy_input="top.a",
+        hierarchy="top",
+        port_tail="a",
+        ok=True,
+        ambiguous=True,
+        error="",
+        scoped_files=("x.v",),
+        rows=(),
+    )
+    gate = HierarchyGrepCheckGate(
+        status="fallback",
+        log_line="hgrep-gate check=c status=fallback reason=ambiguous",
+        scoped_files=("x.v",),
+        endpoint_gates=(eg, eg),
+    )
+    chk = ConnectivityCheck("top.a", "top.b", check_id="c")
+    res = connect_result_from_hgrep_gate(chk, gate)
+    assert not res.connected
+    assert "fallback" in (res.note or "")
+    assert "0/" not in (res.note or "") or "endpoints_ok=" in (res.note or "")
+    assert "endpoint(s) miss" not in (res.note or "")
+    assert any(str(n).startswith("hgrep-status fallback") for n in res.walk_notes)
+    assert hgrep_cascade_should_escalate(res)
+
+
+def test_hgrep_reject_does_not_escalate():
+    from hierwalk.connect.hierarchy_grep_gate import (
+        HierarchyGrepCheckGate,
+        HierarchyGrepEndpointGate,
+        connect_result_from_hgrep_gate,
+        hgrep_cascade_should_escalate,
+    )
+    from hierwalk.connect.shared.request import ConnectivityCheck
+
+    eg_bad = HierarchyGrepEndpointGate(
+        spec="top.NOPE",
+        hierarchy_input="top.NOPE",
+        hierarchy="",
+        port_tail="",
+        ok=False,
+        ambiguous=False,
+        error="hierarchy miss",
+        scoped_files=(),
+        rows=(),
+    )
+    eg_ok = HierarchyGrepEndpointGate(
+        spec="top.b",
+        hierarchy_input="top.b",
+        hierarchy="top",
+        port_tail="b",
+        ok=True,
+        ambiguous=False,
+        error="",
+        scoped_files=("x.v",),
+        rows=(),
+    )
+    gate = HierarchyGrepCheckGate(
+        status="reject",
+        log_line="status=reject reason=grep-miss",
+        endpoint_gates=(eg_bad, eg_ok),
+    )
+    res = connect_result_from_hgrep_gate(
+        ConnectivityCheck("top.NOPE", "top.b", check_id="typo"),
+        gate,
+    )
+    assert not res.connected
+    assert "reject" in (res.note or "")
+    assert not hgrep_cascade_should_escalate(res)
+
+
 def test_suite_schedules_cascade_phase(tmp_path: Path):
     from hierwalk.run_tests import (
         build_test_run_configs,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, FrozenSet, List, Mapping, Optional, Sequence, Set, Tuple
@@ -153,13 +154,22 @@ def build_text_grep_index(
     bind_records: Optional[Sequence[object]] = None,
     bind_index: Optional[DesignIndex] = None,
 ) -> TextGrepIndex:
-    """Build grep-only adjacency (no generate-fold, no param dim resolve)."""
+    """
+    Build grep-only adjacency (no param-dim resolve).
+
+    When the body contains ``generate`` / ``genvar`` regions, fold them so
+    continuous nets (e.g. ``assign`` inside ``for (genvar …)``) remain
+    visible to text-COI. Modules without generate keep the cheap path.
+    """
+    from hierwalk.generate_fold import needs_generate_fold
+
+    fold_gen = needs_generate_fold(body)
     mci = build_module_connect_index(
         body,
         param_map=param_map,
         defines=defines,
         over_approximate_if=over_approximate_if,
-        fold_generate=False,
+        fold_generate=fold_gen,
         ff_barrier=ff_barrier,
         resolve_param_dims=False,
         module_body_lookup=module_body_lookup,
@@ -188,6 +198,7 @@ def text_grep_index(
     module_body_cache: Optional[ModuleBodyCache] = None,
     sources: Optional[Sequence[str]] = None,
     on_cache_miss: Optional[Callable[[], None]] = None,
+    on_index_build_ms: Optional[Callable[[float], None]] = None,
 ) -> TextGrepIndex:
     """Cached text grep index (separate from logical ``mod_cache``)."""
     key, _binds = _resolve_module_index_key(
@@ -206,6 +217,7 @@ def text_grep_index(
         hit = cache.get(key)
         if hit is not None:
             return hit
+        t_build = time.perf_counter()
         body = module_body_for_text_grep(
             index,
             mod_name,
@@ -249,8 +261,11 @@ def text_grep_index(
                 bind_index=index,
             )
         cache[key] = built
+        build_ms = (time.perf_counter() - t_build) * 1000.0
         if on_cache_miss is not None:
             on_cache_miss()
+        if on_index_build_ms is not None:
+            on_index_build_ms(build_ms)
         return built
 
 

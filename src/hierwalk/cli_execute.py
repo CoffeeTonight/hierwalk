@@ -77,22 +77,22 @@ from hierwalk.verification_timing import (
 
 
 def _verification_phase(cfg: RunConfig) -> str:
+    """
+    Resolve connect/verification phase.
+
+    Invalid phases raise ``ValueError`` (caller maps to exit 2) — never
+    silently fall through to ``both`` / ``pyslangwalk``.
+    """
     from hierwalk.run_request import parse_connect_phase_value
 
     if cfg.check_hgrep:
         return "hgrep"
     if cfg.check_pyslangwalk:
         # Allow cascade when JSON set verification_phase to hgrep+pyslangwalk.
-        try:
-            return parse_connect_phase_value(
-                cfg.verification_phase or "pyslangwalk"
-            )
-        except ValueError:
-            return "pyslangwalk"
-    try:
-        return parse_connect_phase_value(cfg.verification_phase or "both")
-    except ValueError:
-        return "both"
+        return parse_connect_phase_value(
+            cfg.verification_phase or "pyslangwalk"
+        )
+    return parse_connect_phase_value(cfg.verification_phase or "both")
 
 
 def _fail_if_missing_verification_artifacts(
@@ -249,7 +249,11 @@ def execute_run(cfg: RunConfig, ap) -> int:
 
     log_path: Path | None = None
     if not cfg.no_log_file:
-        phase_for_log = _verification_phase(cfg)
+        try:
+            phase_for_log = _verification_phase(cfg)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
         log_phase = phase_for_log if phase_for_log in ("text", "logical") else ""
         log_path = (
             phase_log_path(Path(cfg.log_file), phase=log_phase)
@@ -513,7 +517,11 @@ def execute_run(cfg: RunConfig, ap) -> int:
                         strict_generate=connect_request.strict_generate,
                         over_approximate_if=connect_request.over_approximate_if,
                     )
-            phase = _verification_phase(cfg)
+            try:
+                phase = _verification_phase(cfg)
+            except ValueError as exc:
+                print(str(exc), file=sys.stderr)
+                return 2
             do_hgrep = phase == "hgrep"
             do_pyslangwalk = phase == "pyslangwalk"
             do_cascade = phase == "hgrep+pyslangwalk"
@@ -597,9 +605,9 @@ def execute_run(cfg: RunConfig, ap) -> int:
                 trace_title = "connectivity path evidence"
             if cfg.output == "-":
                 sys.stdout.write(body)
-            elif do_hgrep and cfg.output:
+            elif cfg.output and (do_hgrep or do_cascade or do_pyslangwalk):
                 # path-walk text/logical write under work_dir via require_*;
-                # hgrep also mirrors the configured output path when set.
+                # hgrep / cascade / pyslangwalk also mirror configured -o path.
                 out_file = Path(cfg.output)
                 out_file.parent.mkdir(parents=True, exist_ok=True)
                 out_file.write_text(body, encoding="utf-8")
@@ -658,7 +666,9 @@ def execute_run(cfg: RunConfig, ap) -> int:
                     mode="path-walk",
                     output_path=(
                         str(cfg.output)
-                        if do_hgrep and cfg.output != "-"
+                        if (do_hgrep or do_cascade or do_pyslangwalk)
+                        and cfg.output
+                        and cfg.output != "-"
                         else str(
                             conn_paths.logical_tsv
                             if do_logical
@@ -1110,6 +1120,10 @@ def execute_run(cfg: RunConfig, ap) -> int:
         else:
             with open(cfg.output, "w", encoding="utf-8") as f:
                 f.write(body)
+        try:
+            report_phase = _verification_phase(cfg)
+        except ValueError:
+            report_phase = "logical"
         emit_run_report(
             RunReport(
                 filelist_path=cfg.filelist,
@@ -1130,8 +1144,8 @@ def execute_run(cfg: RunConfig, ap) -> int:
                 coverage=coverage,
                 connect_results=connect_results,
                 connect_phase=(
-                    _verification_phase(cfg)
-                    if _verification_phase(cfg) in ("text", "logical", "both")
+                    report_phase
+                    if report_phase in ("text", "logical", "both")
                     else "logical"
                 ),
             ),

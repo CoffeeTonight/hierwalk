@@ -1,8 +1,7 @@
 {
   "top": "stress_top",
   "defines": {
-    "STRESS_USE_IN": "1",
-    "STRESS_ALT": "0"
+    "STRESS_USE_IN": "1"
   },
   "include_ff": true,
   "connect_trace": false,

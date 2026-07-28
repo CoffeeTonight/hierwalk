@@ -1166,13 +1166,19 @@ def text_check_from_gate(
     dedup_stats: List[int],
     dedup_lock: Optional[threading.Lock] = None,
     state: Optional["PathWalkState"] = None,
+    timing_out: Optional[Dict[str, float]] = None,
 ) -> Optional[ConnectResult]:
     """
     Tier0 gate orchestration for one text-conn check.
 
     ``reject`` → fast-fail; ``pass`` → inst-chain seed + text COI;
     ``fallback`` → ``None`` (caller runs full scoped path-walk).
+
+    When *timing_out* is provided, fills ``seed_ms`` / ``index_ms`` / ``walk_ms``
+    (milliseconds) for the COI half of the check (not pregate).
     """
+    import time
+
     if gate.fast_fail_result is not None:
         return gate.fast_fail_result
     if not gate.use_grep_fast_path:
@@ -1187,12 +1193,18 @@ def text_check_from_gate(
         conn_session.sources or (),
         index=conn_session.index,
     )
+    t_seed = time.perf_counter()
     seeded_rows = seed_gate_inst_chain(
         state,
         gate,
         scoped_sources=scoped_sources,
     )
+    seed_ms = (time.perf_counter() - t_seed) * 1000.0
     worker_elab = ElabIndex.from_rows(list(seeded_rows))
+    wc = getattr(conn_session, "text_walk_caches", None)
+    index_before = float(getattr(wc, "index_build_ms", 0.0) or 0.0)
+    miss_before = int(getattr(wc, "grep_cache_miss", 0) or 0)
+    t_coi = time.perf_counter()
     result = conn_session.text_check_entry(
         chk,
         trace=trace,
@@ -1204,6 +1216,19 @@ def text_check_from_gate(
         hgrep_gate_rows=seeded_rows,
         hgrep_scoped_sources=scoped_sources,
     )
+    coi_ms = (time.perf_counter() - t_coi) * 1000.0
+    index_ms = float(getattr(wc, "index_build_ms", 0.0) or 0.0) - index_before
+    if index_ms < 0:
+        index_ms = 0.0
+    walk_ms = max(0.0, coi_ms - index_ms)
+    if timing_out is not None:
+        timing_out["seed_ms"] = seed_ms
+        timing_out["index_ms"] = index_ms
+        timing_out["walk_ms"] = walk_ms
+        timing_out["coi_ms"] = seed_ms + coi_ms
+        timing_out["index_miss"] = float(
+            int(getattr(wc, "grep_cache_miss", 0) or 0) - miss_before
+        )
     return result
 
 
@@ -1311,6 +1336,36 @@ def _hgrep_endpoint_status_lines(
     return notes, errors, subs
 
 
+def _hgrep_gate_reason(gate: HierarchyGrepCheckGate) -> str:
+    """Extract ``reason=…`` from gate log line when present."""
+    line = (gate.log_line or "").strip()
+    if "reason=" in line:
+        return line.split("reason=", 1)[1].split()[0].strip()
+    return ""
+
+
+def hgrep_cascade_should_escalate(result: ConnectResult) -> bool:
+    """
+    Whether cascade should send this hgrep row to pyslangwalk.
+
+    *pass* (connected) always escalates.
+    *fallback* (grepy-inconclusive) escalates for fine hierarchy/COI.
+    *reject* (true hierarchy miss / typo) stays final hgrep fail.
+    """
+    if result.connected:
+        return True
+    for raw in result.walk_notes or ():
+        note = str(raw)
+        if note.startswith("hgrep-status fallback"):
+            return True
+        if note.startswith("hgrep-status reject"):
+            return False
+    text = result.note or ""
+    if "hgrep-gate fallback" in text:
+        return True
+    return False
+
+
 def connect_result_from_hgrep_gate(
     chk: ConnectivityCheck,
     gate: HierarchyGrepCheckGate,
@@ -1319,7 +1374,6 @@ def connect_result_from_hgrep_gate(
     gates_a, gates_b = _split_endpoint_gates(chk, gate.endpoint_gates or ())
     notes_a, errs_a, subs_a = _hgrep_endpoint_status_lines("a", gates_a)
     notes_b, errs_b, subs_b = _hgrep_endpoint_status_lines("b", gates_b)
-    walk_notes = notes_a + notes_b
     all_errs = errs_a + errs_b
 
     # Parent endpoints keep display form (list brackets); provenance from
@@ -1350,25 +1404,47 @@ def connect_result_from_hgrep_gate(
             port_found=ep_b.port_found,
         )
 
-    ok = gate.status == "pass" and not all_errs
+    status = (gate.status or "").strip().lower()
+    if status not in ("pass", "fallback", "reject"):
+        status = "reject"
     if gate.fast_fail_result is not None and gate.fast_fail_result.errors:
         # Prefer concrete miss messages collected above; fall back to ff.
         if not all_errs:
             all_errs = list(gate.fast_fail_result.errors)
 
+    # pass requires every endpoint ok; otherwise demote to reject when endpoints miss.
+    if status == "pass" and all_errs:
+        status = "reject"
+    ok = status == "pass" and not all_errs
+    if status == "pass" and not ok:
+        status = "reject"
+
     n_fail = sum(1 for g in (*gates_a, *gates_b) if not g.ok)
     n_total = len(gates_a) + len(gates_b)
-    if ok:
+    n_ok = n_total - n_fail
+    reason = _hgrep_gate_reason(gate)
+    if status == "pass" and ok:
         note = (
             f"hgrep-gate pass; endpoints={n_total}; "
             f"scoped_files={len(gate.scoped_files)}; "
             f"fast_path={gate.use_grep_fast_path}"
         )
-    else:
+    elif status == "fallback":
+        why = reason or "inconclusive"
         note = (
-            f"hgrep-gate fail; {n_fail}/{n_total} endpoint(s) miss; "
+            f"hgrep-gate fallback; reason={why}; "
+            f"endpoints_ok={n_ok}/{n_total}; "
             f"scoped_files={len(gate.scoped_files)}"
         )
+    else:
+        note = (
+            f"hgrep-gate reject; {n_fail}/{n_total} endpoint(s) miss; "
+            f"scoped_files={len(gate.scoped_files)}"
+        )
+        if reason:
+            note = f"{note}; reason={reason}"
+
+    walk_notes = [f"hgrep-status {status}"] + notes_a + notes_b
 
     # Per-endpoint detail lives in walk_notes / errors (human report). Avoid
     # sub_results self-pairs that would pollute flattened TSV as fake a→a rows.
@@ -1498,8 +1574,12 @@ def run_hgrep_connect_batch(
                 path=handoff_path,
                 extra={
                     "grep_hie": str(
-                        getattr(session, "cache_key", None)
-                        or (connect_output_dir / "grep_hie.json" if connect_output_dir else "")
+                        getattr(session, "file_grep_index_path", None)
+                        or (
+                            connect_output_dir / "grep_hie.json"
+                            if connect_output_dir
+                            else ""
+                        )
                     )
                 },
             )

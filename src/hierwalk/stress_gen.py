@@ -1126,7 +1126,10 @@ def _generate_linear(
     )
     top_name = "stress_top"
     spine = _spine_hier(top_name, depth)
-    defines = {"STRESS_USE_IN": "1", "STRESS_ALT": "0"}
+    # Do NOT define STRESS_ALT at all when the alternate (tie-off) branch
+    # should be inactive: `` `ifdef STRESS_ALT `` is true for any definition,
+    # including the value "0" — that used to break the probe chain at spine_8.
+    defines = {"STRESS_USE_IN": "1"}
     return StressDesign(
         verilog=single,
         files=files,
@@ -1210,7 +1213,8 @@ def _generate_zigzag(
     inst_b = f"{top_name}.u_rung{last_rung}.u_pong"
     cross_b = f"{top_name}.u_rung{mid_rung}.u_pong.probe_out"
 
-    defines = {"STRESS_USE_IN": "1", "STRESS_ALT": "0"}
+    # See linear layout: omit STRESS_ALT so `` `ifdef STRESS_ALT `` is false.
+    defines = {"STRESS_USE_IN": "1"}
     return StressDesign(
         verilog=single,
         files=files,

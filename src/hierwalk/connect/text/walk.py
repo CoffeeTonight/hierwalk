@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Dict, FrozenSet, List, Mapping, Optional, Sequence, Set, Tuple
 
@@ -242,6 +243,8 @@ class TextWalkSessionCaches:
     expand_calls: int = 0
     equiv_linear_scans: int = 0
     grep_cache_miss: int = 0
+    # Cumulative ms spent building text-grep module indexes (cache misses).
+    index_build_ms: float = 0.0
     rep_adj_capped: int = 0
     walk_verdict_hits: int = 0
     goal_rep_shortcuts: int = 0
@@ -427,6 +430,10 @@ def _build_search_ctx(
             if wc_goal is not None:
                 wc_goal.grep_cache_miss += 1
 
+        def _on_goal_index_ms(ms: float) -> None:
+            if wc_goal is not None:
+                wc_goal.index_build_ms += ms
+
         gidx = text_grep_index(
             grep_cache,
             index,
@@ -438,6 +445,7 @@ def _build_search_ctx(
             module_body_cache=module_body_cache,
             sources=sources,
             on_cache_miss=_on_goal_grep_miss if wc_goal is not None else None,
+            on_index_build_ms=_on_goal_index_ms if wc_goal is not None else None,
         )
         goal_rep = text_net_representative(gidx, goal_net)
     wc = walk_caches
@@ -579,6 +587,7 @@ def _cached_child_text_grep_index(
     hit = ctx.child_text_idx_cache.get(key)
     if hit is not None:
         return hit
+    t0 = time.perf_counter()
     built = build_text_grep_index(
         child_body,
         param_map=param_map,
@@ -586,6 +595,9 @@ def _cached_child_text_grep_index(
         over_approximate_if=ctx.over_approximate_if,
         ff_barrier=ctx.ff_barrier,
     )
+    if ctx.walk_caches is not None:
+        ctx.walk_caches.index_build_ms += (time.perf_counter() - t0) * 1000.0
+        ctx.walk_caches.grep_cache_miss += 1
     ctx.child_text_idx_cache[key] = built
     return built
 
@@ -604,6 +616,10 @@ def _mod_idx_for_scope(ctx: _SearchCtx, scope: str) -> Optional[TextGrepIndex]:
         if wc is not None:
             wc.grep_cache_miss += 1
 
+    def _on_index_ms(ms: float) -> None:
+        if wc is not None:
+            wc.index_build_ms += ms
+
     built = text_grep_index(
         ctx.grep_cache,
         ctx.index,
@@ -615,6 +631,7 @@ def _mod_idx_for_scope(ctx: _SearchCtx, scope: str) -> Optional[TextGrepIndex]:
         module_body_cache=ctx.module_body_cache,
         sources=ctx.sources,
         on_cache_miss=_on_grep_miss if wc is not None else None,
+        on_index_build_ms=_on_index_ms if wc is not None else None,
     )
     ctx.scope_mod_idx[scope] = built
     return built
@@ -1063,6 +1080,9 @@ def _net_rep_at_scope(
     def _on_grep_miss() -> None:
         walk_caches.grep_cache_miss += 1
 
+    def _on_index_ms(ms: float) -> None:
+        walk_caches.index_build_ms += ms
+
     mod_idx = walk_caches.scope_mod_idx.get(scope)
     if mod_idx is None:
         mod_idx = text_grep_index(
@@ -1076,6 +1096,7 @@ def _net_rep_at_scope(
             module_body_cache=module_body_cache,
             sources=sources,
             on_cache_miss=_on_grep_miss,
+            on_index_build_ms=_on_index_ms,
         )
         walk_caches.scope_mod_idx[scope] = mod_idx
     return _cached_net_rep(mod_idx, net, walk_caches.net_rep_cache)

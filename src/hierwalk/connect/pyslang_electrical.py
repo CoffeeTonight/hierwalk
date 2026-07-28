@@ -320,10 +320,10 @@ def build_electrical_graph(
     """
     Compile *rtl_files* and return (union-find graph, diagnostics messages).
 
-    *defines* is applied only as a note today; callers should pre-filter ifdef
-    text when needed (hierarchy session already path-scopes files).
+    When *defines* is set, apply the same ifdef filter as ``PyslangWalkSession``
+    so electrical connectivity agrees with hierarchy under compile macros.
     """
-    del defines  # compilation uses file text as-is; ifdef filter is pre-step if needed
+    defs = dict(defines or {})
     ast, syntax = _require_pyslang()
     uf = _UF()
     diags: List[str] = []
@@ -332,19 +332,41 @@ def build_electrical_graph(
         return uf, ["no rtl files for electrical compile"]
 
     if on_log:
-        on_log(f"pyslang-electrical compile files={len(files)} top={top or '-'}")
+        on_log(
+            f"pyslang-electrical compile files={len(files)} "
+            f"top={top or '-'} defines={len(defs)}"
+        )
 
+    ifdef_fn = None
+    strip_fn = None
+    if defs:
+        from hierwalk.preprocess import (
+            apply_ifdef_filter,
+            strip_comments_for_instance_scan,
+        )
+
+        ifdef_fn = apply_ifdef_filter
+        strip_fn = strip_comments_for_instance_scan
+
+    defs_key = ",".join(f"{k}={v}" for k, v in sorted(defs.items()))
     comp = ast.Compilation()
     trees_ok = 0
     for fpath in files:
         try:
-            text = Path(fpath).read_text(encoding="utf-8", errors="ignore")
+            raw = Path(fpath).read_text(encoding="utf-8", errors="ignore")
         except OSError as exc:
             diags.append(f"read fail {fpath}: {exc}")
             continue
+        text = raw
+        if ifdef_fn is not None and strip_fn is not None:
+            text = ifdef_fn(strip_fn(raw), defs)
         # Globally unique buffer path (counter) — same fpath#elec-0 twice in one
         # process used to yield empty Compilation (nets≈0) after the first call.
-        buffer_path = f"{fpath}#pyslang-electrical-{next(_BUFFER_SEQ)}"
+        # Include define fingerprint so filtered vs raw buffers never collide.
+        buffer_path = (
+            f"{fpath}#pyslang-electrical-{next(_BUFFER_SEQ)}"
+            + (f"#{hash(defs_key) & 0xFFFFFFFF:x}" if defs_key else "")
+        )
         try:
             tree = syntax.SyntaxTree.fromText(text, path=buffer_path)
             comp.addSyntaxTree(tree)

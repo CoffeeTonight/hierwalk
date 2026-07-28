@@ -2,9 +2,8 @@
   "filelist": "filelist.f",
   "top": "stress_top",
   "defines": {
-    "STRESS_USE_IN": "1",
-    "STRESS_ALT": "0"
-  },
+    "STRESS_USE_IN": "1"
+    },
 
   // Runnable: run_conn_check only (path-walk). / 실행: path-walk 연결 검사만.
   //   hier-walk flat_run_example.json

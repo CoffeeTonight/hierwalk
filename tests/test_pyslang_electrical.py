@@ -80,6 +80,46 @@ def test_electrical_second_compile_in_process_not_empty(tmp_path: Path):
     assert rows[0].b_slice == "top.bus[0]"
 
 
+def test_electrical_ifdef_defines_filter(tmp_path: Path):
+    """Electrical compile must honor defines like hierarchy walk (ifdef)."""
+    rtl = _write(
+        tmp_path,
+        "top.sv",
+        """
+        module top;
+          logic a, b, c;
+`ifdef USE_AB
+          assign b = a;
+`else
+          assign c = a;
+`endif
+        endmodule
+        """,
+    )
+    uf_ab, _ = build_electrical_graph(
+        [rtl], top="top", defines={"USE_AB": "1"}
+    )
+    rows_ab = query_a_to_b(
+        uf_ab, check_id="ab", a_specs=["top.a"], b_specs=["top.b"]
+    )
+    assert rows_ab[0].status == "PASS"
+    rows_ac = query_a_to_b(
+        uf_ab, check_id="ac", a_specs=["top.a"], b_specs=["top.c"]
+    )
+    # With USE_AB, only a→b is active; a→c should not pass electrically.
+    assert rows_ac[0].status != "PASS"
+
+    uf_else, _ = build_electrical_graph([rtl], top="top", defines={})
+    rows_else_b = query_a_to_b(
+        uf_else, check_id="eb", a_specs=["top.a"], b_specs=["top.b"]
+    )
+    rows_else_c = query_a_to_b(
+        uf_else, check_id="ec", a_specs=["top.a"], b_specs=["top.c"]
+    )
+    assert rows_else_b[0].status != "PASS"
+    assert rows_else_c[0].status == "PASS"
+
+
 def test_electrical_parameter_index_idx(tmp_path: Path):
     """``bus[IDX]`` / ``bus[N-1]`` fold via pyslang parameter elaboration."""
     rtl = _write(

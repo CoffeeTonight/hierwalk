@@ -1132,6 +1132,7 @@ class ConnectivitySession:
                 f"expand={wc.expand_calls} "
                 f"equiv_scans={wc.equiv_linear_scans} "
                 f"grep_miss={wc.grep_cache_miss} "
+                f"index_build_ms={wc.index_build_ms:.1f} "
                 f"rep_adj_capped={wc.rep_adj_capped} "
                 f"verdict_hits={wc.walk_verdict_hits} "
                 f"goal_shortcut={wc.goal_rep_shortcuts} "
@@ -1177,6 +1178,9 @@ class ConnectivitySession:
         def _on_grep_miss() -> None:
             wc.grep_cache_miss += 1
 
+        def _on_index_ms(ms: float) -> None:
+            wc.index_build_ms += ms
+
         idx = text_grep_index(
             self.text_grep_cache,
             self.index,
@@ -1188,6 +1192,7 @@ class ConnectivitySession:
             module_body_cache=self.module_body_cache,
             sources=self.sources,
             on_cache_miss=_on_grep_miss,
+            on_index_build_ms=_on_index_ms,
         )
         wc.scope_mod_idx[inst_path] = idx
         return True
