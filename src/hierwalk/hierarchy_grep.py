@@ -1522,24 +1522,38 @@ def resolve_hierarchy_grep(
             hierarchy_input=hierarchy_input,
         )
 
-    top_candidates = index[top_name]
+    # Multi-file top: same pattern as hop fanout — prune empty stubs, then
+    # one root branch per remaining decl file (not only index[top][0]).
+    top_candidates = list(index[top_name])
     root_start = time.perf_counter()
-    root_node = {
-        "segment": top_name,
-        "role": "root",
-        "module": top_name,
-        "file": top_candidates[0],
-        "hit_file": top_candidates[0],
-        "found": True,
-        "elapsed_ms": _elapsed_ms(root_start),
-    }
-    branches = [
-        _Branch(
-            mod=top_name,
-            parent_file=top_candidates[0],
-            nodes=[root_node],
+    top_files = _child_decl_candidates(
+        top_name,
+        index,
+        cache,
+        prune_empty=True,
+        file_cache=file_cache,
+    )
+    if not top_files:
+        top_files = top_candidates
+    root_ms = _elapsed_ms(root_start)
+    branches = []
+    for top_file in top_files:
+        root_node = {
+            "segment": top_name,
+            "role": "root",
+            "module": top_name,
+            "file": top_file,
+            "hit_file": top_file,
+            "found": True,
+            "elapsed_ms": root_ms,
+        }
+        branches.append(
+            _Branch(
+                mod=top_name,
+                parent_file=top_file,
+                nodes=[root_node],
+            )
         )
-    ]
 
     err = ""
     failed = False

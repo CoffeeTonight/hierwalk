@@ -975,12 +975,19 @@ def gate_connect_check(
     hard_fail_on_miss: bool = False,
     report_path: Optional[str | Path] = None,
     module_body_cache: Optional[Mapping[str, str]] = None,
+    hgrep_only: bool = False,
 ) -> HierarchyGrepCheckGate:
     """
     Tier0 gate for one connect check.
 
     ``pass`` when every endpoint spec resolves cleanly (non-ambiguous).
     ``fallback`` triggers path-walk when grep is inconclusive.
+
+    *hgrep_only*: pure ``connect_phase=hgrep`` existence gate. When True:
+    multi-file / ambiguous resolve is still a **pass** (hierarchy exists), and
+    ``_inst_endpoints_need_walk`` is skipped (that check needs a filled
+    ``DesignIndex``; pure hgrep uses ``DesignIndex({})`` and would false-fallback).
+    Text-conn pregate keeps the default *hgrep_only=False*.
     """
     def _finish(gate: HierarchyGrepCheckGate) -> HierarchyGrepCheckGate:
         if report_path is not None:
@@ -1092,19 +1099,37 @@ def gate_connect_check(
             )
         )
 
-    if any(g.ambiguous for g in gates):
+    merged = _merge_rows(row_groups)
+    amb = any(g.ambiguous for g in gates)
+
+    # Pure hgrep: multi-file / ambiguous means "exists on >1 branch", not miss.
+    # Text pregate still escalates to path-walk on ambiguous.
+    if amb and not hgrep_only:
         return _finish(
             HierarchyGrepCheckGate(
                 status="fallback",
                 log_line=" ".join(parts) + " status=fallback reason=ambiguous",
                 scoped_files=tuple(sorted(scoped)),
-                rows=_merge_rows(row_groups),
+                rows=merged,
                 endpoint_gates=gates,
             )
         )
 
-    merged = _merge_rows(row_groups)
     if not merged:
+        if hgrep_only and all(g.ok for g in gates):
+            # Resolve reported ok without FlatRows — still existence pass.
+            return _finish(
+                HierarchyGrepCheckGate(
+                    status="pass",
+                    log_line=(
+                        " ".join(parts)
+                        + f" status=pass scoped_files={len(scoped)}"
+                        + (" multi_file=1" if amb else "")
+                    ),
+                    scoped_files=tuple(sorted(scoped)),
+                    endpoint_gates=gates,
+                )
+            )
         return _finish(
             HierarchyGrepCheckGate(
                 status="fallback",
@@ -1114,7 +1139,9 @@ def gate_connect_check(
             )
         )
 
-    if _inst_endpoints_need_walk(
+    # inst-coverage needs DesignIndex elab; pure hgrep uses empty index and
+    # would almost always false-trigger fallback. Skip when hgrep_only.
+    if not hgrep_only and _inst_endpoints_need_walk(
         gates,
         merged,
         index=index,
@@ -1134,7 +1161,11 @@ def gate_connect_check(
     return _finish(
         HierarchyGrepCheckGate(
             status="pass",
-            log_line=" ".join(parts) + f" status=pass scoped_files={len(scoped)}",
+            log_line=(
+                " ".join(parts)
+                + f" status=pass scoped_files={len(scoped)}"
+                + (" multi_file=1" if amb else "")
+            ),
             scoped_files=tuple(sorted(scoped)),
             rows=merged,
             endpoint_gates=gates,
@@ -1554,6 +1585,8 @@ def run_hgrep_connect_batch(
             index=index,
             report_path=report_path,
             module_body_cache=module_body_cache,
+            # Pure hgrep existence gate — not text-conn pregate escalate.
+            hgrep_only=True,
         )
         gates.append(gate)
         for row in gate.rows or ():
