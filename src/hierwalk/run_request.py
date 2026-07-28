@@ -313,6 +313,52 @@ def parse_connect_phase_value(raw: Any) -> str:
     )
 
 
+_CONNECT_PHASE_KEYS = (
+    "connect_phase",
+    "connect-phase",
+    "verification_phase",
+    "verification-phase",
+    "phase",
+)
+
+
+def _raw_connect_phase_from_mapping(data: Mapping[str, Any]) -> Any:
+    """Return raw phase value from a mapping, or None if unset."""
+    for key in _CONNECT_PHASE_KEYS:
+        hit = _mapping_get_ci(data, key)
+        if hit is None:
+            continue
+        # Lists like ["hgrep"] are valid; avoid str(list) truthiness quirks.
+        if isinstance(hit, (list, tuple)):
+            if any(str(x).strip() for x in hit):
+                return hit
+            continue
+        if str(hit).strip():
+            return hit
+    return None
+
+
+def extract_connect_phase_from_document(data: Mapping[str, Any]) -> Optional[str]:
+    """
+    Resolve connect/verification phase from a run or batch JSON object.
+
+    Looks at top-level first, then nested ``connect`` / ``check_connect_batch``
+    objects (common user layout with ``mode: path-walk`` + ``connect: {...}``).
+    Returns the canonical phase string, or None if not specified.
+    """
+    raw = _raw_connect_phase_from_mapping(data)
+    if raw is None:
+        for nest_key in ("connect", "check_connect_batch", "check-connect-batch"):
+            nested = _mapping_get_ci(data, nest_key)
+            if isinstance(nested, Mapping):
+                raw = _raw_connect_phase_from_mapping(nested)
+                if raw is not None:
+                    break
+    if raw is None:
+        return None
+    return parse_connect_phase_value(raw)
+
+
 def _resolve_path(base: Path, value: Optional[str]) -> Optional[str]:
     if value is None or value == "-":
         return value
@@ -817,6 +863,10 @@ def parse_run_request_json(
             or None
         )
 
+    # Critical: without this, connect_phase defaults to "both" and path-walk
+    # runs full text+logical COI even when the user only asked for hgrep.
+    verification_phase = extract_connect_phase_from_document(data) or "both"
+
     return RunConfig(
         filelist=_resolve_path(base, filelist) or filelist,
         top=str(data.get("top") or "").strip() or None,
@@ -881,6 +931,7 @@ def parse_run_request_json(
         no_log_file=bool(data.get("no_log_file", False)),
         mode=mode,
         index_strategy=index_strategy,
+        verification_phase=verification_phase,
     )
 
 
@@ -1233,22 +1284,9 @@ def _apply_run_document_fields(
         if graph:
             out = replace(out, cone_graph=_resolve_path(base_dir, str(graph)))
 
-    phase_keys = (
-        "connect_phase",
-        "connect-phase",
-        "verification_phase",
-        "verification-phase",
-        "phase",
-    )
-    if any(_document_has_key(data, key) for key in phase_keys):
-        raw = None
-        for key in phase_keys:
-            hit = _mapping_get_ci(data, key)
-            if hit is not None and str(hit).strip():
-                raw = hit
-                break
-        if raw is not None:
-            out = replace(out, verification_phase=parse_connect_phase_value(raw))
+    phase = extract_connect_phase_from_document(data)
+    if phase is not None:
+        out = replace(out, verification_phase=phase)
 
     return out, jobs_source
 

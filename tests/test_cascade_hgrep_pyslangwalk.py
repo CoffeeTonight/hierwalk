@@ -30,6 +30,66 @@ def test_parse_cascade_phase_aliases():
     assert parse_connect_phase_value("hgrep-then-pyslangwalk") == HGREP_THEN_PYSLANGWALK
 
 
+def test_run_json_connect_phase_hgrep_not_default_both():
+    """
+    mode path-walk + connect_phase hgrep must NOT fall through to both/COI.
+
+    Regression: parse_run_request_json used to ignore connect_phase entirely
+    (default verification_phase=both → full text-COI on large designs).
+    """
+    from hierwalk.run_request import (
+        extract_connect_phase_from_document,
+        parse_run_request_json,
+        resolve_effective_index_strategy,
+        resolve_effective_run_mode,
+    )
+
+    # Top-level connect_phase
+    cfg = parse_run_request_json(
+        {
+            "filelist": "filelist.f",
+            "top": "top",
+            "mode": "path-walk",
+            "connect_phase": ["hgrep"],
+            "connect": {"checks": [{"a": "top.a", "b": "top.b"}]},
+        },
+        base_dir=Path("."),
+    )
+    assert cfg.verification_phase == "hgrep"
+    em = resolve_effective_run_mode(cfg)
+    assert resolve_effective_index_strategy(cfg, em) == "hgrep"
+
+    # Nested under connect{} (common user layout)
+    assert (
+        extract_connect_phase_from_document(
+            {
+                "mode": "path-walk",
+                "connect": {
+                    "connect_phase": ["hgrep"],
+                    "checks": [{"a": "t.a", "b": "t.b"}],
+                },
+            }
+        )
+        == "hgrep"
+    )
+    cfg2 = parse_run_request_json(
+        {
+            "filelist": "filelist.f",
+            "top": "top",
+            "mode": "path-walk",
+            "connect": {
+                "connect_phase": "hgrep",
+                "checks": [{"a": "top.a", "b": "top.b"}],
+            },
+        },
+        base_dir=Path("."),
+    )
+    assert cfg2.verification_phase == "hgrep"
+    assert resolve_effective_index_strategy(
+        cfg2, resolve_effective_run_mode(cfg2)
+    ) == "hgrep"
+
+
 def test_array_hgrep_only_does_not_fall_through_to_both(tmp_path: Path):
     """``connect_phase: [\"hgrep\"]`` must be pure hgrep, not str(list)→both."""
     rtl = _write(
