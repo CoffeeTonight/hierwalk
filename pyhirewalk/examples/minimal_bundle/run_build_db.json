@@ -1,0 +1,22 @@
+{
+  // Company-style run config: many +define+ without stuffing the CLI.
+  //   PYTHONPATH=src python -m pyhirewalk build-db --config run_build_db.json
+  // Paths are relative to this JSON file's directory.
+
+  "filelist": "filelist.f",
+  "top": "top",
+  "cwd": ".",
+
+  "defines": {
+    "FEATURE_A": "1"
+    // Add real project macros here, e.g.:
+    // "SYNTHESIS": "1",
+    // "TECH_NODE": "N3",
+    // "FIFO_DEPTH": "32"
+  },
+
+  "build_db": {
+    "output": "work/essential.sqlite",
+    "work_dir": "work"
+  }
+}

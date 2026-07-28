@@ -1,0 +1,163 @@
+{
+  "meta": {
+    "context_id": "accc77ae28f75a80",
+    "top": "top",
+    "defines": {
+      "FEATURE_A": "1"
+    }
+  },
+  "files": [
+    {
+      "file_id": 1,
+      "path": "leaf_a.sv",
+      "role": "listed"
+    },
+    {
+      "file_id": 2,
+      "path": "leaf_b.sv",
+      "role": "listed"
+    },
+    {
+      "file_id": 3,
+      "path": "channel.sv",
+      "role": "listed"
+    },
+    {
+      "file_id": 4,
+      "path": "top.sv",
+      "role": "listed"
+    }
+  ],
+  "modules": [
+    {
+      "name": "channel",
+      "file_id": 3,
+      "file": "channel.sv"
+    },
+    {
+      "name": "leaf_a",
+      "file_id": 1,
+      "file": "leaf_a.sv"
+    },
+    {
+      "name": "leaf_b",
+      "file_id": 2,
+      "file": "leaf_b.sv"
+    },
+    {
+      "name": "top",
+      "file_id": 4,
+      "file": "top.sv"
+    }
+  ],
+  "ports": {
+    "top": [
+      {
+        "name": "clk",
+        "dir": "In"
+      },
+      {
+        "name": "s_data",
+        "dir": "In"
+      },
+      {
+        "name": "d_data",
+        "dir": "Out"
+      }
+    ],
+    "channel": [
+      {
+        "name": "clk",
+        "dir": "In"
+      },
+      {
+        "name": "din",
+        "dir": "In"
+      },
+      {
+        "name": "dout",
+        "dir": "Out"
+      }
+    ],
+    "leaf_a": [
+      {
+        "name": "clk",
+        "dir": "In"
+      },
+      {
+        "name": "din",
+        "dir": "In"
+      },
+      {
+        "name": "dout",
+        "dir": "Out"
+      }
+    ]
+  },
+  "instances": [
+    {
+      "hier_path": "top",
+      "type": "top",
+      "parent": null,
+      "origin": "top",
+      "gen_index": null,
+      "def_file": "top.sv"
+    },
+    {
+      "hier_path": "top.g_ch[0].u_ch",
+      "type": "channel",
+      "parent": "top",
+      "origin": "generate_for",
+      "gen_index": 0,
+      "def_file": "channel.sv"
+    },
+    {
+      "hier_path": "top.g_ch[1].u_ch",
+      "type": "channel",
+      "parent": "top",
+      "origin": "generate_for",
+      "gen_index": 1,
+      "def_file": "channel.sv"
+    },
+    {
+      "hier_path": "top.g_ch[1].u_ch.g_pipe.u_leaf",
+      "type": "leaf_a",
+      "parent": "top.g_ch[1].u_ch",
+      "origin": "generate_if",
+      "gen_index": null,
+      "def_file": "leaf_a.sv"
+    },
+    {
+      "hier_path": "top.g_ch[2].u_ch",
+      "type": "channel",
+      "parent": "top",
+      "origin": "generate_for",
+      "gen_index": 2,
+      "def_file": "channel.sv"
+    },
+    {
+      "hier_path": "top.g_ch[2].u_ch.g_pipe.u_leaf",
+      "type": "leaf_a",
+      "parent": "top.g_ch[2].u_ch",
+      "origin": "generate_if",
+      "gen_index": null,
+      "def_file": "leaf_a.sv"
+    },
+    {
+      "hier_path": "top.g_ch[3].u_ch",
+      "type": "channel",
+      "parent": "top",
+      "origin": "generate_for",
+      "gen_index": 3,
+      "def_file": "channel.sv"
+    },
+    {
+      "hier_path": "top.g_ch[3].u_ch.g_pipe.u_leaf",
+      "type": "leaf_a",
+      "parent": "top.g_ch[3].u_ch",
+      "origin": "generate_if",
+      "gen_index": null,
+      "def_file": "leaf_a.sv"
+    }
+  ]
+}
