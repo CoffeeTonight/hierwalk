@@ -1,0 +1,16 @@
+#!/usr/bin/env python3
+"""Same launcher as ../pyhirewalk (repo-root entry)."""
+
+from __future__ import annotations
+
+import runpy
+import sys
+from pathlib import Path
+
+root = Path(__file__).resolve().parents[1]
+sys.argv[0] = str(root / "pyhirewalk")
+# execute root launcher
+sys.path.insert(0, str(root / "src"))
+from pyhirewalk.cli import main
+
+raise SystemExit(main())

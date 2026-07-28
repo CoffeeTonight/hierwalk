@@ -13,7 +13,7 @@ Tiny design that mixes patterns pyslang must fold before we store anything:
 ## Regenerate index (needs pyslang)
 
 ```bash
-cd ~/Desktop/pyhirewalk
+cd ~/Desktop/hierwalk/pyhirewalk
 PYTHONPATH=src python3 examples/minimal_bundle/build_essential_index.py
 ```
 

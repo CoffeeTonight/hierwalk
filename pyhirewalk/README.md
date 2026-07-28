@@ -2,6 +2,8 @@
 
 Hierarchy-to-hierarchy RTL connectivity / COI knowledge graph.
 
+**Location:** lives under `hierwalk/pyhirewalk` for convenience only. It is a **separate package** — no imports from the parent `hierwalk` tree.
+
 ## Design stance
 
 Built **greenfield**. From the older `hierwalk` experiment we take **only** proven EDA filelist semantics (`-f` / `-F`, `+incdir+`, `+define+`, provenance). We do **not** import hierwalk’s path-walk, connect, cache, or scan stack.
@@ -55,20 +57,30 @@ EDA sims take many `+define+` / paths; stuffing the CLI does not scale. Put them
 }
 ```
 
+### How to run (plain `python3 file.py` — no `-m`)
+
+From the repo root `~/Desktop/hierwalk/pyhirewalk` (or pass absolute paths):
+
 ```bash
-export PYTHONPATH=src
-pip install pyslang
+# DB build from company run JSON
+python3 build_db.py --config examples/minimal_bundle/run_build_db.json
+python3 run.py examples/minimal_bundle/run_build_db.json
 
-# preferred
-python -m pyhirewalk run path/to/run.json
-# or
-python -m pyhirewalk build-db --config path/to/run.json
+# Or filelist + flags
+python3 build_db.py design.f --cwd . --top chip_top -o out.sqlite --define SYNTHESIS
 
-# CLI overlays config (defines merge; same key → CLI wins)
-python -m pyhirewalk build-db --config run.json --define EXTRA=1 -o /tmp/x.sqlite
+# Expand filelist only
+python3 filelist.py --config run.json
+python3 filelist.py design.f --cwd . --json
 ```
 
-Example: `examples/minimal_bundle/run_build_db.json`
+Each script adds `src/` to `sys.path` itself — **no install, no `PYTHONPATH`, no `python -m`**.
+
+```bash
+pip install pyslang   # needed for build_db.py
+```
+
+Example config: `examples/minimal_bundle/run_build_db.json`
 
 ## Build essential DB (company timing)
 
