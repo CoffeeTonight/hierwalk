@@ -943,20 +943,37 @@ def reorder_connect_results_to_checks(
     checks: Sequence[ConnectivityCheck],
     results: Sequence[ConnectResult],
 ) -> List[ConnectResult]:
-    """Restore batch result order to match the connect JSON request."""
-    by_id = {r.check_id: r for r in results if r.check_id}
+    """
+    Restore batch result order to match the connect JSON request.
+
+    When lengths match, keep **pipeline index order** (stable for empty and
+    duplicate ``check_id``). Only fall back to id-map when counts differ
+    (e.g. parallel paths that dropped rows). Id-map uses first-wins so
+    duplicates do not silently replace earlier survivors.
+    """
+    results_list = list(results)
+    if len(results_list) == len(checks):
+        return results_list
+    by_id: Dict[str, ConnectResult] = {}
+    for r in results_list:
+        cid = r.check_id or ""
+        if cid and cid not in by_id:
+            by_id[cid] = r
     ordered: List[ConnectResult] = []
     seen: set[str] = set()
     for chk in checks:
-        hit = by_id.get(chk.check_id)
+        cid = chk.check_id or ""
+        hit = by_id.get(cid) if cid else None
         if hit is None:
             continue
         ordered.append(hit)
-        seen.add(chk.check_id)
-    for result in results:
-        if result.check_id and result.check_id not in seen:
+        seen.add(cid)
+    for result in results_list:
+        cid = result.check_id or ""
+        if cid and cid not in seen:
             ordered.append(result)
-        elif not result.check_id:
+            seen.add(cid)
+        elif not cid:
             ordered.append(result)
     return ordered
 

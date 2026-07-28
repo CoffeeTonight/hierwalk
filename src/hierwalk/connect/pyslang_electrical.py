@@ -516,15 +516,20 @@ def query_a_to_b(
     a_specs: Sequence[str],
     b_specs: Sequence[str],
     a_fail: Optional[Dict[str, Tuple[str, str]]] = None,
+    b_fail: Optional[Dict[str, Tuple[str, str]]] = None,
 ) -> List[ElectricalP2PRow]:
     """
     One report row per a→b_slice mapping (or one FAIL row per unresolved a).
 
-    *a_fail* maps a_spec → (fail_node, fail_rtl) when hierarchy resolve failed.
+    *a_fail* / *b_fail* map endpoint spec → (fail_node, fail_rtl) when
+    hierarchy resolve failed (symmetric hierarchy-miss tagging).
     """
     a_fail = a_fail or {}
+    b_fail = b_fail or {}
     rows: List[ElectricalP2PRow] = []
     b_bases = [str(b).strip() for b in b_specs if str(b).strip()]
+    # If every b endpoint missed hierarchy, emit one FAIL per a with note.
+    all_b_fail = bool(b_bases) and all(b in b_fail for b in b_bases)
 
     for a in a_specs:
         a = str(a).strip()
@@ -541,6 +546,22 @@ def query_a_to_b(
                     fail_node=node or a,
                     fail_rtl=rtl or "",
                     note="hierarchy miss",
+                )
+            )
+            continue
+        if all_b_fail:
+            # Pick first b miss for fail_node provenance.
+            b0 = b_bases[0]
+            node, rtl = b_fail.get(b0, (b0, ""))
+            rows.append(
+                ElectricalP2PRow(
+                    check_id=check_id,
+                    a=a,
+                    b_slice="",
+                    status="FAIL",
+                    fail_node=node or b0,
+                    fail_rtl=rtl or "",
+                    note="hierarchy miss (b)",
                 )
             )
             continue

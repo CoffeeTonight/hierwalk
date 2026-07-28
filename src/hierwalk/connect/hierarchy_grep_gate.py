@@ -430,15 +430,25 @@ def seed_gate_inst_chain(
     state: "PathWalkState",
     gate: "HierarchyGrepCheckGate",
     *,
-    scoped_sources: Sequence[str],
+    scoped_sources: Sequence[str] = (),
 ) -> Tuple[FlatRow, ...]:
     """
     Tier1-hydrate grep-implicated RTL and seed folded inst rows for text COI.
 
     Does not call ``ensure_path`` or tier0 queue scan — only files from
     :func:`implicated_rtl_files` are tier1-scanned.
+
+    *scoped_sources* is reserved for callers that already narrowed RTL; when
+    non-empty, hydration is intersected with that set (still never expands
+    beyond implicated files).
     """
-    implicated = implicated_rtl_files(gate)
+    implicated = list(implicated_rtl_files(gate))
+    if scoped_sources:
+        allow = {abs_rtl_path(s) for s in scoped_sources if s}
+        if allow:
+            implicated = [
+                f for f in implicated if abs_rtl_path(f) in allow
+            ] or implicated
     hydrate_gate_scoped_rtl(
         state,
         scoped_files=implicated,
@@ -940,14 +950,19 @@ def _fast_fail_result(
         ep_a, ep_b = other_ep, miss_ep
     else:
         ep_a, ep_b = miss_ep, other_ep
+    # mode=hgrep: same tier0 provenance as pure hgrep-phase rejects (not "unknown").
     return ConnectResult(
         ep_a,
         ep_b,
         False,
-        "unknown",
+        "hgrep",
         errors=[err],
         check_id=chk.check_id,
         note="tier0 hierarchy_grep miss",
+        walk_notes=[
+            f"hgrep-status reject",
+            f"hgrep-ep {miss_side} FAIL {spec} — {err}",
+        ],
     )
 
 

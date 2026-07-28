@@ -149,6 +149,57 @@ def test_cli_verification_phase_raises_on_garbage():
         _verification_phase(cfg)
 
 
+def test_reorder_equal_length_is_index_stable():
+    from hierwalk.connect.pipeline.artifacts import reorder_connect_results_to_checks
+    from hierwalk.connect.shared.request import ConnectivityCheck
+    from hierwalk.models import ConnectEndpoint, ConnectResult
+
+    def _r(cid: str, ok: bool) -> ConnectResult:
+        ep = ConnectEndpoint(spec="t.a", inst_path="t", port_name="a")
+        return ConnectResult(ep, ep, ok, "text", check_id=cid)
+
+    checks = [
+        ConnectivityCheck("t.a", "t.b", check_id="dup"),
+        ConnectivityCheck("t.c", "t.d", check_id="dup"),
+    ]
+    results = [_r("dup", True), _r("dup", False)]
+    ordered = reorder_connect_results_to_checks(checks, results)
+    assert len(ordered) == 2
+    # Equal-length → position preserved (not last-wins by id).
+    assert ordered[0].connected is True
+    assert ordered[1].connected is False
+
+
+def test_fast_fail_reject_mode_is_hgrep():
+    """Text-pipeline tier0 reject uses mode=hgrep (not unknown)."""
+    from hierwalk.connect.hierarchy_grep_gate import (
+        HierarchyGrepEndpointGate,
+        _fast_fail_result,
+    )
+    from hierwalk.connect.shared.request import ConnectivityCheck
+
+    eg = HierarchyGrepEndpointGate(
+        spec="top.NOPE",
+        hierarchy_input="top.NOPE",
+        hierarchy="",
+        port_tail="",
+        ok=False,
+        ambiguous=False,
+        error="hierarchy miss",
+        scoped_files=(),
+        rows=(),
+    )
+    res = _fast_fail_result(
+        ConnectivityCheck("top.NOPE", "top.b", check_id="typo"),
+        spec="top.NOPE",
+        gate=eg,
+        miss_side="a",
+    )
+    assert not res.connected
+    assert res.mode == "hgrep"
+    assert any("hgrep-status reject" in str(n) for n in (res.walk_notes or ()))
+
+
 def test_skip_hgrep_pregate_does_not_rebuild_grep_session(tmp_path: Path, monkeypatch):
     """Text pipeline with skip_hgrep_pregate must not prepare_hierarchy_grep_session."""
     from hierwalk.connect import hierarchy_grep_gate as hgg

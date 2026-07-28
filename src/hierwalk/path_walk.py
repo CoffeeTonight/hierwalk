@@ -3077,6 +3077,7 @@ def _pipeline_path_walk_text_conn(
                             elapsed_sec=(gate_ms + total_ms) / 1000.0,
                         )
                         continue
+                    failed_fast_ms = (time.perf_counter() - t_walk) * 1000.0
                     state._emit_walk(
                         f"connect-pipeline hgrep-fast-miss "
                         f"check={chk.check_id or idx} "
@@ -3084,9 +3085,16 @@ def _pipeline_path_walk_text_conn(
                         f"seed_ms={float(coi_timing.get('seed_ms', 0.0)):.1f} "
                         f"index_ms={float(coi_timing.get('index_ms', 0.0)):.1f} "
                         f"walk_ms={float(coi_timing.get('walk_ms', 0.0)):.1f} "
+                        f"failed_fast_ms={failed_fast_ms:.1f} "
                         f"→ full path-walk "
                         f"scoped_files={len(gate.scoped_files or ())}"
                     )
+                    # Remaining timers start after failed fast path.
+                    t_walk = time.perf_counter()
+                else:
+                    failed_fast_ms = 0.0
+            else:
+                failed_fast_ms = 0.0
 
             # Full hierarchy walk: never shrink the RTL pool to partial hgrep
             # scoped_files (fallback / fast-miss). Incomplete gate scopes were
@@ -3159,8 +3167,9 @@ def _pipeline_path_walk_text_conn(
             state._emit_walk(
                 f"connect-pipeline hierarchy-ready check={chk.check_id or idx} "
                 f"hgrep_pass=False "
-                f"hier_ms={hier_ms:.1f} "
                 f"gate_ms={gate_ms:.1f} "
+                f"failed_fast_ms={failed_fast_ms:.1f} "
+                f"hier_ms={hier_ms:.1f} "
                 f"index_ms={index_ms:.1f} "
                 f"walk_ms={walk_ms:.1f} "
                 f"index_miss={index_miss} "
@@ -3170,7 +3179,10 @@ def _pipeline_path_walk_text_conn(
                 check_id=chk.check_id,
                 endpoint_a=str(chk.endpoint_a),
                 endpoint_b=str(chk.endpoint_b),
-                elapsed_sec=(hier_ms + text_ms) / 1000.0,
+                elapsed_sec=(
+                    gate_ms + failed_fast_ms + hier_ms + text_ms
+                )
+                / 1000.0,
             )
             coi_done += 1
 
@@ -3856,16 +3868,16 @@ def run_path_walk_connect(
     connect_phase: str = "both",
     refresh_cache: bool = False,
     skip_hgrep_pregate: bool = False,
+    persist_connect_tsv: bool = True,
 ) -> Tuple[ConnectivityBatchResult, DesignIndex, PathWalkState]:
     """
     Path-walk batch connectivity: on-demand RTL + shared :class:`ConnectivitySession`.
 
-    Hierarchy walk honors ``jobs`` at trie branch points. ``connect_jobs`` runs
-    text-COI in parallel (shared ``mod_cache``); pipeline mode interleaves
-    per-check hierarchy with connect workers when ``connect_jobs`` > 1.
-
-    ``skip_hgrep_pregate``: when True, text pipeline does not re-run hgrep gate
-    (use after cascade/pyslangwalk already proved hierarchy).
+    Hierarchy walk honors ``jobs`` at trie branch points. Text-COI pipeline is
+    sequential per check (``connect_jobs`` reserved for legacy session batch
+    paths). ``skip_hgrep_pregate``: do not re-run hgrep gate (cascade/pyslang
+    already proved hierarchy). ``persist_connect_tsv``: when False, skip
+    work-dir phase TSV write so a parent cascade can own the canonical file.
     """
     from hierwalk.connect.session import _resolve_connect_jobs
     from hierwalk.perf import connect_jobs_from_env
@@ -4055,6 +4067,8 @@ def run_path_walk_connect(
                     connect_phase="pyslangwalk",
                     # Reuse grep_hie.json built by the hgrep stage.
                     refresh_cache=False,
+                    # Cascade owns the merged TSV write below.
+                    persist_connect_tsv=False,
                 )
             # Merge by original check index (stable when check_id is empty/dup).
             pw_by_orig: Dict[int, Any] = {}
@@ -4249,8 +4263,21 @@ def run_path_walk_connect(
                         # Survivors already passed pyslang hierarchy (and
                         # cascade already ran hgrep) — do not re-gate.
                         skip_hgrep_pregate=True,
+                        # Parent pyslangwalk/cascade writes the merged TSV.
+                        persist_connect_tsv=False,
                     )
-                    for si, r in zip(survivor_indices, text_batch.results):
+                    text_results = list(text_batch.results)
+                    if len(text_results) != len(survivor_indices):
+                        _emit_hgrep(
+                            f"pyslangwalk text-COI count mismatch "
+                            f"got={len(text_results)} "
+                            f"expected={len(survivor_indices)}"
+                        )
+                    # Index-stable zip only (reorder keeps equal-length order).
+                    for j, si in enumerate(survivor_indices):
+                        if j >= len(text_results):
+                            break
+                        r = text_results[j]
                         chk = request.checks[si]
                         text_by_orig[si] = CR(
                             r.endpoint_a,
@@ -4317,8 +4344,28 @@ def run_path_walk_connect(
                             )
                         )
                     else:
-                        # Hierarchy ok but missing from text batch
-                        merged.append(hr)
+                        # Hierarchy ok but text row missing — fail closed
+                        # (never promote hierarchy-only connected=True).
+                        merged.append(
+                            CR(
+                                hr.endpoint_a,
+                                hr.endpoint_b,
+                                False,
+                                "pyslangwalk",
+                                hops=list(hr.hops or []),
+                                errors=list(hr.errors or ())
+                                + (
+                                    "text-COI result missing after hierarchy pass",
+                                ),
+                                note=(
+                                    "pyslangwalk hierarchy pass but text-COI "
+                                    "missing (fail-closed)"
+                                ),
+                                check_id=hr.check_id or chk.check_id,
+                                connected_text=False,
+                                walk_notes=list(hr.walk_notes or ()),
+                            )
+                        )
                 batch = ConnectivityBatchResult(
                     results=tuple(merged),
                     modules_cached=0,
@@ -4333,7 +4380,7 @@ def run_path_walk_connect(
                     {r.module for r in state.rows_by_path.values() if r.module}
                 )
                 # Persist merged pyslangwalk+text TSV under work dir.
-                if resolved_output_dir is not None:
+                if persist_connect_tsv and resolved_output_dir is not None:
                     from hierwalk.connect.pipeline.artifacts import (
                         connect_output_paths,
                         format_connect_hierarchy_tsv,
@@ -4405,7 +4452,7 @@ def run_path_walk_connect(
                 {r.module for r in state.rows_by_path.values() if r.module}
             )
             # Persist connect TSV (hgrep-only phase has no text/logical writer).
-            if resolved_output_dir is not None:
+            if persist_connect_tsv and resolved_output_dir is not None:
                 from hierwalk.connect.pipeline.artifacts import (
                     connect_output_paths,
                     require_connect_phase_tsv,
@@ -4695,28 +4742,34 @@ def run_path_walk_connect(
                         f"ms={coi_ms:.1f}"
                     )
                 finally:
-                    written = require_connect_phase_tsv(
-                        out_paths.text_tsv,
-                        text_results,
-                        phase="text",
-                        modules_cached=text_modules_cached,
-                        rows_by_path=state.rows_by_path,
-                    )
-                    if not _hierarchy_tsv_incremental_ready(state, "text"):
-                        out_paths.hierarchy_text_tsv.write_text(
-                            format_connect_hierarchy_tsv(
-                                text_results,
-                                state.rows_by_path,
-                                phase="text",
-                                signal_tails=state._signal_tail_records,
-                                index=index,
-                                top=top_name,
-                            ),
-                            encoding="utf-8",
+                    if persist_connect_tsv:
+                        written = require_connect_phase_tsv(
+                            out_paths.text_tsv,
+                            text_results,
+                            phase="text",
+                            modules_cached=text_modules_cached,
+                            rows_by_path=state.rows_by_path,
                         )
-                    state._emit_walk(
-                        f"connect-text-conn written {written.resolve()}"
-                    )
+                        if not _hierarchy_tsv_incremental_ready(state, "text"):
+                            out_paths.hierarchy_text_tsv.write_text(
+                                format_connect_hierarchy_tsv(
+                                    text_results,
+                                    state.rows_by_path,
+                                    phase="text",
+                                    signal_tails=state._signal_tail_records,
+                                    index=index,
+                                    top=top_name,
+                                ),
+                                encoding="utf-8",
+                            )
+                        state._emit_walk(
+                            f"connect-text-conn written {written.resolve()}"
+                        )
+                    else:
+                        state._emit_walk(
+                            "connect-text-conn persist skipped "
+                            "(parent cascade/pyslang owns TSV)"
+                        )
                     if timing_rec is not None:
                         timing_rec.end_step()
                 state.stats.checks_run = len(text_results)

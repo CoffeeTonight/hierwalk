@@ -52,13 +52,13 @@ def _modules_from_results(*results: PyslangWalkResult) -> List[str]:
     return mods
 
 
-def _a_fail_map(
-    specs_a: Sequence[str],
-    res_a: Sequence[PyslangWalkResult],
+def _hier_fail_map(
+    specs: Sequence[str],
+    results: Sequence[PyslangWalkResult],
 ) -> Dict[str, Tuple[str, str]]:
-    """Map a-spec → (fail_node, fail_rtl) for hierarchy misses."""
+    """Map endpoint-spec → (fail_node, fail_rtl) for hierarchy misses."""
     out: Dict[str, Tuple[str, str]] = {}
-    for spec, res in zip(specs_a, res_a):
+    for spec, res in zip(specs, results):
         if res.ok:
             continue
         node = res.fail_segment or spec
@@ -69,6 +69,10 @@ def _a_fail_map(
             rtl = res.scoped_files[-1]
         out[spec] = (node, rtl)
     return out
+
+
+# Back-compat alias used by tests / older call sites.
+_a_fail_map = _hier_fail_map
 
 
 def _endpoint_resolve(
@@ -424,7 +428,8 @@ def run_pyslangwalk_connect_batch(
             check_id=cid,
             a_specs=specs_a,
             b_specs=specs_b,
-            a_fail=_a_fail_map(specs_a, res_a),
+            a_fail=_hier_fail_map(specs_a, res_a),
+            b_fail=_hier_fail_map(specs_b, res_b),
         )
 
     for chk in request.checks:
