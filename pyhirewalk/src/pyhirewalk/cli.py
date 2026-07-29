@@ -86,6 +86,8 @@ def _run_build_db(
     as_json: bool,
     mode: str | None = None,
     scan_workers: int | None = None,
+    modules_json: Path | None = None,
+    write_sqlite: bool = True,
 ) -> int:
     from pyhirewalk.index.build_db import build_essential_db
 
@@ -147,6 +149,14 @@ def _run_build_db(
     if workers is None:
         workers = 8
 
+    # config build_db.modules_json
+    if modules_json is None and isinstance(build_blk, dict):
+        mj = build_blk.get("modules_json") or build_blk.get("modules-json")
+        if mj:
+            modules_json = Path(str(mj))
+            if not modules_json.is_absolute() and cfg.config_path:
+                modules_json = (cfg.config_path.parent / modules_json).resolve()
+
     result = build_essential_db(
         cfg.filelist,
         cfg.db_path,
@@ -157,6 +167,8 @@ def _run_build_db(
         work_dir=cfg.work_dir,
         mode=str(mode),
         scan_workers=int(workers),
+        modules_json=modules_json,
+        write_sqlite=write_sqlite,
         on_progress=progress,
     )
 
@@ -166,7 +178,7 @@ def _run_build_db(
         f"[pyhirewalk] TOTAL_BUILD_DB_SEC={total:.3f}  "
         f"filelists={result.n_filelists} files={result.n_files} "
         f"rtl_sources={result.n_rtl_sources} modules={result.n_modules}  "
-        f"db={result.db_path}",
+        f"db={result.db_path}  modules_json={result.modules_json}",
         file=sys.stderr,
     )
 
@@ -179,8 +191,9 @@ def _run_build_db(
         print(json.dumps(payload, indent=2))
     else:
         print(f"db:          {result.db_path}")
+        print(f"modules_json:{result.modules_json}")
         print(
-            "db_format:   SQLite (not JSON) — "
+            "db_format:   SQLite + modules JSON (modulename→filepath[]); "
             "tables: meta, files, modules, build_timing"
         )
         print(f"context_id:  {result.context_id}")
@@ -279,6 +292,17 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=None,
         help="Thread workers for --mode fast (default 8)",
+    )
+    bd.add_argument(
+        "--modules-json",
+        type=Path,
+        default=None,
+        help="Write modulename→filepath map JSON (default: <db>.modules.json)",
+    )
+    bd.add_argument(
+        "--no-sqlite",
+        action="store_true",
+        help="Skip SQLite; only write modules JSON",
     )
 
     run = sub.add_parser(
@@ -383,6 +407,8 @@ def main(argv: list[str] | None = None) -> int:
             as_json=args.json,
             mode=args.mode,
             scan_workers=args.scan_workers,
+            modules_json=args.modules_json,
+            write_sqlite=not args.no_sqlite,
         )
 
     if args.cmd == "run":
@@ -411,6 +437,8 @@ def main(argv: list[str] | None = None) -> int:
             as_json=args.json,
             mode=None,
             scan_workers=None,
+            modules_json=None,
+            write_sqlite=True,
         )
 
     return 2

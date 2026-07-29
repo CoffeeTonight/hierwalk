@@ -40,11 +40,13 @@ class BuildDbResult:
     warnings: List[str] = field(default_factory=list)
     pyslang_version: str = ""
     flat_filelist: Optional[Path] = None
+    modules_json: Optional[Path] = None  # modulename → [filepath, …]
 
     def summary(self) -> Dict[str, object]:
         return {
             "db_path": str(self.db_path),
             "db_format": "sqlite",
+            "modules_json": str(self.modules_json) if self.modules_json else None,
             "context_id": self.context_id,
             "n_files": self.n_files,
             "n_modules": self.n_modules,
@@ -202,6 +204,8 @@ def build_essential_db(
     work_dir: Optional[Union[str, Path]] = None,
     mode: str = "fast",
     scan_workers: int = 8,
+    modules_json: Optional[Union[str, Path]] = None,
+    write_sqlite: bool = True,
     on_progress: Optional[OnProgress] = None,
     defer_source_exists: bool = False,
 ) -> BuildDbResult:
@@ -216,7 +220,11 @@ def build_essential_db(
     filelist
         Top-level EDA ``.f``.
     db_path
-        Output ``.sqlite`` path (created/overwritten).
+        Output ``.sqlite`` path (created/overwritten if write_sqlite).
+    modules_json
+        Output modulename→filepath JSON (default: ``<db_stem>.modules.json`` next to db).
+    write_sqlite
+        If False, only write modules JSON (skip SQLite).
     index_cwd
         Run directory for ``-F`` semantics.
     top
@@ -224,10 +232,8 @@ def build_essential_db(
     work_dir
         Where to place intermediate flat ``.f`` (default: next to db).
     mode
-        ``fast`` (default): parallel text scan for module/interface/package names
-        — minutes-class on large filelists.
-        ``pyslang``: full parseAllSources + getDefinitions — accurate but often
-        **tens of minutes** on ~10k RTL (company runs ~40 min reported).
+        ``fast`` (default): parallel text scan for module/interface/package names.
+        ``pyslang``: full parse — often tens of minutes on large RTL.
     scan_workers
         Thread count for ``fast`` mode.
     """
@@ -243,6 +249,11 @@ def build_essential_db(
     db_path.parent.mkdir(parents=True, exist_ok=True)
     work = Path(work_dir).resolve() if work_dir else db_path.parent
     work.mkdir(parents=True, exist_ok=True)
+    map_path = (
+        Path(modules_json).resolve()
+        if modules_json
+        else (db_path.parent / f"{db_path.stem}.modules.json")
+    )
 
     def prog(msg: str) -> None:
         """Always timestamped; wall clock + optional elapsed-from-start."""
@@ -368,109 +379,151 @@ def build_essential_db(
         )
         timings["definitions"] = timings.get("pyslang_definitions", 0.0)
 
-    # --- 4) sqlite ---
-    prog("phase start: sqlite_write")
-    if db_path.exists():
-        db_path.unlink()
-
-    path_to_id: Dict[str, int] = {}
-    n_mod = 0
+    # --- 4a) modules JSON (modulename → [filepath, …]) ---
+    prog("phase start: write_modules_json")
+    t0 = time.perf_counter()
+    mod_map: Dict[str, List[str]] = {}
     names: set[str] = set()
+    for name, kind, fpath in def_rows:
+        key = path_to_posix(fpath)
+        mod_map.setdefault(name, [])
+        if key not in mod_map[name]:
+            mod_map[name].append(key)
+        names.add(name)
+    map_path.parent.mkdir(parents=True, exist_ok=True)
+    map_doc = {
+        "schema_version": 1,
+        "meta": {
+            "context_id": ctx.context_id,
+            "top": top_name,
+            "top_filelist": path_to_posix(ctx.top_filelist),
+            "index_cwd": path_to_posix(ctx.index_cwd),
+            "defines": dict(ctx.defines),
+            "mode": mode_norm,
+            "created_at": _now_iso(),
+            "n_filelists": n_filelists,
+            "n_rtl_sources": n_rtl_sources,
+            "n_modules": len(names),
+            "n_def_rows": len(def_rows),
+        },
+        "modules": mod_map,
+    }
+    map_path.write_text(json.dumps(map_doc, indent=2) + "\n", encoding="utf-8")
+    t0 = end_phase(
+        "write_modules_json",
+        t0,
+        f"path={map_path} unique_names={len(names)}",
+    )
+    prog(f"modules_json: {map_path}")
 
-    conn = sqlite3.connect(str(db_path))
-    try:
-        conn.executescript(SCHEMA_SQL)
-        conn.execute(
-            """
-            INSERT INTO meta(
-              context_id, top, top_filelist, index_cwd, defines_json,
-              created_at, pyslang_version, schema_version, notes_json
-            ) VALUES (?,?,?,?,?,?,?,?,?)
-            """,
-            (
-                ctx.context_id,
-                top_name,
-                path_to_posix(ctx.top_filelist),
-                path_to_posix(ctx.index_cwd),
-                json.dumps(ctx.defines, sort_keys=True),
-                _now_iso(),
-                pyslang_ver,
-                SCHEMA_VERSION,
-                json.dumps(
-                    {
-                        "ports_filled": False,
-                        "instances_filled": False,
-                        "n_filelist_errors": len(ctx.errors),
-                        "n_filelists": n_filelists,
-                        "n_rtl_sources": n_rtl_sources,
-                        "mode": mode_norm,
-                        "scan_workers": scan_workers if mode_norm == "fast" else None,
-                    }
+    # --- 4b) optional sqlite ---
+    path_to_id: Dict[str, int] = {}
+    n_mod = len(def_rows)
+    if write_sqlite:
+        prog("phase start: sqlite_write")
+        t0 = time.perf_counter()
+        if db_path.exists():
+            db_path.unlink()
+
+        conn = sqlite3.connect(str(db_path))
+        try:
+            conn.executescript(SCHEMA_SQL)
+            conn.execute(
+                """
+                INSERT INTO meta(
+                  context_id, top, top_filelist, index_cwd, defines_json,
+                  created_at, pyslang_version, schema_version, notes_json
+                ) VALUES (?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    ctx.context_id,
+                    top_name,
+                    path_to_posix(ctx.top_filelist),
+                    path_to_posix(ctx.index_cwd),
+                    json.dumps(ctx.defines, sort_keys=True),
+                    _now_iso(),
+                    pyslang_ver,
+                    SCHEMA_VERSION,
+                    json.dumps(
+                        {
+                            "ports_filled": False,
+                            "instances_filled": False,
+                            "n_filelist_errors": len(ctx.errors),
+                            "n_filelists": n_filelists,
+                            "n_rtl_sources": n_rtl_sources,
+                            "mode": mode_norm,
+                            "scan_workers": scan_workers if mode_norm == "fast" else None,
+                            "modules_json": path_to_posix(map_path),
+                        }
+                    ),
                 ),
-            ),
+            )
+
+            file_id = 0
+
+            def add_file(path_str: str, role: str) -> int:
+                nonlocal file_id
+                key = path_to_posix(path_str)
+                if key in path_to_id:
+                    return path_to_id[key]
+                file_id += 1
+                p = Path(key)
+                mt, sz = _stat_file(p)
+                conn.execute(
+                    """
+                    INSERT INTO files(file_id, context_id, path, role, mtime_ns, size)
+                    VALUES (?,?,?,?,?,?)
+                    """,
+                    (file_id, ctx.context_id, key, role, mt, sz),
+                )
+                path_to_id[key] = file_id
+                return file_id
+
+            for src in ctx.source_files:
+                add_file(path_to_posix(src), "listed")
+            for lib in ctx.library_files:
+                add_file(path_to_posix(lib), "library")
+
+            for name, kind, fpath in def_rows:
+                key = path_to_posix(fpath)
+                role = "listed" if key in path_to_id else "definition"
+                fid = add_file(fpath, role)
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO modules(context_id, name, kind, file_id)
+                    VALUES (?,?,?,?)
+                    """,
+                    (ctx.context_id, name, kind, fid),
+                )
+
+            conn.commit()
+        finally:
+            conn.close()
+
+        end_phase(
+            "sqlite_write",
+            t0,
+            f"db_files={len(path_to_id)} modules={n_mod} unique_names={len(names)}",
         )
 
-        file_id = 0
+        conn = sqlite3.connect(str(db_path))
+        try:
+            for phase, sec in timings.items():
+                conn.execute(
+                    "INSERT OR REPLACE INTO build_timing(context_id, phase, seconds) "
+                    "VALUES (?,?,?)",
+                    (ctx.context_id, phase, sec),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+    else:
+        prog("sqlite_write: skipped (--no-sqlite)")
+        for p in mod_map.values():
+            for fp in p:
+                path_to_id[fp] = 1
 
-        def add_file(path_str: str, role: str) -> int:
-            nonlocal file_id
-            key = path_to_posix(path_str)
-            if key in path_to_id:
-                return path_to_id[key]
-            file_id += 1
-            p = Path(key)
-            mt, sz = _stat_file(p)
-            conn.execute(
-                """
-                INSERT INTO files(file_id, context_id, path, role, mtime_ns, size)
-                VALUES (?,?,?,?,?,?)
-                """,
-                (file_id, ctx.context_id, key, role, mt, sz),
-            )
-            path_to_id[key] = file_id
-            return file_id
-
-        for src in ctx.source_files:
-            add_file(path_to_posix(src), "listed")
-        for lib in ctx.library_files:
-            add_file(path_to_posix(lib), "library")
-
-        for name, kind, fpath in def_rows:
-            key = path_to_posix(fpath)
-            role = "listed" if key in path_to_id else "definition"
-            fid = add_file(fpath, role)
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO modules(context_id, name, kind, file_id)
-                VALUES (?,?,?,?)
-                """,
-                (ctx.context_id, name, kind, fid),
-            )
-            n_mod += 1
-            names.add(name)
-
-        conn.commit()
-    finally:
-        conn.close()
-
-    end_phase(
-        "sqlite_write",
-        t0,
-        f"db_files={len(path_to_id)} modules={n_mod} unique_names={len(names)}",
-    )
     timings["total"] = time.perf_counter() - t_all
-
-    conn = sqlite3.connect(str(db_path))
-    try:
-        for phase, sec in timings.items():
-            conn.execute(
-                "INSERT OR REPLACE INTO build_timing(context_id, phase, seconds) "
-                "VALUES (?,?,?)",
-                (ctx.context_id, phase, sec),
-            )
-        conn.commit()
-    finally:
-        conn.close()
 
     # Phase breakdown + wall-clock total (always log — primary user ask)
     prog("----- inventory (final) -----")
@@ -479,6 +532,7 @@ def build_essential_db(
     prog(f"  n_db_files      = {len(path_to_id)}   # rows in files table")
     prog(f"  n_modules       = {n_mod}   # definition rows (module→file)")
     prog(f"  n_unique_names  = {len(names)}")
+    prog(f"  modules_json    = {map_path}")
     prog("----- timing breakdown -----")
     order = (
         "filelist_expand",
@@ -486,6 +540,7 @@ def build_essential_db(
         "definitions_fast",
         "pyslang_definitions",
         "definitions",
+        "write_modules_json",
         "sqlite_write",
         "total",
     )
@@ -500,7 +555,7 @@ def build_essential_db(
     prog(
         f"build_db TOTAL wall time: {total:.3f}s  ({total / 60.0:.2f} min)  "
         f"filelists={n_filelists} files={len(path_to_id)} modules={n_mod}  "
-        f"db={db_path}"
+        f"map={map_path}"
     )
     prog("build_db END OK")
 
@@ -517,6 +572,7 @@ def build_essential_db(
         warnings=warnings,
         pyslang_version=pyslang_ver,
         flat_filelist=flat,
+        modules_json=map_path,
     )
 
 
