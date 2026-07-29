@@ -6,7 +6,7 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional, Sequence, Union
+from typing import Callable, Dict, List, Mapping, Optional, Sequence, Union
 
 from pyhirewalk.filelist.expand import (
     FilelistResult,
@@ -15,6 +15,8 @@ from pyhirewalk.filelist.expand import (
     write_slang_filelist,
 )
 from pyhirewalk.filelist.paths import path_to_posix
+
+OnProgress = Callable[[str], None]
 
 
 @dataclass(frozen=True)
@@ -154,16 +156,19 @@ def build_context(
     top: Optional[str] = None,
     ignore_filelist_patterns: Optional[Sequence[str]] = None,
     defer_source_exists: bool = False,
+    on_progress: Optional[OnProgress] = None,
 ) -> CompileContext:
     """
     Expand ``top_filelist`` and build a :class:`CompileContext`.
 
     ``extra_defines`` are merged on top of filelist ``+define+`` (CLI wins).
+    Filelist progress logs only the parent (top) ``.f``, not nested lists.
     """
     fl = expand_filelist(
         top_filelist,
         env,
         index_cwd=index_cwd,
+        on_progress=on_progress,
         ignore_filelist_patterns=ignore_filelist_patterns,
         defer_source_exists=defer_source_exists,
     )

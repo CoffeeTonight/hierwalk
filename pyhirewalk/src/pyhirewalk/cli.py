@@ -79,7 +79,14 @@ def _load_merged_config(
     return cfg
 
 
-def _run_build_db(cfg, *, quiet: bool, as_json: bool) -> int:
+def _run_build_db(
+    cfg,
+    *,
+    quiet: bool,
+    as_json: bool,
+    mode: str | None = None,
+    scan_workers: int | None = None,
+) -> int:
     from pyhirewalk.index.build_db import build_essential_db
 
     if cfg.db_path is None:
@@ -87,12 +94,36 @@ def _run_build_db(cfg, *, quiet: bool, as_json: bool) -> int:
         return 2
 
     def progress(msg: str) -> None:
-        if not quiet:
-            print(f"[pyhirewalk] {msg}", file=sys.stderr)
+        # Timing lines always go to stderr (even with --quiet: total is critical).
+        # --quiet only suppresses verbose config-env dump.
+        if quiet and not any(
+            x in msg
+            for x in (
+                "build_db TOTAL",
+                "build_db START",
+                "build_db END",
+                "timing breakdown",
+                "phase done:",
+                "phase start:",
+                "phase FAIL",
+                "inventory",
+                "n_filelists",
+                "n_rtl_sources",
+                "n_db_files",
+                "fast-scan",
+            )
+        ):
+            return
+        print(f"[pyhirewalk] {msg}", file=sys.stderr)
 
     if not quiet and cfg.config_path:
-        print(f"[pyhirewalk] config: {cfg.config_path}", file=sys.stderr)
-        # hierwalk-style audit BEFORE filelist expand (path $VAR depend on this)
+        from datetime import datetime
+
+        print(
+            f"[pyhirewalk] [{datetime.now():%Y-%m-%d %H:%M:%S}] "
+            f"config: {cfg.config_path}",
+            file=sys.stderr,
+        )
         from pyhirewalk.run_config import format_env_audit_lines
 
         for line in format_env_audit_lines(
@@ -102,8 +133,20 @@ def _run_build_db(cfg, *, quiet: bool, as_json: bool) -> int:
         ):
             print(line, file=sys.stderr)
 
-    # Always pass process+config env so expandvars matches hierwalk
-    # (hierwalk applied JSON to os.environ then expandvars; env dict often empty).
+    # mode: CLI > config build_db.mode > default fast
+    raw = cfg.raw if isinstance(getattr(cfg, "raw", None), dict) else {}
+    build_blk = raw.get("build_db") or raw.get("build-db") or {}
+    if not mode:
+        if isinstance(build_blk, dict):
+            mode = str(build_blk.get("mode") or raw.get("mode") or "fast")
+        else:
+            mode = "fast"
+    workers = scan_workers
+    if workers is None and isinstance(build_blk, dict) and build_blk.get("scan_workers") is not None:
+        workers = int(build_blk["scan_workers"])
+    if workers is None:
+        workers = 8
+
     result = build_essential_db(
         cfg.filelist,
         cfg.db_path,
@@ -112,7 +155,19 @@ def _run_build_db(cfg, *, quiet: bool, as_json: bool) -> int:
         extra_defines=cfg.defines or None,
         env=cfg.filelist_env(),
         work_dir=cfg.work_dir,
+        mode=str(mode),
+        scan_workers=int(workers),
         on_progress=progress,
+    )
+
+    total = float(result.timings.get("total", 0.0))
+    # Always print a one-line total on stderr for scripts/grep
+    print(
+        f"[pyhirewalk] TOTAL_BUILD_DB_SEC={total:.3f}  "
+        f"filelists={result.n_filelists} files={result.n_files} "
+        f"rtl_sources={result.n_rtl_sources} modules={result.n_modules}  "
+        f"db={result.db_path}",
+        file=sys.stderr,
     )
 
     if as_json:
@@ -124,8 +179,14 @@ def _run_build_db(cfg, *, quiet: bool, as_json: bool) -> int:
         print(json.dumps(payload, indent=2))
     else:
         print(f"db:          {result.db_path}")
+        print(
+            "db_format:   SQLite (not JSON) — "
+            "tables: meta, files, modules, build_timing"
+        )
         print(f"context_id:  {result.context_id}")
-        print(f"files:       {result.n_files}")
+        print(f"filelists:   {result.n_filelists}  (parent + nested .f)")
+        print(f"rtl_sources: {result.n_rtl_sources}  (from filelist expand)")
+        print(f"db_files:    {result.n_files}  (files table rows)")
         print(
             f"modules:     {result.n_modules}  "
             f"(unique names: {result.n_unique_module_names})"
@@ -136,6 +197,8 @@ def _run_build_db(cfg, *, quiet: bool, as_json: bool) -> int:
         print("timings (sec):")
         for k, v in result.timings.items():
             print(f"  {k:22s} {v:10.3f}")
+        print(f"TOTAL_BUILD_DB_SEC: {total:.3f}")
+        print(f"TOTAL_BUILD_DB_MIN: {total / 60.0:.3f}")
         if result.warnings:
             print(f"warnings:    {len(result.warnings)}")
             for w in result.warnings[:5]:
@@ -204,6 +267,18 @@ def main(argv: list[str] | None = None) -> int:
         "--json",
         action="store_true",
         help="Print machine-readable timing summary JSON",
+    )
+    bd.add_argument(
+        "--mode",
+        choices=("fast", "pyslang"),
+        default=None,
+        help="Definition index: fast text scan (default) or full pyslang parse (slow)",
+    )
+    bd.add_argument(
+        "--scan-workers",
+        type=int,
+        default=None,
+        help="Thread workers for --mode fast (default 8)",
     )
 
     run = sub.add_parser(
@@ -302,7 +377,13 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as e:
             print(f"error: {e}", file=sys.stderr)
             return 2
-        return _run_build_db(cfg, quiet=args.quiet, as_json=args.json)
+        return _run_build_db(
+            cfg,
+            quiet=args.quiet,
+            as_json=args.json,
+            mode=args.mode,
+            scan_workers=args.scan_workers,
+        )
 
     if args.cmd == "run":
         try:
@@ -324,7 +405,13 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 2
-        return _run_build_db(cfg, quiet=args.quiet, as_json=args.json)
+        return _run_build_db(
+            cfg,
+            quiet=args.quiet,
+            as_json=args.json,
+            mode=None,
+            scan_workers=None,
+        )
 
     return 2
 

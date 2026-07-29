@@ -107,6 +107,18 @@ Example: JSON ``env`` is not “a dict passed into expand only”:
 
 Details: `docs/hierwalk_env_usage.md`.
 
+## 3.2 Generate is mandatory (not a fast-scan excuse)
+
+Company RTL **depends on** `generate for/if/case` (often with ifdef). Hierarchy
+paths and COI are only meaningful after **context-scoped elaboration**.
+
+| Phase | Generate | Mechanism |
+|-------|----------|-----------|
+| `build_db` name→file | not required | `mode=fast` scan (default); avoids 40 min full parse |
+| Instance tree / hie2hie / relate | **required** | pyslang elaborate on **slice/closure** from DB, not whole 13k every time |
+
+See `docs/generate_and_index.md`.
+
 ---
 
 ## 4. Compile context (L0)

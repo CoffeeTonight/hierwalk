@@ -33,6 +33,8 @@ class BuildDbResult:
     n_files: int
     n_modules: int
     n_unique_module_names: int
+    n_filelists: int = 0  # parent + nested .f seen during expand
+    n_rtl_sources: int = 0  # source_files from filelist expand
     timings: Dict[str, float] = field(default_factory=dict)
     errors: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
@@ -42,10 +44,13 @@ class BuildDbResult:
     def summary(self) -> Dict[str, object]:
         return {
             "db_path": str(self.db_path),
+            "db_format": "sqlite",
             "context_id": self.context_id,
             "n_files": self.n_files,
             "n_modules": self.n_modules,
             "n_unique_module_names": self.n_unique_module_names,
+            "n_filelists": self.n_filelists,
+            "n_rtl_sources": self.n_rtl_sources,
             "timings_sec": dict(self.timings),
             "total_sec": self.timings.get("total", sum(self.timings.values())),
             "errors": list(self.errors),
@@ -57,6 +62,11 @@ class BuildDbResult:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _ts() -> str:
+    """Local wall-clock for human logs."""
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _phase(timings: Dict[str, float], name: str, t0: float) -> float:
@@ -190,6 +200,8 @@ def build_essential_db(
     extra_defines: Optional[Mapping[str, str]] = None,
     env: Optional[Mapping[str, str]] = None,
     work_dir: Optional[Union[str, Path]] = None,
+    mode: str = "fast",
+    scan_workers: int = 8,
     on_progress: Optional[OnProgress] = None,
     defer_source_exists: bool = False,
 ) -> BuildDbResult:
@@ -211,11 +223,21 @@ def build_essential_db(
         Optional top module (written into flat slang filelist).
     work_dir
         Where to place intermediate flat ``.f`` (default: next to db).
+    mode
+        ``fast`` (default): parallel text scan for module/interface/package names
+        — minutes-class on large filelists.
+        ``pyslang``: full parseAllSources + getDefinitions — accurate but often
+        **tens of minutes** on ~10k RTL (company runs ~40 min reported).
+    scan_workers
+        Thread count for ``fast`` mode.
     """
     t_all = time.perf_counter()
     timings: Dict[str, float] = {}
     warnings: List[str] = []
     errors: List[str] = []
+    mode_norm = (mode or "fast").strip().lower()
+    if mode_norm not in ("fast", "pyslang"):
+        raise ValueError(f"unknown build_db mode={mode!r} (use fast|pyslang)")
 
     db_path = Path(db_path).resolve()
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -223,11 +245,30 @@ def build_essential_db(
     work.mkdir(parents=True, exist_ok=True)
 
     def prog(msg: str) -> None:
+        """Always timestamped; wall clock + optional elapsed-from-start."""
         if on_progress:
-            on_progress(msg)
+            elapsed = time.perf_counter() - t_all
+            on_progress(f"[{_ts()}] (+{elapsed:8.3f}s) {msg}")
+
+    def end_phase(name: str, t0: float, detail: str = "") -> float:
+        t0 = _phase(timings, name, t0)
+        sec = timings[name]
+        extra = f" — {detail}" if detail else ""
+        prog(f"phase done: {name}  took {sec:.3f}s{extra}")
+        return t0
+
+    prog(f"build_db START  out={db_path}  format=SQLite  mode={mode_norm}")
+    prog(f"  parent_filelist={filelist}")
+    if top:
+        prog(f"  top={top}")
+    if mode_norm == "pyslang":
+        prog(
+            "  note: mode=pyslang parses ALL listed RTL — large designs often "
+            "need 10–40+ min; use mode=fast for name→file catalog"
+        )
 
     # --- 1) context / filelist ---
-    prog("phase: filelist expand")
+    prog("phase start: filelist_expand")
     t0 = time.perf_counter()
     ctx: CompileContext = build_context(
         filelist,
@@ -236,44 +277,99 @@ def build_essential_db(
         env=env,
         top=top,
         defer_source_exists=defer_source_exists,
+        on_progress=prog,
     )
-    t0 = _phase(timings, "filelist_expand", t0)
+    n_filelists = 0
+    if ctx.raw is not None:
+        n_filelists = len(getattr(ctx.raw, "filelist_info", {}) or {})
+    if n_filelists == 0:
+        # parent only + nested edges as lower bound
+        n_filelists = 1 + len(ctx.filelist_edges)
+    n_rtl_sources = len(ctx.source_files)
+
+    t0 = end_phase(
+        "filelist_expand",
+        t0,
+        f"filelists={n_filelists} rtl_sources={n_rtl_sources} "
+        f"defines={len(ctx.defines)} filelist_errors={len(ctx.errors)}",
+    )
+    prog(
+        f"filelist inventory: n_filelists={n_filelists} "
+        f"(parent + nested .f)  n_rtl_sources={n_rtl_sources}"
+    )
     if ctx.errors:
         warnings.extend(f"filelist: {e}" for e in ctx.errors)
 
-    # --- 2) flat slang filelist ---
-    prog("phase: write flat slang filelist")
+    # --- 2) flat slang filelist (still useful for later pyslang scoped work) ---
+    prog("phase start: write_flat_f")
     flat = work / f"{ctx.context_id}.flat.slang.f"
     ctx.write_slang_filelist(flat)
     top_name = top or (ctx.top_modules[0] if ctx.top_modules else "")
     _ensure_top_in_flat(flat, top_name or None)
-    t0 = _phase(timings, "write_flat_f", t0)
+    t0 = end_phase("write_flat_f", t0, f"flat={flat.name}")
 
-    # --- 3) pyslang definitions ---
-    prog("phase: pyslang parse + definitions")
-    try:
-        def_rows, pyslang_ver, slang_errs = _collect_definitions(
-            flat, on_progress=on_progress
+    # --- 3) definitions: fast scan (default) or full pyslang ---
+    def_rows: List[tuple[str, str, str]] = []
+    pyslang_ver = ""
+    if mode_norm == "fast":
+        from pyhirewalk.index.scan_defs import collect_definitions_fast
+
+        prog("phase start: definitions_fast")
+        t0 = time.perf_counter()
+        def_rows, scan_errs = collect_definitions_fast(
+            list(ctx.source_files),
+            on_progress=prog,
+            workers=scan_workers,
         )
-    except RuntimeError as e:
-        timings["pyslang_definitions"] = time.perf_counter() - t0
-        timings["total"] = time.perf_counter() - t_all
-        return BuildDbResult(
-            db_path=db_path,
-            context_id=ctx.context_id,
-            n_files=0,
-            n_modules=0,
-            n_unique_module_names=0,
-            timings=timings,
-            errors=[str(e)],
-            warnings=warnings,
-            flat_filelist=flat,
+        errors.extend(scan_errs)
+        t0 = end_phase(
+            "definitions_fast",
+            t0,
+            f"definitions={len(def_rows)} workers={scan_workers}",
         )
-    errors.extend(slang_errs)
-    t0 = _phase(timings, "pyslang_definitions", t0)
+        # alias for timing table compatibility
+        timings["definitions"] = timings.get("definitions_fast", 0.0)
+    else:
+        prog("phase start: pyslang_definitions")
+        t0 = time.perf_counter()
+        try:
+            def_rows, pyslang_ver, slang_errs = _collect_definitions(
+                flat, on_progress=prog
+            )
+        except RuntimeError as e:
+            timings["pyslang_definitions"] = time.perf_counter() - t0
+            timings["total"] = time.perf_counter() - t_all
+            prog(
+                f"phase FAIL: pyslang_definitions  "
+                f"took {timings['pyslang_definitions']:.3f}s"
+            )
+            prog(
+                f"build_db TOTAL wall time: {timings['total']:.3f}s  "
+                f"({timings['total'] / 60.0:.2f} min)  FAILED"
+            )
+            return BuildDbResult(
+                db_path=db_path,
+                context_id=ctx.context_id,
+                n_files=0,
+                n_modules=0,
+                n_unique_module_names=0,
+                n_filelists=n_filelists,
+                n_rtl_sources=n_rtl_sources,
+                timings=timings,
+                errors=[str(e)],
+                warnings=warnings,
+                flat_filelist=flat,
+            )
+        errors.extend(slang_errs)
+        t0 = end_phase(
+            "pyslang_definitions",
+            t0,
+            f"definitions={len(def_rows)} pyslang={pyslang_ver or '?'}",
+        )
+        timings["definitions"] = timings.get("pyslang_definitions", 0.0)
 
     # --- 4) sqlite ---
-    prog("phase: sqlite write")
+    prog("phase start: sqlite_write")
     if db_path.exists():
         db_path.unlink()
 
@@ -305,6 +401,10 @@ def build_essential_db(
                         "ports_filled": False,
                         "instances_filled": False,
                         "n_filelist_errors": len(ctx.errors),
+                        "n_filelists": n_filelists,
+                        "n_rtl_sources": n_rtl_sources,
+                        "mode": mode_norm,
+                        "scan_workers": scan_workers if mode_norm == "fast" else None,
                     }
                 ),
             ),
@@ -353,7 +453,11 @@ def build_essential_db(
     finally:
         conn.close()
 
-    _phase(timings, "sqlite_write", t0)
+    end_phase(
+        "sqlite_write",
+        t0,
+        f"db_files={len(path_to_id)} modules={n_mod} unique_names={len(names)}",
+    )
     timings["total"] = time.perf_counter() - t_all
 
     conn = sqlite3.connect(str(db_path))
@@ -368,10 +472,37 @@ def build_essential_db(
     finally:
         conn.close()
 
-    prog(
-        f"done: files={len(path_to_id)} modules={n_mod} "
-        f"unique_names={len(names)} total={timings['total']:.3f}s"
+    # Phase breakdown + wall-clock total (always log — primary user ask)
+    prog("----- inventory (final) -----")
+    prog(f"  n_filelists     = {n_filelists}   # parent + nested .f expanded")
+    prog(f"  n_rtl_sources   = {n_rtl_sources}   # RTL paths from filelist")
+    prog(f"  n_db_files      = {len(path_to_id)}   # rows in files table")
+    prog(f"  n_modules       = {n_mod}   # definition rows (module→file)")
+    prog(f"  n_unique_names  = {len(names)}")
+    prog("----- timing breakdown -----")
+    order = (
+        "filelist_expand",
+        "write_flat_f",
+        "definitions_fast",
+        "pyslang_definitions",
+        "definitions",
+        "sqlite_write",
+        "total",
     )
+    for key in order:
+        if key in timings:
+            prog(f"  {key:22s}  {timings[key]:10.3f} s")
+    for key, sec in timings.items():
+        if key not in order:
+            prog(f"  {key:22s}  {sec:10.3f} s")
+
+    total = timings["total"]
+    prog(
+        f"build_db TOTAL wall time: {total:.3f}s  ({total / 60.0:.2f} min)  "
+        f"filelists={n_filelists} files={len(path_to_id)} modules={n_mod}  "
+        f"db={db_path}"
+    )
+    prog("build_db END OK")
 
     return BuildDbResult(
         db_path=db_path,
@@ -379,6 +510,8 @@ def build_essential_db(
         n_files=len(path_to_id),
         n_modules=n_mod,
         n_unique_module_names=len(names),
+        n_filelists=n_filelists,
+        n_rtl_sources=n_rtl_sources,
         timings=timings,
         errors=errors,
         warnings=warnings,

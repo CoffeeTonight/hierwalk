@@ -208,14 +208,14 @@ def expand_filelist(
         if fpath in seen_fl:
             return
         seen_fl.add(fpath)
-        if on_progress:
-            kind = include_kind or "top"
-            parent_note = f" via {parent.name}" if parent is not None else ""
-            on_progress(f"filelist: reading {fpath.name} ({kind}{parent_note})")
+        # Log only the root (parent) filelist — nested -f/-F spam is suppressed.
+        is_root = parent is None and (include_kind in ("", "top"))
+        if on_progress and is_root:
+            on_progress(f"filelist: reading parent {fpath}")
         if not fpath.exists():
             result.errors.append(f"Filelist not found: {fpath}")
-            if on_progress:
-                on_progress(f"filelist: missing {fpath}")
+            if on_progress and is_root:
+                on_progress(f"filelist: missing parent {fpath}")
             return
 
         base = content_base
@@ -309,8 +309,6 @@ def expand_filelist(
                 np = resolve_path(nested, fpath.parent, where=f"{where}: -f")
                 chain_text = " -> ".join(str(p) for p in this_chain + [np])
                 if _matches_ignore(np, chain_text, ignore_fl):
-                    if on_progress:
-                        on_progress(f"filelist: skip {np.name} (ignore)")
                     continue
                 link_nested(fpath, np, "-f")
                 parse_one(
@@ -327,8 +325,6 @@ def expand_filelist(
                 np = resolve_path(nested, cwd, where=f"{where}: -F")
                 chain_text = " -> ".join(str(p) for p in this_chain + [np])
                 if _matches_ignore(np, chain_text, ignore_fl):
-                    if on_progress:
-                        on_progress(f"filelist: skip {np.name} (ignore)")
                     continue
                 link_nested(fpath, np, "-F")
                 parse_one(
@@ -364,17 +360,19 @@ def expand_filelist(
                         )
 
     if on_progress:
-        on_progress(f"filelist: expanding {top.name}")
+        on_progress(f"filelist: parent={top}")
     parse_one(top.resolve(), content_base=top.parent, chain=[], include_kind="top")
     add_incdir(result.base_dir)
     result.index_cwd_used = cwd
     if on_progress:
         missing = sum(1 for e in result.errors if "not found" in e.lower())
         unset = len(result.unresolved_env)
+        n_nested = max(0, len(result.filelist_info) - 1)
         on_progress(
-            "filelist: done — "
+            "filelist: done parent="
+            f"{top.name} — "
             f"{len(result.source_files)} sources, "
-            f"{len(result.filelist_info)} .f files, "
+            f"{n_nested} nested .f (not listed), "
             f"{len(result.incdirs)} incdirs, "
             f"{len(result.defines)} defines"
             + (f", {missing} missing" if missing else "")

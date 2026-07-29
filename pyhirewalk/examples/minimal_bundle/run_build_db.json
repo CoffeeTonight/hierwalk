@@ -24,6 +24,10 @@
 
   "build_db": {
     "output": "work/essential.sqlite",
-    "work_dir": "work"
+    "work_dir": "work",
+    // "fast" = parallel name scan (default; use at company scale)
+    // "pyslang" = full parse — accurate but often 10–40+ min on large RTL
+    "mode": "fast",
+    "scan_workers": 8
   }
 }
