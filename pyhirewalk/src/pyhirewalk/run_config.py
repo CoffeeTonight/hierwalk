@@ -6,11 +6,16 @@ hierwalk-style input JSON — without importing hierwalk.
 
 Supports JSON and JSONC (// and /* */ comments). Relative paths resolve against
 the config file's directory.
+
+``env`` / ``environment`` (like hierwalk): object of shell variables used inside
+``.f`` paths (``$PROJ``, ``${RTL_ROOT}/…``). Applied to ``os.environ`` and passed
+into filelist expansion.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -25,6 +30,9 @@ class RunConfig:
     top: str = ""
     index_cwd: Optional[Path] = None
     defines: Dict[str, str] = field(default_factory=dict)
+    # Filelist / path $VAR expansion (also applied to os.environ)
+    env: Dict[str, str] = field(default_factory=dict)
+    env_applied: tuple[str, ...] = ()
     # essential DB build
     db_path: Optional[Path] = None
     work_dir: Optional[Path] = None
@@ -37,6 +45,12 @@ class RunConfig:
         for k, v in sorted(self.defines.items()):
             out.append(k if v == "1" else f"{k}={v}")
         return out
+
+    def filelist_env(self) -> Dict[str, str]:
+        """Env map for expand_filelist: process env + config overrides."""
+        merged = dict(os.environ)
+        merged.update(self.env)
+        return merged
 
 
 def strip_json_comments(text: str) -> str:
@@ -133,6 +147,150 @@ def parse_defines(data: Any) -> Dict[str, str]:
     raise ValueError("'defines' must be an object, array of MACRO[=VAL], or string")
 
 
+def parse_env_block(data: Any) -> Dict[str, str]:
+    """
+    Accept env object (hierwalk-compatible)::
+
+      "env": { "PROJ": "/work/chip", "RTL_ROOT": "/work/chip/rtl" }
+
+    ``null`` values mean unset (pop) when applied; they are omitted from the
+    returned map used for substitution.
+    """
+    if data is None:
+        return {}
+    if not isinstance(data, Mapping):
+        raise ValueError("'env' must be an object of NAME → value")
+    out: Dict[str, str] = {}
+    for k, v in data.items():
+        key = str(k).strip()
+        if not key:
+            continue
+        if v is None:
+            continue
+        out[key] = str(v).strip()
+    return out
+
+
+def apply_env(
+    env: Mapping[str, str],
+    *,
+    overwrite: bool = True,
+    unset: Optional[Sequence[str]] = None,
+) -> List[str]:
+    """
+    Apply config env to ``os.environ`` (hierwalk default: JSON wins).
+
+    Returns list of keys applied.
+    """
+    applied: List[str] = []
+    for key, val in env.items():
+        if not overwrite and key in os.environ:
+            continue
+        os.environ[key] = val
+        applied.append(key)
+    for key in unset or ():
+        k = str(key).strip()
+        if k:
+            os.environ.pop(k, None)
+            applied.append(k)
+    return applied
+
+
+def apply_env_from_document(
+    doc: Mapping[str, Any],
+    *,
+    overwrite: bool = True,
+) -> tuple[Dict[str, str], List[str]]:
+    """
+    Read ``env`` / ``environment`` from document, apply to process, return
+    (env_map_for_substitution, applied_keys).
+
+    hierwalk order: apply → audit → filelist parse (expandvars sees os.environ).
+    """
+    block = _get(doc, "env", "environment", "hierwalk_env", "hier-walk-env")
+    if block is None:
+        return {}, []
+    if not isinstance(block, Mapping):
+        raise ValueError("'env' must be an object of environment variable names to values")
+
+    # null → unset
+    to_set: Dict[str, str] = {}
+    to_unset: List[str] = []
+    for k, v in block.items():
+        key = str(k).strip()
+        if not key:
+            continue
+        if v is None:
+            to_unset.append(key)
+        else:
+            to_set[key] = str(v).strip()
+
+    applied = apply_env(to_set, overwrite=overwrite, unset=to_unset)
+    return to_set, applied
+
+
+def format_env_audit_lines(
+    env: Mapping[str, str],
+    *,
+    applied: Sequence[str] = (),
+    defines: Optional[Mapping[str, str]] = None,
+) -> List[str]:
+    """
+    stderr-friendly audit, mirroring hierwalk's
+    \"after JSON env, before filelist parse\".
+    """
+    lines = [
+        "config-env: === run environment (after JSON env, before filelist parse) ===",
+    ]
+    if not env:
+        lines.append("config-env: JSON env block: (none)")
+    else:
+        declared = [f"{k}={env[k]}" for k in sorted(env)]
+        lines.append(
+            f"config-env: JSON env block declared ({len(declared)}): "
+            + "; ".join(declared)
+        )
+        if applied:
+            lines.append(
+                "config-env: JSON env applied to process "
+                f"({len(applied)}): {', '.join(sorted(set(applied)))}"
+            )
+        # Spot-check effective os.environ for declared keys
+        for k in sorted(env):
+            eff = os.environ.get(k)
+            if eff != env[k]:
+                lines.append(
+                    f"config-env: WARNING {k} effective={eff!r} != config={env[k]!r}"
+                )
+    if defines:
+        parts = [f"{k}={v}" for k, v in sorted(defines.items())]
+        lines.append(
+            f"config-env: verilog-defines from JSON ({len(parts)}): "
+            + "; ".join(parts[:40])
+            + (f" … +{len(parts) - 40} more" if len(parts) > 40 else "")
+        )
+    else:
+        lines.append("config-env: verilog-defines from JSON: (none)")
+    lines.append(
+        "config-env: note: path $VAR in .f uses process environ + config env; "
+        "defines are +define+/`define only (not path vars)"
+    )
+    return lines
+
+
+def expand_env_string(s: str, env: Optional[Mapping[str, str]] = None) -> str:
+    """Expand ``$VAR`` / ``${VAR}`` using *env* then ``os.environ``."""
+    env_map: Dict[str, str] = dict(os.environ)
+    if env:
+        env_map.update(env)
+    out = s
+    # Longer keys first so PREFIX vs PREFIX_ROOT behave predictably
+    for k in sorted(env_map.keys(), key=len, reverse=True):
+        v = env_map[k]
+        out = out.replace(f"${{{k}}}", v).replace(f"${k}", v)
+    return os.path.expandvars(out)
+
+
 def _get(doc: Mapping[str, Any], *keys: str) -> Any:
     lower_map = {str(k).lower().replace("-", "_"): v for k, v in doc.items()}
     for key in keys:
@@ -144,10 +302,15 @@ def _get(doc: Mapping[str, Any], *keys: str) -> Any:
     return None
 
 
-def _resolve(base: Path, raw: Any) -> Optional[Path]:
+def _resolve(
+    base: Path,
+    raw: Any,
+    *,
+    env: Optional[Mapping[str, str]] = None,
+) -> Optional[Path]:
     if raw is None:
         return None
-    s = str(raw).strip()
+    s = expand_env_string(str(raw).strip(), env)
     if not s:
         return None
     p = Path(s).expanduser()
@@ -158,7 +321,12 @@ def _resolve(base: Path, raw: Any) -> Optional[Path]:
     return p
 
 
-def load_run_config(path: Union[str, Path]) -> RunConfig:
+def load_run_config(
+    path: Union[str, Path],
+    *,
+    apply_process_env: bool = True,
+    env_overwrite: bool = True,
+) -> RunConfig:
     """
     Load a run config JSON/JSONC file.
 
@@ -167,6 +335,7 @@ def load_run_config(path: Union[str, Path]) -> RunConfig:
       top
       cwd | index_cwd | index-cwd
       defines
+      env | environment   — shell vars for .f path expansion
       db | output | db_path   (essential sqlite path)
       work_dir | work-dir
       build_db: { output, work_dir }  optional nested block
@@ -177,10 +346,18 @@ def load_run_config(path: Union[str, Path]) -> RunConfig:
     if not isinstance(doc, Mapping):
         raise ValueError(f"run config must be a JSON object: {cfg_path}")
 
+    env_map, applied = apply_env_from_document(doc, overwrite=env_overwrite)
+    if not apply_process_env:
+        # re-read without side effect: already applied — caller should not use this often
+        env_map = parse_env_block(
+            _get(doc, "env", "environment", "hierwalk_env", "hier-walk-env")
+        )
+        applied = []
+
     fl_raw = _get(doc, "filelist")
     if not fl_raw:
         raise ValueError(f"run config missing 'filelist': {cfg_path}")
-    filelist = _resolve(base, fl_raw)
+    filelist = _resolve(base, fl_raw, env=env_map)
     if filelist is None:
         raise ValueError("filelist path empty")
 
@@ -188,24 +365,35 @@ def load_run_config(path: Union[str, Path]) -> RunConfig:
     cwd = _resolve(
         base,
         _get(doc, "cwd", "index_cwd", "index-cwd"),
+        env=env_map,
     )
     defines = parse_defines(_get(doc, "defines"))
 
-    db_path = _resolve(base, _get(doc, "db", "output", "db_path", "db-path"))
-    work_dir = _resolve(base, _get(doc, "work_dir", "work-dir"))
+    db_path = _resolve(
+        base, _get(doc, "db", "output", "db_path", "db-path"), env=env_map
+    )
+    work_dir = _resolve(base, _get(doc, "work_dir", "work-dir"), env=env_map)
 
     build_blk = _get(doc, "build_db", "build-db")
     if isinstance(build_blk, Mapping):
         if db_path is None:
-            db_path = _resolve(base, _get(build_blk, "db", "output", "db_path", "path"))
+            db_path = _resolve(
+                base,
+                _get(build_blk, "db", "output", "db_path", "path"),
+                env=env_map,
+            )
         if work_dir is None:
-            work_dir = _resolve(base, _get(build_blk, "work_dir", "work-dir"))
+            work_dir = _resolve(
+                base, _get(build_blk, "work_dir", "work-dir"), env=env_map
+            )
 
     return RunConfig(
         filelist=filelist,
         top=top,
         index_cwd=cwd,
         defines=defines,
+        env=dict(env_map),
+        env_applied=tuple(applied),
         db_path=db_path,
         work_dir=work_dir,
         config_path=cfg_path,
@@ -220,6 +408,7 @@ def merge_run_config(
     top: Optional[str] = None,
     index_cwd: Optional[Union[str, Path]] = None,
     defines: Optional[Mapping[str, str]] = None,
+    env: Optional[Mapping[str, str]] = None,
     db_path: Optional[Union[str, Path]] = None,
     work_dir: Optional[Union[str, Path]] = None,
     cli_defines_override: bool = False,
@@ -228,9 +417,12 @@ def merge_run_config(
     Overlay CLI values on a loaded config.
 
     - Path/top/db: non-empty CLI wins.
-    - defines: by default **merge** (CLI overrides same keys). If
-      ``cli_defines_override`` and defines is not None, replace entirely.
+    - defines / env: by default **merge** (CLI overrides same keys).
     """
+    merged_env = {**cfg.env, **dict(env or {})}
+    if env:
+        apply_env(env, overwrite=True)
+
     fl = Path(filelist).resolve() if filelist else cfg.filelist
     tp = top if top is not None and str(top).strip() != "" else cfg.top
     cwd = Path(index_cwd).resolve() if index_cwd else cfg.index_cwd
@@ -250,6 +442,7 @@ def merge_run_config(
         top=tp,
         index_cwd=cwd,
         defines=defs,
+        env=merged_env,
         db_path=db,
         work_dir=wd,
     )

@@ -42,9 +42,14 @@ EDA sims take many `+define+` / paths; stuffing the CLI does not scale. Put them
 
 ```jsonc
 {
-  "filelist": "rtl/filelist.f",
+  "filelist": "$PROJ/rtl/filelist.f",
   "top": "chip_top",
-  "cwd": "/proj/run",          // -F index directory
+  "cwd": "$PROJ/sim",          // -F index directory
+  // Variables used inside .f lines ($PROJ, ${RTL_ROOT}/…) and path fields
+  "env": {
+    "PROJ": "/proj/chip",
+    "RTL_ROOT": "/proj/chip/rtl"
+  },
   "defines": {
     "SYNTHESIS": "1",
     "TECH_TSMC": "1",
@@ -56,6 +61,8 @@ EDA sims take many `+define+` / paths; stuffing the CLI does not scale. Put them
   }
 }
 ```
+
+`env` is applied to the process (like hierwalk) and used for `$VAR` / `${VAR}` in filelist contents and in config paths.
 
 ### How to run (plain `python3 file.py` — no `-m`)
 

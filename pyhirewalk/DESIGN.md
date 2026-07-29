@@ -95,6 +95,20 @@ We never answer connectivity from raw un-preprocessed text alone.
 
 ---
 
+## 3.1 Borrowed features: study usage first
+
+When lifting an idea from hierwalk, **trace the real call path** before coding.
+Example: JSON ``env`` is not “a dict passed into expand only”:
+
+1. apply to ``os.environ`` (whole run context)
+2. audit log *before* filelist parse
+3. filelist expand uses ``expandvars`` (process env) for ``$PROJ`` paths
+4. **separately**, top-level ``defines`` → Verilog ``+define+`` / `` `define``
+
+Details: `docs/hierwalk_env_usage.md`.
+
+---
+
 ## 4. Compile context (L0)
 
 Every artifact is partitioned by:

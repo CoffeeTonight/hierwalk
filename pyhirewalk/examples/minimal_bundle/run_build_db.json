@@ -1,15 +1,22 @@
 {
-  // Company-style run config: many +define+ without stuffing the CLI.
-  //   PYTHONPATH=src python -m pyhirewalk build-db --config run_build_db.json
+  // Company-style run config: many +define+ / env without stuffing the CLI.
+  //   python3 build_db.py --config run_build_db.json
   // Paths are relative to this JSON file's directory.
+  //
+  // env: variables used inside .f (and path fields): $PROJ, ${RTL_ROOT}/...
+  // Same idea as hierwalk run JSON "env" block.
 
   "filelist": "filelist.f",
   "top": "top",
   "cwd": ".",
 
+  "env": {
+    // "PROJ": "/proj/chip",
+    // "RTL_ROOT": "/proj/chip/rtl"
+  },
+
   "defines": {
     "FEATURE_A": "1"
-    // Add real project macros here, e.g.:
     // "SYNTHESIS": "1",
     // "TECH_NODE": "N3",
     // "FIFO_DEPTH": "32"

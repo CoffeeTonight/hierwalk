@@ -103,15 +103,21 @@ def expand_filelist(
     only for path expansion via :func:`os.path.expandvars` when empty dict keys miss).
     """
     top = resolve_abs(top_filelist)
-    cwd = resolve_index_cwd(top, index_cwd, env)
-    env_map: Dict[str, str] = dict(env) if env is not None else {}
+    # Config/JSON env overrides shell; always start from process environ so
+    # vars already exported still expand inside .f lines.
+    env_map: Dict[str, str] = dict(os.environ)
+    if env is not None:
+        env_map.update({str(k): str(v) for k, v in env.items()})
+    cwd = resolve_index_cwd(top, index_cwd, env_map)
     result = FilelistResult(top_path=top, base_dir=top.parent)
     seen_fl: Set[Path] = set()
     seen_src: Set[Path] = set()
     ignore_fl = list(ignore_filelist_patterns or ())
 
     def expand_env(s: str) -> str:
-        for k, v in env_map.items():
+        # Longer names first: FOO_ROOT before FOO
+        for k in sorted(env_map.keys(), key=len, reverse=True):
+            v = env_map[k]
             s = s.replace(f"${{{k}}}", v).replace(f"${k}", v)
         return os.path.expandvars(s)
 

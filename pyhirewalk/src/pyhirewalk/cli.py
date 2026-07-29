@@ -92,17 +92,25 @@ def _run_build_db(cfg, *, quiet: bool, as_json: bool) -> int:
 
     if not quiet and cfg.config_path:
         print(f"[pyhirewalk] config: {cfg.config_path}", file=sys.stderr)
-        print(
-            f"[pyhirewalk] defines: {len(cfg.defines)} macros",
-            file=sys.stderr,
-        )
+        # hierwalk-style audit BEFORE filelist expand (path $VAR depend on this)
+        from pyhirewalk.run_config import format_env_audit_lines
 
+        for line in format_env_audit_lines(
+            cfg.env,
+            applied=cfg.env_applied,
+            defines=cfg.defines,
+        ):
+            print(line, file=sys.stderr)
+
+    # Always pass process+config env so expandvars matches hierwalk
+    # (hierwalk applied JSON to os.environ then expandvars; env dict often empty).
     result = build_essential_db(
         cfg.filelist,
         cfg.db_path,
         index_cwd=cfg.index_cwd,
         top=cfg.top or None,
         extra_defines=cfg.defines or None,
+        env=cfg.filelist_env(),
         work_dir=cfg.work_dir,
         on_progress=progress,
     )
@@ -110,6 +118,8 @@ def _run_build_db(cfg, *, quiet: bool, as_json: bool) -> int:
     if as_json:
         payload = result.summary()
         payload["defines"] = dict(cfg.defines)
+        payload["env"] = dict(cfg.env)
+        payload["env_applied"] = list(cfg.env_applied)
         payload["config"] = str(cfg.config_path) if cfg.config_path else None
         print(json.dumps(payload, indent=2))
     else:
@@ -121,6 +131,7 @@ def _run_build_db(cfg, *, quiet: bool, as_json: bool) -> int:
             f"(unique names: {result.n_unique_module_names})"
         )
         print(f"defines:     {len(cfg.defines)}")
+        print(f"env:         {len(cfg.env)}")
         print(f"pyslang:     {result.pyslang_version or '(unknown)'}")
         print("timings (sec):")
         for k, v in result.timings.items():
@@ -230,10 +241,21 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: {e}", file=sys.stderr)
             return 2
 
+        if not getattr(args, "json", False) and cfg.config_path:
+            from pyhirewalk.run_config import format_env_audit_lines
+
+            for line in format_env_audit_lines(
+                cfg.env,
+                applied=cfg.env_applied,
+                defines=cfg.defines,
+            ):
+                print(line, file=sys.stderr)
+
         ctx = build_context(
             cfg.filelist,
             index_cwd=cfg.index_cwd,
             extra_defines=cfg.defines or None,
+            env=cfg.filelist_env(),
             top=cfg.top or None,
         )
         if args.write_slang_f:
