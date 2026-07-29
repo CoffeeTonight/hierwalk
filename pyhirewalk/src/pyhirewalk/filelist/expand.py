@@ -8,6 +8,20 @@ VCS semantics (intentionally preserved from battle-tested EDA usage):
   -F nested.f  — locate nested.f relative to index_cwd (EDA run directory);
                  paths *inside* nested.f are relative to index_cwd.
 
+Environment variables (how EDA uses them in .f)
+-----------------------------------------------
+The simulator process inherits shell exports (``PROJ``, ``RTL_ROOT``, …).
+Every path-like token in the filelist is env-expanded **before** joining with
+the content base:
+
+  -f $PROJ/ip/uart/files.f
+  +incdir+$RTL_ROOT/include+$VIP/include
+  -y $TECH_LIB/stdlib
+  $RTL_ROOT/top.sv
+
+Syntax: ``$NAME`` / ``${NAME}`` (see :mod:`pyhirewalk.filelist.envexpand`).
+Run-JSON ``env`` injects the same names when there is no login shell.
+
 pyslang does not implement -F; callers should flatten via
 :func:`build_slang_filelist_lines` / :func:`write_slang_filelist`.
 
@@ -17,13 +31,13 @@ This module is self-contained (no hierwalk imports).
 from __future__ import annotations
 
 import fnmatch
-import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Mapping, Optional, Sequence, Set, Union
 
 from pyhirewalk.filelist.cwd import resolve_index_cwd
+from pyhirewalk.filelist.envexpand import build_env_map, expand_eda_env
 from pyhirewalk.filelist.paths import (
     normalize_filelist_token,
     path_to_slang,
@@ -52,6 +66,7 @@ class FilelistResult:
     top_modules: List[str] = field(default_factory=list)
     work_library: str = ""
     errors: List[str] = field(default_factory=list)
+    unresolved_env: List[str] = field(default_factory=list)
     index_cwd_used: Optional[Path] = None
     # Provenance: which listing file introduced each source / nested .f
     source_via_filelist: Dict[Path, Path] = field(default_factory=dict)
@@ -99,30 +114,33 @@ def expand_filelist(
     Expand a top ``.f`` into :class:`FilelistResult`.
 
     ``index_cwd`` is the directory tools use for ``-F`` (EDA run directory).
-    ``env`` supplies ``$VAR`` / ``${VAR}`` substitution (defaults to ``os.environ``
-    only for path expansion via :func:`os.path.expandvars` when empty dict keys miss).
+    ``env`` is merged over ``os.environ`` for ``$VAR`` / ``${VAR}`` in path tokens
+    (JSON run ``env`` or explicit map — same role as shell ``export`` before vcs).
     """
     top = resolve_abs(top_filelist)
-    # Config/JSON env overrides shell; always start from process environ so
-    # vars already exported still expand inside .f lines.
-    env_map: Dict[str, str] = dict(os.environ)
-    if env is not None:
-        env_map.update({str(k): str(v) for k, v in env.items()})
+    env_map = build_env_map(env)
     cwd = resolve_index_cwd(top, index_cwd, env_map)
     result = FilelistResult(top_path=top, base_dir=top.parent)
     seen_fl: Set[Path] = set()
     seen_src: Set[Path] = set()
     ignore_fl = list(ignore_filelist_patterns or ())
+    unresolved_seen: Set[str] = set()
 
-    def expand_env(s: str) -> str:
-        # Longer names first: FOO_ROOT before FOO
-        for k in sorted(env_map.keys(), key=len, reverse=True):
-            v = env_map[k]
-            s = s.replace(f"${{{k}}}", v).replace(f"${k}", v)
-        return os.path.expandvars(s)
+    def expand_env(s: str, *, where: str = "") -> str:
+        out, missing = expand_eda_env(s, env_map, keep_unset=True)
+        for name in missing:
+            if name not in unresolved_seen:
+                unresolved_seen.add(name)
+                result.unresolved_env.append(name)
+                loc = f" ({where})" if where else ""
+                result.errors.append(
+                    f"Unset environment variable ${{{name}}} in filelist{loc}: {s!r}"
+                )
+        return out
 
-    def resolve_path(raw: str, base: Path) -> Path:
-        raw = expand_env(normalize_filelist_token(raw))
+    def resolve_path(raw: str, base: Path, *, where: str = "") -> Path:
+        """Env-expand token, then resolve relative to content base (EDA order)."""
+        raw = expand_env(normalize_filelist_token(raw), where=where)
         p = Path(raw)
         if not p.is_absolute():
             p = base / p
@@ -207,20 +225,23 @@ def expand_filelist(
             if not line or line.startswith("#"):
                 continue
 
+            where = f"{fpath.name}"
+
             if line.startswith("+incdir+"):
-                body = line[len("+incdir+") :]
-                parts = (
-                    [body]
-                    if "+./" not in body and "+../" not in body
-                    else re.split(r"(?=\+(?:\./|\.\./|/|[A-Za-z_$]))", body)
-                )
+                # EDA: +incdir+dir1+dir2+…  ($VAR may appear in any dir)
+                # Expand env first, then split on '+' path separators.
+                # (Old +./-only split failed after expand: …/include+/abs/vip)
+                body = expand_env(line[len("+incdir+") :], where=f"{where}: +incdir+")
+                parts = [p.strip() for p in body.split("+") if p.strip()]
                 for part in parts:
-                    part = part.lstrip("+").strip()
-                    if part:
-                        add_incdir(resolve_path(part, base))
+                    p = Path(part)
+                    if not p.is_absolute():
+                        p = base / p
+                    add_incdir(resolve_abs(p))
 
             elif line.startswith("+define+"):
-                body = line[len("+define+") :]
+                # Macro names usually plain; values may embed $PROJ (rare but legal)
+                body = expand_env(line[len("+define+") :], where=f"{where}: +define+")
                 if "=" in body:
                     k, v = body.split("=", 1)
                 else:
@@ -237,22 +258,25 @@ def expand_filelist(
                         result.libexts.append(ext)
 
             elif line.startswith("-v "):
-                vp = resolve_path(line[3:].strip(), base)
+                vp = resolve_path(line[3:].strip(), base, where=f"{where}: -v")
                 if vp not in result.library_files:
                     result.library_files.append(vp)
 
             elif line.startswith("-y "):
-                yp = resolve_path(line[3:].strip(), base)
+                yp = resolve_path(line[3:].strip(), base, where=f"{where}: -y")
                 if yp not in result.library_dirs:
                     result.library_dirs.append(yp)
 
             elif line.startswith("+libdir+"):
-                body = line[len("+libdir+") :]
+                body = expand_env(line[len("+libdir+") :], where=f"{where}: +libdir+")
                 for part in re.split(r"\+", body):
                     part = part.lstrip("+").strip()
                     if part:
+                        p = Path(part)
+                        if not p.is_absolute():
+                            p = base / p
                         result.slang_options.append(
-                            f"+libdir+{path_to_slang(resolve_path(part, base))}"
+                            f"+libdir+{path_to_slang(resolve_abs(p))}"
                         )
 
             elif line.startswith("+librescan"):
@@ -282,7 +306,7 @@ def expand_filelist(
 
             elif line.startswith("-f "):
                 nested = line[3:].strip()
-                np = resolve_path(nested, fpath.parent)
+                np = resolve_path(nested, fpath.parent, where=f"{where}: -f")
                 chain_text = " -> ".join(str(p) for p in this_chain + [np])
                 if _matches_ignore(np, chain_text, ignore_fl):
                     if on_progress:
@@ -299,7 +323,8 @@ def expand_filelist(
 
             elif line.startswith("-F "):
                 nested = line[3:].strip()
-                np = resolve_path(nested, cwd)
+                # -F: nested list path relative to index_cwd AFTER env expand
+                np = resolve_path(nested, cwd, where=f"{where}: -F")
                 chain_text = " -> ".join(str(p) for p in this_chain + [np])
                 if _matches_ignore(np, chain_text, ignore_fl):
                     if on_progress:
@@ -322,9 +347,18 @@ def expand_filelist(
                 elif len(tokens) >= 2 and tokens[0] in ("-work", "-worklib"):
                     result.work_library = tokens[1]
                 for tok in tokens:
-                    if tok.endswith(_SOURCE_SUFFIXES):
+                    # Source may be $RTL_ROOT/top.sv — expand then check suffix
+                    expanded_tok = expand_env(
+                        normalize_filelist_token(tok), where=f"{where}: source"
+                    )
+                    if expanded_tok.endswith(_SOURCE_SUFFIXES) or tok.endswith(
+                        _SOURCE_SUFFIXES
+                    ):
+                        p = Path(expanded_tok)
+                        if not p.is_absolute():
+                            p = base / p
                         add_source(
-                            resolve_path(tok, base),
+                            resolve_abs(p),
                             via_filelist=fpath,
                             chain=this_chain,
                         )
@@ -336,6 +370,7 @@ def expand_filelist(
     result.index_cwd_used = cwd
     if on_progress:
         missing = sum(1 for e in result.errors if "not found" in e.lower())
+        unset = len(result.unresolved_env)
         on_progress(
             "filelist: done — "
             f"{len(result.source_files)} sources, "
@@ -343,6 +378,7 @@ def expand_filelist(
             f"{len(result.incdirs)} incdirs, "
             f"{len(result.defines)} defines"
             + (f", {missing} missing" if missing else "")
+            + (f", {unset} unset env" if unset else "")
         )
     return result
 

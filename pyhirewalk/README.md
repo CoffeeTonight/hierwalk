@@ -62,7 +62,8 @@ EDA sims take many `+define+` / paths; stuffing the CLI does not scale. Put them
 }
 ```
 
-`env` is applied to the process (like hierwalk) and used for `$VAR` / `${VAR}` in filelist contents and in config paths.
+`env` is the same as shell `export` before `vcs -f …`: names that already appear in the `.f` as `$PROJ` / `${RTL_ROOT}/…` (sources, `-f`/`-F`, `+incdir+`, `-y`/`-v`).  
+Not Verilog macros — those go under `defines`. See `docs/hierwalk_env_usage.md`.
 
 ### How to run (plain `python3 file.py` — no `-m`)
 

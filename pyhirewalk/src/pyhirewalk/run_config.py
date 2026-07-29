@@ -279,16 +279,11 @@ def format_env_audit_lines(
 
 
 def expand_env_string(s: str, env: Optional[Mapping[str, str]] = None) -> str:
-    """Expand ``$VAR`` / ``${VAR}`` using *env* then ``os.environ``."""
-    env_map: Dict[str, str] = dict(os.environ)
-    if env:
-        env_map.update(env)
-    out = s
-    # Longer keys first so PREFIX vs PREFIX_ROOT behave predictably
-    for k in sorted(env_map.keys(), key=len, reverse=True):
-        v = env_map[k]
-        out = out.replace(f"${{{k}}}", v).replace(f"${k}", v)
-    return os.path.expandvars(out)
+    """Expand EDA-style ``$VAR`` / ``${VAR}`` (identifier-safe; see envexpand)."""
+    from pyhirewalk.filelist.envexpand import expand_eda_env
+
+    out, _missing = expand_eda_env(s, env, keep_unset=True)
+    return out
 
 
 def _get(doc: Mapping[str, Any], *keys: str) -> Any:
