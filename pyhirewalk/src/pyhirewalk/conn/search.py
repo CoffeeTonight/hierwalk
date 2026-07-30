@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from pyhirewalk.conn.scan import LocalDepGraph, scan_module_file
 
 # NetKey: (file, local_name)
 NetKey = Tuple[str, str]
 Evidence = Dict[str, object]
+LogFn = Callable[[str], None]
 
 
 @dataclass
@@ -31,6 +32,12 @@ class SearchResult:
     stats: Dict[str, Any] = field(default_factory=dict)
 
 
+def _fmt_ev(ev: Evidence) -> str:
+    return (
+        f"{ev.get('file')}:{ev.get('line')} | {ev.get('snippet')}"
+    )
+
+
 class ConnSearch:
     def __init__(
         self,
@@ -39,11 +46,15 @@ class ConnSearch:
         module_files: Dict[str, List[str]],
         max_hops: int = 64,
         max_nodes: int = 5000,
+        log: Optional[LogFn] = None,
+        progress_every: int = 32,
     ) -> None:
         self.defines = defines
         self.module_files = module_files
         self.max_hops = max_hops
         self.max_nodes = max_nodes
+        self._log: LogFn = log or (lambda _m: None)
+        self.progress_every = max(1, progress_every)
         self._graphs: Dict[str, LocalDepGraph] = {}
         self._inst_child_file: Dict[Tuple[str, str], str] = {}
         self.known_modules = set(module_files.keys())
@@ -51,8 +62,14 @@ class ConnSearch:
     def graph(self, file: str) -> LocalDepGraph:
         fp = str(Path_norm(file))
         if fp not in self._graphs:
+            self._log(f"scan open {fp}")
             self._graphs[fp] = scan_module_file(
                 fp, self.defines, known_modules=self.known_modules
+            )
+            g = self._graphs[fp]
+            self._log(
+                f"scan done  {fp} ports={len(g.ports)} "
+                f"fwd_nets={len(g.forward)} port_maps={len(g.port_maps)}"
             )
         return self._graphs[fp]
 
@@ -96,6 +113,10 @@ class ConnSearch:
                 prev_a[k] = (None, None)
                 qa.append((k, 0))
             lab_a[k].add(e.path)
+            self._log(
+                f"seed fanout path={e.path} net={e.name} "
+                f"fan={e.fan} port_dir={e.port_dir} file={Path_norm(e.file)}"
+            )
         for e in b_ends:
             k = (Path_norm(e.file), e.name)
             if k not in lab_b:
@@ -103,13 +124,22 @@ class ConnSearch:
                 prev_b[k] = (None, None)
                 qb.append((k, 0))
             lab_b[k].add(e.path)
+            self._log(
+                f"seed fanin  path={e.path} net={e.name} "
+                f"fan={e.fan} port_dir={e.port_dir} file={Path_norm(e.file)}"
+            )
 
         meets: List[NetKey] = []
         for k in lab_a:
             if k in lab_b:
                 meets.append(k)
+                self._log(
+                    f"seed-meet net={k[1]} file={k[0]} "
+                    f"(a and b share seed net)"
+                )
 
         nodes = 0
+        stop_reason = "frontiers_empty"
         while (qa or qb) and nodes < self.max_nodes:
             if qb and (not qa or len(qb) <= len(qa)):
                 side, q = "b", qb
@@ -123,40 +153,111 @@ class ConnSearch:
                 res.cuts.append(
                     {"where": f"{key[0]}:{key[1]}", "reason": "max_hops"}
                 )
+                self._log(
+                    f"cut max_hops side={side} net={key[1]} hops={hops} file={key[0]}"
+                )
                 continue
             nodes += 1
+            labels = lab_a.get(key) if side == "a" else lab_b.get(key)
+            label_s = ",".join(sorted(labels or ()))[:80]
+            self._log(
+                f"expand side={side} hops={hops} net={key[1]} "
+                f"labels={label_s!r} file={key[0]} "
+                f"|Fa|={len(qa)} |Fb|={len(qb)}"
+            )
 
             if side == "a":
-                for nk, ev in self._neighbors_forward(key):
+                neigh = self._neighbors_forward(key)
+            else:
+                neigh = self._neighbors_backward(key)
+
+            if not neigh:
+                self._log(
+                    f"dead-end side={side} net={key[1]} hops={hops} "
+                    f"(no structural neighbors)"
+                )
+
+            new_edges = 0
+            revisits = 0
+            if side == "a":
+                for nk, ev in neigh:
                     nk = (Path_norm(nk[0]), nk[1])
                     first = nk not in lab_a
                     if first:
                         lab_a[nk] = set()
                         prev_a[nk] = (key, ev)
                         qa.append((nk, hops + 1))
-                    # C2: OR labels from parent
+                        new_edges += 1
+                        self._log(f"evidence fanout {_fmt_ev(ev)}")
+                    else:
+                        revisits += 1
                     before = len(lab_a[nk])
                     lab_a[nk] |= lab_a[key]
+                    if not first and len(lab_a[nk]) > before:
+                        self._log(
+                            f"label-merge fanout net={nk[1]} "
+                            f"+labels from {key[1]}"
+                        )
                     if not first and len(lab_a[nk]) > before and nk in lab_b:
                         meets.append(nk)
                     if first and nk in lab_b:
                         meets.append(nk)
+                        self._log(
+                            f"frontier-meet net={nk[1]} via fanout from {key[1]}"
+                        )
             else:
-                for nk, ev in self._neighbors_backward(key):
+                for nk, ev in neigh:
                     nk = (Path_norm(nk[0]), nk[1])
                     first = nk not in lab_b
                     if first:
                         lab_b[nk] = set()
                         prev_b[nk] = (key, ev)
                         qb.append((nk, hops + 1))
+                        new_edges += 1
+                        self._log(f"evidence fanin  {_fmt_ev(ev)}")
+                    else:
+                        revisits += 1
                     before = len(lab_b[nk])
                     lab_b[nk] |= lab_b[key]
+                    if not first and len(lab_b[nk]) > before:
+                        self._log(
+                            f"label-merge fanin  net={nk[1]} "
+                            f"+labels from {key[1]}"
+                        )
                     if not first and len(lab_b[nk]) > before and nk in lab_a:
                         meets.append(nk)
                     if first and nk in lab_a:
                         meets.append(nk)
+                        self._log(
+                            f"frontier-meet net={nk[1]} via fanin from {key[1]}"
+                        )
 
-        # C5 pairs
+            if neigh and new_edges == 0:
+                self._log(
+                    f"expand-no-new side={side} net={key[1]} "
+                    f"neighbors={len(neigh)} revisits={revisits}"
+                )
+
+            if nodes == 1 or nodes % self.progress_every == 0:
+                self._log(
+                    f"progress check={check_id} nodes={nodes} "
+                    f"hops={hops} side={side} "
+                    f"|Fa|={len(qa)} |Fb|={len(qb)} "
+                    f"visited_a={len(lab_a)} visited_b={len(lab_b)} "
+                    f"files={len(self._graphs)} meets_pending={len(meets)}"
+                )
+
+        if nodes >= self.max_nodes and (qa or qb):
+            stop_reason = "max_nodes"
+            res.cuts.append({"where": check_id, "reason": "max_nodes"})
+            self._log(f"stop check={check_id} reason=max_nodes nodes={nodes}")
+        else:
+            self._log(
+                f"stop check={check_id} reason={stop_reason} nodes={nodes} "
+                f"|Fa|={len(qa)} |Fb|={len(qb)}"
+            )
+
+        # C5 pairs — log evidence chain when pair is recorded
         seen_pair: Set[Tuple[str, str]] = set()
         for mk in meets:
             for src_path in lab_a.get(mk, ()):
@@ -173,6 +274,9 @@ class ConnSearch:
                             "evidence": evidence,
                         }
                     )
+                    self._log(f"meet src={src_path} dst={dst_path}")
+                    for i, ev in enumerate(evidence):
+                        self._log(f"  evidence[{i}] {_fmt_ev(ev)}")
 
         paired_src = {p["src"] for p in res.pairs}
         paired_dst = {p["dst"] for p in res.pairs}

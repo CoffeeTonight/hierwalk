@@ -14,12 +14,18 @@ from pyhirewalk.conn.search import ConnSearch, Endpoint
 from pyhirewalk.run_config import load_hier_conn_inputs
 
 
+_TOOL = "hier_conn"
+
+
 def _ts() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _log(msg: str, t0: float) -> None:
-    print(f"[{_ts()}] (+{time.perf_counter() - t0:8.3f}s) {msg}", file=sys.stderr)
+    print(
+        f"[{_TOOL}] [{_ts()}] (+{time.perf_counter() - t0:8.3f}s) {msg}",
+        file=sys.stderr,
+    )
 
 
 def _ensure_hier_resolve_importable() -> None:
@@ -86,6 +92,7 @@ class HierConnApp:
             defines=defines,
             module_files=module_files,
             max_hops=self.max_hops,
+            log=lambda m: _log(m, t0),
         )
 
         out_checks: List[Dict[str, Any]] = []
