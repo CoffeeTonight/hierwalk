@@ -146,21 +146,55 @@ def test_parse_conn_checks_and_jobs(tmp_path: Path) -> None:
         "chip.extra",
     ]
 
-    from pyhirewalk.run_config import load_hier_resolve_inputs
+    from pyhirewalk.run_config import (
+        extract_hierarchies_from_run_conn_checks,
+        load_hier_resolve_inputs,
+        parse_conn_checks,
+    )
 
-    # noise keys must not become hierarchies
+    # noise / blabla / nested garbage must not become hierarchies
     noisy = tmp_path / "noisy.json"
     noisy.write_text(
-        """
+        r"""
         {
           "filelist": "f.f",
           "paths": ["chip.should.not"],
           "hier_resolve": { "paths": ["chip.also.not"] },
-          "random": ["chip.nope"],
+          "checks": {
+            "spoof": { "a": ["chip.top_level_checks"], "b": ["chip.top_b"] }
+          },
+          "meaningless": {
+            "foo": 1,
+            "bar": { "baz": ["chip.deep.noise"] },
+            "quote_trap": "\"chip.quoted.noise\""
+          },
           "defines": { "NO_CPU": "1" },
           "run_conn_check": {
+            "blabla": {
+              "a": ["chip.from.blabla"],
+              "b": ["chip.from.blabla.b"],
+              "should": "not"
+            },
+            "description": "run_conn_check:blabla:{ fake",
+            "extra_list": ["chip.extra_list"],
+            "nested": {
+              "checks": [
+                { "id": "fake", "a": ["chip.nested.checks"], "b": ["chip.nested.b"] }
+              ]
+            },
             "checks": [
-              { "id": "c1", "a": ["chip.a"], "b": ["chip.b"] }
+              {
+                "id": "c1",
+                "a": ["chip.a", "chip.a2"],
+                "b": ["chip.b"],
+                "meta": { "x": ["chip.meta.noise"] },
+                "comment": "not a path"
+              },
+              {
+                "id": "c2",
+                "a": ["chip.c"],
+                "b": ["chip.d", "chip.e"]
+              }
             ]
           }
         }
@@ -168,10 +202,40 @@ def test_parse_conn_checks_and_jobs(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     hpaths, hdefs, _mmap = load_hier_resolve_inputs(noisy)
-    assert hpaths == ["chip.a", "chip.b"]
+    assert hpaths == ["chip.a", "chip.a2", "chip.b", "chip.c", "chip.d", "chip.e"], hpaths
     assert hdefs.get("NO_CPU") == "1"
-    assert "chip.should.not" not in hpaths
-    assert "chip.also.not" not in hpaths
+    for bad in (
+        "chip.should.not",
+        "chip.also.not",
+        "chip.top_level_checks",
+        "chip.from.blabla",
+        "chip.nested.checks",
+        "chip.meta.noise",
+        "chip.extra_list",
+        "chip.deep.noise",
+        "chip.quoted.noise",
+    ):
+        assert bad not in hpaths, bad
+    assert not any('"' in p for p in hpaths)
+
+    # no checks array → error (do not treat blabla as checks)
+    import pytest
+
+    bare = {"run_conn_check": {"blabla": {"a": ["x"], "b": ["y"]}}}
+    try:
+        extract_hierarchies_from_run_conn_checks(bare)
+        raise AssertionError("expected ValueError")
+    except ValueError as e:
+        assert "checks" in str(e)
+
+    # parse_conn_checks ignores blabla sibling
+    pcs = parse_conn_checks(
+        {
+            "blabla": {"a": ["nope"], "b": ["nope2"]},
+            "checks": [{"id": "c", "a": ["only.a"], "b": ["only.b"]}],
+        }
+    )
+    assert len(pcs) == 1 and pcs[0].a == ("only.a",)
 
 
 def test_parse_env_block_skips_null() -> None:

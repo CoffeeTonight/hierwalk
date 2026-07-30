@@ -924,9 +924,10 @@ class HierResolveApp:
             "-c",
             type=Path,
             default=None,
-            help="run JSON: ONLY run_conn_check.checks[].a/b hierarchies "
-            "(+ defines for `ifdef, modules_json for map). "
-            "Does not use filelist/env/hier_resolve.paths as path input.",
+            help="run JSON: run_conn_check.checks[].a/b hierarchies; "
+            "defines for `ifdef; env for $VAR in modules_json path; "
+            "modules_json for map. "
+            "Does not use filelist/hier_resolve.paths as hierarchy input.",
         )
         args = ap.parse_args(argv)
 

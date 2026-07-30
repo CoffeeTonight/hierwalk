@@ -358,34 +358,33 @@ def parse_path_list(data: Any) -> List[str]:
 
 def parse_conn_checks(data: Any) -> List[ConnCheck]:
     """
-    Accept run_conn_check block or bare checks list::
+    Accept run_conn_check **object with checks array**, or a bare checks list::
 
-      "run_conn_check": {
-        "checks": [
-          { "id": "cpu", "a": ["top.u_a.x"], "b": ["top.u_b.y"] },
-          { "id": "noc", "a": [...], "b": [...], "a_role": "fanout", "b_role": "fanin" }
-        ]
-      }
+      { "checks": [ { "id", "a", "b" }, ... ], "blabla": ... }  // blabla ignored
+      [ { "id", "a", "b" }, ... ]
 
-      // or object form:
-      "checks": { "cpu": { "a": [...], "b": [...] }, ... }
+    Does **not** treat sibling keys of ``checks`` (e.g. blabla) as check entries.
     """
     if data is None:
         return []
     checks_raw = data
     if isinstance(data, Mapping):
-        # full run_conn_check object
-        inner = _get(data, "checks", "check", "items")
-        if inner is not None:
-            checks_raw = inner
+        if "checks" in data:
+            checks_raw = data["checks"]
+        elif "check" in data:
+            checks_raw = data["check"]
         elif any(k in data for k in ("a", "b", "id")):
+            # single check object
             checks_raw = [data]
         else:
-            # id → {a,b} map
-            checks_raw = data
+            raise ValueError(
+                "run_conn_check object must have a 'checks' array; "
+                f"found keys {list(data.keys())!r} (siblings are not checks)"
+            )
 
     out: List[ConnCheck] = []
     if isinstance(checks_raw, Mapping):
+        # id → {a,b} map form only when user passed checks as object
         for cid, body in checks_raw.items():
             if not isinstance(body, Mapping):
                 raise ValueError(f"check '{cid}' must be an object with a/b")
@@ -398,7 +397,7 @@ def parse_conn_checks(data: Any) -> List[ConnCheck]:
             cid = str(body.get("id") or body.get("name") or f"check_{i}")
             out.append(_one_conn_check(cid, body))
         return out
-    raise ValueError("run_conn_check.checks must be an array or id→object map")
+    raise ValueError("run_conn_check.checks must be a JSON array or id→object map")
 
 
 def _one_conn_check(cid: str, body: Mapping[str, Any]) -> ConnCheck:
@@ -575,13 +574,28 @@ def load_run_config(
     )
 
 
-def hierarchy_paths_from_checks(checks: Sequence[ConnCheck]) -> List[str]:
-    """
-    Flatten **only** ``run_conn_check.checks[*].a`` and ``.b`` for hier_resolve.
+def _normalize_hierarchy_string(raw: Any) -> str:
+    """JSON string → hierarchy path; strip accidental surrounding quotes."""
+    if not isinstance(raw, str):
+        raise ValueError(
+            f"hierarchy path must be a JSON string, got {type(raw).__name__}: {raw!r}"
+        )
+    s = raw.strip()
+    # double-encoded / copy-paste: "\"top.x\"" or "'top.x'"
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in "\"'":
+        s = s[1:-1].strip()
+    if not s or s.startswith("#"):
+        return ""
+    # reject JSON-looking garbage (keys/braces scraped as text)
+    if any(ch in s for ch in "{}\"'"):
+        raise ValueError(
+            f"invalid hierarchy path (looks like JSON noise, not a hier name): {raw!r}"
+        )
+    return s
 
-    Does **not** include hier_resolve.paths, top-level paths, filelist, env, etc.
-    Order: checks in order, each a then b. Dedup preserves first occurrence.
-    """
+
+def hierarchy_paths_from_checks(checks: Sequence[ConnCheck]) -> List[str]:
+    """Flatten ConnCheck a∪b (dedup, order preserved)."""
     out: List[str] = []
     seen: set[str] = set()
     for ch in checks:
@@ -599,12 +613,7 @@ def hierarchy_paths_from_config(
     *,
     include_resolve_paths: bool = False,
 ) -> List[str]:
-    """
-    Paths for hier_resolve from a loaded RunConfig.
-
-    Default: **only** conn_checks a∪b (include_resolve_paths=False).
-    Set include_resolve_paths=True only for explicit legacy use.
-    """
+    """Default: only conn_checks a∪b."""
     out = hierarchy_paths_from_checks(cfg.conn_checks)
     if not include_resolve_paths:
         return out
@@ -617,19 +626,88 @@ def hierarchy_paths_from_config(
     return out
 
 
+def extract_hierarchies_from_run_conn_checks(doc: Mapping[str, Any]) -> List[str]:
+    """
+    **Strict** hierarchy extraction for hier_resolve.
+
+    Reads **only** (after real JSON parse, never text-scrape)::
+
+        doc["run_conn_check"]["checks"]  // must be a JSON array
+          [i]["a"]  // must be array of strings
+          [i]["b"]  // must be array of strings
+
+    Ignored on purpose:
+      - run_conn_check.blabla / any sibling of "checks"
+      - nested run_conn_check.nested.checks
+      - top-level "checks", "paths", "hier_resolve"
+      - id, a_role, comment, meta, ... inside a check object
+    """
+    # exact keys only (no treating whole object as id→check map)
+    conn = None
+    for key in (
+        "run_conn_check",
+        "run-conn-check",
+        "conn_check",
+        "conn-check",
+    ):
+        if key in doc:
+            conn = doc[key]
+            break
+    if conn is None:
+        return []
+    if not isinstance(conn, Mapping):
+        raise ValueError("'run_conn_check' must be a JSON object")
+
+    if "checks" not in conn:
+        raise ValueError(
+            "'run_conn_check' must contain a 'checks' array "
+            "(other keys like blabla/description are ignored and must not replace checks)"
+        )
+    checks = conn["checks"]
+    if not isinstance(checks, list):
+        raise ValueError("'run_conn_check.checks' must be a JSON array [...]")
+
+    out: List[str] = []
+    seen: set[str] = set()
+    for i, item in enumerate(checks):
+        if not isinstance(item, Mapping):
+            raise ValueError(f"run_conn_check.checks[{i}] must be a JSON object")
+        for ab in ("a", "b"):
+            if ab not in item:
+                continue
+            arr = item[ab]
+            if not isinstance(arr, list):
+                raise ValueError(
+                    f"run_conn_check.checks[{i}].{ab} must be a JSON array of strings"
+                )
+            for j, elem in enumerate(arr):
+                try:
+                    s = _normalize_hierarchy_string(elem)
+                except ValueError as e:
+                    raise ValueError(
+                        f"run_conn_check.checks[{i}].{ab}[{j}]: {e}"
+                    ) from e
+                if not s or s in seen:
+                    continue
+                seen.add(s)
+                out.append(s)
+    return out
+
+
 def load_hier_resolve_inputs(
     path: Union[str, Path],
 ) -> tuple[List[str], Dict[str, str], Optional[Path]]:
     """
-    Minimal read for hier_resolve --config.
+    hier_resolve --config loader (JSON parse, not text scrape).
 
-    From the run JSON, **only**:
-      - run_conn_check.checks[].a / .b  → hierarchy path list
-      - defines                         → `ifdef (optional)
-      - modules_json / build_db.modules_json → map path (optional)
+    Uses:
+      - run_conn_check.checks[].a / .b   → hierarchies (not path env)
+      - defines                         → `ifdef
+      - env | environment               → expand $VAR in modules_json / map paths
+      - modules_json | build_db.modules_json → optional map
 
-    Does **not** require filelist, does not apply env, does not ingest
-    hier_resolve.paths / top-level paths / noise keys as hierarchies.
+    Does not walk run_conn_check siblings (blabla, …) as checks.
+    Does not use env to invent hierarchy strings.
     """
     cfg_path = Path(path).expanduser().resolve()
     base = cfg_path.parent
@@ -637,54 +715,53 @@ def load_hier_resolve_inputs(
     if not isinstance(doc, Mapping):
         raise ValueError(f"run config must be a JSON object: {cfg_path}")
 
-    conn_blk = _get(
-        doc,
-        "run_conn_check",
-        "run-conn-check",
-        "conn_check",
-        "conn-check",
-        "hier_conn",
-        "hier-conn",
-    )
-    checks = parse_conn_checks(conn_blk) if conn_blk is not None else []
-    if not checks:
-        top_checks = _get(doc, "checks")
-        if top_checks is not None:
-            # only if it looks like conn checks (has a/b), not arbitrary
-            checks = parse_conn_checks(top_checks)
+    paths = extract_hierarchies_from_run_conn_checks(doc)
+    defines = parse_defines(doc.get("defines"))
 
-    paths = hierarchy_paths_from_checks(checks)
-    defines = parse_defines(_get(doc, "defines"))
+    env_map = parse_env_block(
+        doc.get("env") if "env" in doc else doc.get("environment")
+    )
+    # also allow hierwalk aliases if present as keys
+    if not env_map:
+        for k in ("hierwalk_env", "hier-walk-env"):
+            if k in doc:
+                env_map = parse_env_block(doc.get(k))
+                break
 
     modules_json = _resolve(
         base,
-        _get(doc, "modules_json", "modules-json", "modules_map", "modules-map"),
-        env=None,
+        doc.get("modules_json")
+        or doc.get("modules-json")
+        or doc.get("modules_map")
+        or doc.get("modules-map"),
+        env=env_map or None,
     )
-    build_blk = _get(doc, "build_db", "build-db")
+    build_blk = doc.get("build_db") or doc.get("build-db")
     if modules_json is None and isinstance(build_blk, Mapping):
         modules_json = _resolve(
             base,
-            _get(
-                build_blk,
-                "modules_json",
-                "modules-json",
-                "modules_map",
-                "map",
-            ),
-            env=None,
+            build_blk.get("modules_json")
+            or build_blk.get("modules-json")
+            or build_blk.get("modules_map")
+            or build_blk.get("map"),
+            env=env_map or None,
         )
     if modules_json is None:
         db = None
         if isinstance(build_blk, Mapping):
             db = _resolve(
                 base,
-                _get(build_blk, "db", "output", "db_path", "path"),
-                env=None,
+                build_blk.get("db")
+                or build_blk.get("output")
+                or build_blk.get("db_path")
+                or build_blk.get("path"),
+                env=env_map or None,
             )
         if db is None:
             db = _resolve(
-                base, _get(doc, "db", "output", "db_path", "db-path"), env=None
+                base,
+                doc.get("db") or doc.get("output") or doc.get("db_path"),
+                env=env_map or None,
             )
         if db is not None:
             cand = db.with_suffix(".modules.json")
