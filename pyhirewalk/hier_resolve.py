@@ -495,14 +495,130 @@ class HierResolveApp:
         paths: List[str],
         *,
         out: Optional[Path] = None,
+        report_md: Optional[Path] = None,
         fail_any: bool = False,
     ) -> None:
         self.map_path = Path(map_path)
         self.paths = paths
         self.out = Path(out) if out else None
+        # default: <out>.miss.md or hier_resolve.miss.md next to map
+        if report_md is not None:
+            self.report_md = Path(report_md)
+        elif self.out is not None:
+            self.report_md = self.out.with_suffix(".miss.md")
+        else:
+            self.report_md = self.map_path.parent / "hier_resolve.miss.md"
         self.fail_any = fail_any
         self.doc: Optional[Dict[str, Any]] = None
         self.total_sec: float = 0.0
+
+    @staticmethod
+    def format_miss_report(doc: Dict[str, Any]) -> str:
+        """Short markdown: full-run summary + miss-only list."""
+        meta = doc.get("meta") or {}
+        stats = meta.get("stats") or {}
+        mmap = meta.get("module_map") or {}
+        results = doc.get("results") or []
+        misses = [r for r in results if r.get("status") == "miss"]
+        needs = [r for r in results if r.get("status") == "ok_needs_detail"]
+        n_paths = int(stats.get("n_paths") or len(results))
+        n_ok = int(stats.get("n_ok") or 0)
+        n_det = int(stats.get("n_ok_needs_detail") or 0)
+        n_miss = int(stats.get("n_miss") or len(misses))
+        total_sec = stats.get("total_sec")
+        files_opened = stats.get("files_opened")
+
+        lines: List[str] = []
+        lines.append("# Hierarchy resolve — miss report")
+        lines.append("")
+        lines.append(f"- **Created:** {meta.get('created_at', '')}")
+        lines.append(f"- **Module map:** `{mmap.get('path', '')}`")
+        if mmap.get("context_id"):
+            lines.append(f"- **context_id:** `{mmap.get('context_id')}`")
+        lines.append("")
+        lines.append("## Summary (all paths)")
+        lines.append("")
+        lines.append("| Metric | Count |")
+        lines.append("|--------|------:|")
+        lines.append(f"| Total paths | {n_paths} |")
+        lines.append(f"| OK | {n_ok} |")
+        lines.append(f"| OK needs detail (`[]` / gen) | {n_det} |")
+        lines.append(f"| **MISS** | **{n_miss}** |")
+        if files_opened is not None:
+            lines.append(f"| RTL files opened | {files_opened} |")
+        if total_sec is not None:
+            lines.append(f"| Wall time (sec) | {total_sec} |")
+        hit = (n_ok + n_det) / n_paths * 100.0 if n_paths else 0.0
+        lines.append(f"| Hit rate (ok+detail) | {hit:.1f}% |")
+        lines.append("")
+
+        # miss reason breakdown
+        reason_cnt: Dict[str, int] = {}
+        for r in misses:
+            reason = (r.get("miss") or {}).get("reason") or "unknown"
+            reason_cnt[reason] = reason_cnt.get(reason, 0) + 1
+        if reason_cnt:
+            lines.append("### Miss by reason")
+            lines.append("")
+            lines.append("| Reason | Count |")
+            lines.append("|--------|------:|")
+            for k, v in sorted(reason_cnt.items(), key=lambda x: (-x[1], x[0])):
+                lines.append(f"| `{k}` | {v} |")
+            lines.append("")
+
+        lines.append("## Miss hierarchies only")
+        lines.append("")
+        if not misses:
+            lines.append("_No misses._")
+            lines.append("")
+        else:
+            lines.append("| # | Path | Fail segment | Reason | Searched in | Parent module |")
+            lines.append("|--:|------|--------------|--------|-------------|---------------|")
+            for i, r in enumerate(misses, 1):
+                m = r.get("miss") or {}
+                path = r.get("path", "")
+                seg = m.get("segment") or ""
+                reason = m.get("reason") or ""
+                searched = m.get("searched_in") or ""
+                parent = m.get("parent_module") or ""
+                # shorten paths for readability
+                if searched:
+                    searched = f"`{searched}`"
+                lines.append(
+                    f"| {i} | `{path}` | `{seg}` | `{reason}` | {searched} | `{parent}` |"
+                )
+            lines.append("")
+            lines.append("### Miss path list (copy-friendly)")
+            lines.append("")
+            lines.append("```")
+            for r in misses:
+                lines.append(r.get("path", ""))
+            lines.append("```")
+            lines.append("")
+
+        if needs:
+            lines.append("## OK but needs_detail (not miss)")
+            lines.append("")
+            lines.append("| Path | Indexed / gen segments |")
+            lines.append("|------|------------------------|")
+            for r in needs:
+                flags = [
+                    n.get("raw")
+                    for n in (r.get("nodes") or [])
+                    if n.get("needs_detail")
+                ]
+                lines.append(
+                    f"| `{r.get('path', '')}` | {', '.join(f'`{x}`' for x in flags) or '—'} |"
+                )
+            lines.append("")
+
+        lines.append("---")
+        lines.append(
+            "_Full detail: companion JSON report "
+            f"(`schema_version` {doc.get('schema_version', 1)})._"
+        )
+        lines.append("")
+        return "\n".join(lines)
 
     @staticmethod
     def load_path_list(
@@ -576,6 +692,12 @@ class HierResolveApp:
         else:
             sys.stdout.write(text)
 
+        # Short MD: full summary + miss-only section
+        md = self.format_miss_report(self.doc)
+        self.report_md.parent.mkdir(parents=True, exist_ok=True)
+        self.report_md.write_text(md, encoding="utf-8")
+        _log(f"wrote miss report {self.report_md}", t0)
+
         for r in results:
             st = r["status"]
             flag = {"ok": "OK ", "ok_needs_detail": "OK*", "miss": "MISS"}.get(st, st)
@@ -626,6 +748,13 @@ class HierResolveApp:
         ap.add_argument("paths", nargs="*", help="extra paths")
         ap.add_argument("-o", "--out", type=Path, help="write result JSON")
         ap.add_argument(
+            "--report-md",
+            type=Path,
+            default=None,
+            help="miss summary markdown (default: <out>.miss.md or "
+            "hier_resolve.miss.md next to --map)",
+        )
+        ap.add_argument(
             "--fail-any", action="store_true", help="exit 1 if any miss"
         )
         args = ap.parse_args(argv)
@@ -633,7 +762,11 @@ class HierResolveApp:
         if not paths:
             ap.error("give --path / --list / positional paths")
         return cls(
-            args.map, paths, out=args.out, fail_any=args.fail_any
+            args.map,
+            paths,
+            out=args.out,
+            report_md=args.report_md,
+            fail_any=args.fail_any,
         ).run()
 
 
