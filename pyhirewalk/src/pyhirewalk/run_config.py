@@ -23,8 +23,21 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
 
 
 @dataclass(frozen=True)
+class ConnCheck:
+    """One a[]/b[] hierarchy-group connectivity check (fanout / fanin roles)."""
+
+    id: str
+    a: tuple[str, ...]  # typically fanout / source group
+    b: tuple[str, ...]  # typically fanin / sink group
+    # optional role override; default a=fanout, b=fanin
+    a_role: str = "fanout"
+    b_role: str = "fanin"
+    extra: Mapping[str, Any] = field(default_factory=dict, repr=False, compare=False)
+
+
+@dataclass(frozen=True)
 class RunConfig:
-    """Compile + action settings loaded from a run JSON."""
+    """Compile + action settings loaded from a single company-style run JSON."""
 
     filelist: Path
     top: str = ""
@@ -33,9 +46,16 @@ class RunConfig:
     # Filelist / path $VAR expansion (also applied to os.environ)
     env: Dict[str, str] = field(default_factory=dict)
     env_applied: tuple[str, ...] = ()
+    # parallel workers (build_db scan / future jobs)
+    jobs: int = 0
     # essential DB build
     db_path: Optional[Path] = None
     work_dir: Optional[Path] = None
+    modules_json: Optional[Path] = None  # modulename→filepath map output/input
+    # hier_resolve path list (optional; prefer run_conn_check for groups)
+    resolve_paths: tuple[str, ...] = ()
+    # connectivity checks (hier_conn)
+    conn_checks: tuple[ConnCheck, ...] = ()
     # bookkeeping
     config_path: Optional[Path] = None
     raw: Mapping[str, Any] = field(default_factory=dict, repr=False, compare=False)
@@ -316,6 +336,106 @@ def _resolve(
     return p
 
 
+def parse_path_list(data: Any) -> List[str]:
+    """Hierarchy path list: array of strings, or newline string."""
+    if data is None:
+        return []
+    if isinstance(data, str):
+        return [
+            ln.strip()
+            for ln in data.splitlines()
+            if ln.strip() and not ln.strip().startswith("#")
+        ]
+    if isinstance(data, Sequence) and not isinstance(data, (str, bytes)):
+        out: List[str] = []
+        for item in data:
+            s = str(item).strip()
+            if s and not s.startswith("#"):
+                out.append(s)
+        return out
+    raise ValueError("path list must be an array of hierarchy strings")
+
+
+def parse_conn_checks(data: Any) -> List[ConnCheck]:
+    """
+    Accept run_conn_check block or bare checks list::
+
+      "run_conn_check": {
+        "checks": [
+          { "id": "cpu", "a": ["top.u_a.x"], "b": ["top.u_b.y"] },
+          { "id": "noc", "a": [...], "b": [...], "a_role": "fanout", "b_role": "fanin" }
+        ]
+      }
+
+      // or object form:
+      "checks": { "cpu": { "a": [...], "b": [...] }, ... }
+    """
+    if data is None:
+        return []
+    checks_raw = data
+    if isinstance(data, Mapping):
+        # full run_conn_check object
+        inner = _get(data, "checks", "check", "items")
+        if inner is not None:
+            checks_raw = inner
+        elif any(k in data for k in ("a", "b", "id")):
+            checks_raw = [data]
+        else:
+            # id → {a,b} map
+            checks_raw = data
+
+    out: List[ConnCheck] = []
+    if isinstance(checks_raw, Mapping):
+        for cid, body in checks_raw.items():
+            if not isinstance(body, Mapping):
+                raise ValueError(f"check '{cid}' must be an object with a/b")
+            out.append(_one_conn_check(str(cid), body))
+        return out
+    if isinstance(checks_raw, Sequence) and not isinstance(checks_raw, (str, bytes)):
+        for i, body in enumerate(checks_raw):
+            if not isinstance(body, Mapping):
+                raise ValueError(f"checks[{i}] must be an object")
+            cid = str(body.get("id") or body.get("name") or f"check_{i}")
+            out.append(_one_conn_check(cid, body))
+        return out
+    raise ValueError("run_conn_check.checks must be an array or id→object map")
+
+
+def _one_conn_check(cid: str, body: Mapping[str, Any]) -> ConnCheck:
+    a = parse_path_list(_get(body, "a", "src", "sources", "fanout", "group_a"))
+    b = parse_path_list(_get(body, "b", "dst", "sinks", "fanin", "group_b"))
+    a_role = str(_get(body, "a_role", "a-role") or "fanout").strip().lower()
+    b_role = str(_get(body, "b_role", "b-role") or "fanin").strip().lower()
+    # pass through unknown keys for future options
+    known = {
+        "id",
+        "name",
+        "a",
+        "b",
+        "src",
+        "dst",
+        "sources",
+        "sinks",
+        "fanout",
+        "fanin",
+        "group_a",
+        "group_b",
+        "a_role",
+        "a-role",
+        "b_role",
+        "b-role",
+    }
+    extra = {str(k): v for k, v in body.items() if str(k) not in known}
+    return ConnCheck(
+        id=cid,
+        a=tuple(a),
+        b=tuple(b),
+        a_role=a_role,
+        b_role=b_role,
+        extra=extra,
+    )
+
+
 def load_run_config(
     path: Union[str, Path],
     *,
@@ -323,17 +443,21 @@ def load_run_config(
     env_overwrite: bool = True,
 ) -> RunConfig:
     """
-    Load a run config JSON/JSONC file.
+    Load a run config JSON/JSONC file (one document for build_db / resolve / conn).
 
     Recognized keys (snake or kebab case):
       filelist (required)
       top
+      jobs | workers | scan_workers
       cwd | index_cwd | index-cwd
-      defines
-      env | environment   — shell vars for .f path expansion
-      db | output | db_path   (essential sqlite path)
+      defines          — `ifdef / +define+  (e.g. NO_CPU: \"1\")
+      env | environment — shell vars for .f path expansion
+      db | output | db_path
       work_dir | work-dir
-      build_db: { output, work_dir }  optional nested block
+      modules_json | modules_map
+      build_db: { output, work_dir, mode, scan_workers, modules_json }
+      hier_resolve | resolve: { paths: [...] }  or paths: [...]
+      run_conn_check | conn_check: { checks: [ {id, a, b}, ... ] }
     """
     cfg_path = Path(path).expanduser().resolve()
     base = cfg_path.parent
@@ -364,10 +488,18 @@ def load_run_config(
     )
     defines = parse_defines(_get(doc, "defines"))
 
+    jobs_raw = _get(doc, "jobs", "workers", "n_jobs", "n-jobs")
+    jobs = int(jobs_raw) if jobs_raw is not None and str(jobs_raw).strip() != "" else 0
+
     db_path = _resolve(
         base, _get(doc, "db", "output", "db_path", "db-path"), env=env_map
     )
     work_dir = _resolve(base, _get(doc, "work_dir", "work-dir"), env=env_map)
+    modules_json = _resolve(
+        base,
+        _get(doc, "modules_json", "modules-json", "modules_map", "modules-map"),
+        env=env_map,
+    )
 
     build_blk = _get(doc, "build_db", "build-db")
     if isinstance(build_blk, Mapping):
@@ -381,6 +513,49 @@ def load_run_config(
             work_dir = _resolve(
                 base, _get(build_blk, "work_dir", "work-dir"), env=env_map
             )
+        if modules_json is None:
+            modules_json = _resolve(
+                base,
+                _get(
+                    build_blk,
+                    "modules_json",
+                    "modules-json",
+                    "modules_map",
+                    "map",
+                ),
+                env=env_map,
+            )
+        sw = _get(build_blk, "scan_workers", "scan-workers", "jobs", "workers")
+        if sw is not None and jobs <= 0:
+            jobs = int(sw)
+
+    # hier_resolve paths (flat list; groups live under run_conn_check)
+    resolve_paths: List[str] = []
+    resolve_blk = _get(doc, "hier_resolve", "hier-resolve", "resolve")
+    if isinstance(resolve_blk, Mapping):
+        resolve_paths = parse_path_list(
+            _get(resolve_blk, "paths", "path", "list", "hierarchies")
+        )
+    elif resolve_blk is not None:
+        resolve_paths = parse_path_list(resolve_blk)
+    if not resolve_paths:
+        resolve_paths = parse_path_list(_get(doc, "paths", "hierarchies"))
+
+    conn_blk = _get(
+        doc,
+        "run_conn_check",
+        "run-conn-check",
+        "conn_check",
+        "conn-check",
+        "hier_conn",
+        "hier-conn",
+    )
+    conn_checks = parse_conn_checks(conn_blk) if conn_blk is not None else []
+    # also allow top-level "checks"
+    if not conn_checks:
+        top_checks = _get(doc, "checks")
+        if top_checks is not None:
+            conn_checks = parse_conn_checks(top_checks)
 
     return RunConfig(
         filelist=filelist,
@@ -389,11 +564,50 @@ def load_run_config(
         defines=defines,
         env=dict(env_map),
         env_applied=tuple(applied),
+        jobs=jobs,
         db_path=db_path,
         work_dir=work_dir,
+        modules_json=modules_json,
+        resolve_paths=tuple(resolve_paths),
+        conn_checks=tuple(conn_checks),
         config_path=cfg_path,
         raw=dict(doc),
     )
+
+
+def hierarchy_paths_from_config(
+    cfg: RunConfig,
+    *,
+    include_resolve_paths: bool = True,
+) -> List[str]:
+    """
+    Flatten hierarchy strings for hier_resolve (existing path API).
+
+    Primary source: every ``run_conn_check.checks[*].a`` and ``.b`` entry.
+    Optionally also ``hier_resolve.paths`` (include_resolve_paths=True).
+
+    Order: checks in file order, each check a then b; then resolve_paths.
+    Dedup preserves first occurrence.
+    """
+    out: List[str] = []
+    seen: set[str] = set()
+
+    def _add(p: str) -> None:
+        s = str(p).strip()
+        if not s or s.startswith("#") or s in seen:
+            return
+        seen.add(s)
+        out.append(s)
+
+    for ch in cfg.conn_checks:
+        for p in ch.a:
+            _add(p)
+        for p in ch.b:
+            _add(p)
+    if include_resolve_paths:
+        for p in cfg.resolve_paths:
+            _add(p)
+    return out
 
 
 def merge_run_config(

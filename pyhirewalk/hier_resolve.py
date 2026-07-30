@@ -79,6 +79,141 @@ def strip_comments(t: str) -> str:
         from pyhirewalk.util_comments import strip_sv_comments
     return strip_sv_comments(t)
 
+
+# Preprocessor conditionals — evaluate with provided defines; do NOT blindly strip.
+# Line structure preserved (inactive / directive lines → blank) for later file:line.
+_PP_LINE = re.compile(
+    r"^([ \t]*)`[ \t]*"
+    r"(ifdef|ifndef|elsif|elseif|else|endif)\b"
+    r"[ \t]*([A-Za-z_]\w*)?"
+    r"[^\n]*"
+    r"(\n?)$",
+    re.M | re.I,
+)
+
+
+def normalize_defines(defines: Optional[Any]) -> Dict[str, str]:
+    """Accept dict, list of 'NAME'/'NAME=val', or set of names → name→value map."""
+    out: Dict[str, str] = {}
+    if defines is None:
+        return out
+    if isinstance(defines, dict):
+        for k, v in defines.items():
+            if k is None:
+                continue
+            name = str(k).strip()
+            if not name:
+                continue
+            out[name] = "" if v is None else str(v)
+        return out
+    if isinstance(defines, (set, frozenset, list, tuple)):
+        for item in defines:
+            if item is None:
+                continue
+            s = str(item).strip()
+            if not s:
+                continue
+            if "=" in s:
+                n, _, v = s.partition("=")
+                n = n.strip()
+                if n:
+                    out[n] = v.strip()
+            else:
+                out[s] = ""
+        return out
+    return out
+
+
+def is_defined(name: str, defines: Dict[str, str]) -> bool:
+    return name in defines
+
+
+def apply_sv_ifdefs(text: str, defines: Optional[Any] = None) -> str:
+    """
+    Evaluate nested `ifdef / `ifndef / `elsif / `else / `endif using *defines*.
+
+    - `ifdef  NAME`  → keep body if NAME is in defines
+    - `ifndef NAME`  → keep body if NAME is *not* in defines
+    - Inactive branches and the directive lines themselves become blank lines
+      (same number of newlines) so line numbers stay aligned with the source file.
+
+    Does **not** expand `define / `include; only conditional inclusion.
+    Caller should pass compile/run defines (CLI, run JSON, map meta) later.
+    """
+    defs = normalize_defines(defines)
+    # stack frame: parent_emit, this_emit, taken (some branch of this if-chain already true)
+    stack: List[Tuple[bool, bool, bool]] = [(True, True, False)]
+    out: List[str] = []
+
+    # split keeping line ends
+    parts = re.split(r"(\n)", text)
+    # reassemble into lines with optional \n
+    lines: List[str] = []
+    buf = ""
+    for p in parts:
+        if p == "\n":
+            lines.append(buf + "\n")
+            buf = ""
+        else:
+            buf += p
+    if buf:
+        lines.append(buf)
+
+    for line in lines:
+        m = _PP_LINE.match(line)
+        if not m:
+            _parent, emit, _taken = stack[-1]
+            out.append(line if emit else ("\n" if line.endswith("\n") else ""))
+            continue
+
+        kw = m.group(2).lower()
+        name = m.group(3) or ""
+        # blank out directive line (preserve newline)
+        blank = "\n" if line.endswith("\n") else ""
+
+        if kw in ("ifdef", "ifndef"):
+            parent_emit = stack[-1][1]
+            if not name:
+                # malformed — treat as false condition
+                cond = False
+            elif kw == "ifdef":
+                cond = is_defined(name, defs)
+            else:
+                cond = not is_defined(name, defs)
+            this_emit = parent_emit and cond
+            stack.append((parent_emit, this_emit, cond))
+            out.append(blank)
+        elif kw in ("elsif", "elseif"):
+            if len(stack) <= 1:
+                out.append(blank)
+                continue
+            parent_emit, _cur, taken = stack[-1]
+            if not name:
+                cond = False
+            else:
+                cond = is_defined(name, defs)
+            # elsif only if no prior branch taken
+            this_emit = parent_emit and (not taken) and cond
+            stack[-1] = (parent_emit, this_emit, taken or cond)
+            out.append(blank)
+        elif kw == "else":
+            if len(stack) <= 1:
+                out.append(blank)
+                continue
+            parent_emit, _cur, taken = stack[-1]
+            this_emit = parent_emit and (not taken)
+            stack[-1] = (parent_emit, this_emit, True)
+            out.append(blank)
+        elif kw == "endif":
+            if len(stack) > 1:
+                stack.pop()
+            out.append(blank)
+        else:
+            out.append(blank)
+
+    return "".join(out)
+
+
 def skip_bal(s: str, i: int, op: str = "(", cl: str = ")") -> int:
     if i >= len(s) or s[i] != op:
         return -1
@@ -142,6 +277,7 @@ class ModuleMap:
 @dataclass
 class HierResolver:
     mmap: ModuleMap
+    defines: Dict[str, str] = field(default_factory=dict)
     _body: Dict[str, str] = field(default_factory=dict)
     _inst: Dict[str, Dict[str, str]] = field(default_factory=dict)  # file→base→type
     _gen: Dict[str, set] = field(default_factory=dict)
@@ -149,14 +285,16 @@ class HierResolver:
     files_opened: int = 0
 
     def body(self, fp: str) -> str:
+        """Comment-stripped + `ifdef-evaluated text (line numbers preserved)."""
         if fp not in self._body:
             self.files_opened += 1
             try:
-                self._body[fp] = strip_comments(
-                    Path(fp).read_text(encoding="utf-8", errors="ignore")
-                )
+                raw = Path(fp).read_text(encoding="utf-8", errors="ignore")
             except OSError:
                 self._body[fp] = ""
+                return self._body[fp]
+            # comments first (so // `ifdef in comments is gone), then conditionals
+            self._body[fp] = apply_sv_ifdefs(strip_comments(raw), self.defines)
         return self._body[fp]
 
     def inst_map(self, fp: str) -> Dict[str, str]:
@@ -497,6 +635,7 @@ class HierResolveApp:
         out: Optional[Path] = None,
         report_md: Optional[Path] = None,
         fail_any: bool = False,
+        defines: Optional[Dict[str, str]] = None,
     ) -> None:
         self.map_path = Path(map_path)
         self.paths = paths
@@ -509,6 +648,7 @@ class HierResolveApp:
         else:
             self.report_md = self.map_path.parent / "hier_resolve.miss.md"
         self.fail_any = fail_any
+        self.defines = normalize_defines(defines)
         self.doc: Optional[Dict[str, Any]] = None
         self.total_sec: float = 0.0
 
@@ -643,13 +783,23 @@ class HierResolveApp:
         _log(f"  n_paths_in={len(self.paths)}", t0)
 
         mmap = ModuleMap.load(self.map_path)
+        # defines: CLI/app > map meta.defines / meta.defines
+        map_defs = normalize_defines(
+            mmap.meta.get("defines") or mmap.meta.get("define")
+        )
+        defs = {**map_defs, **self.defines}
         _log(
             f"  modules_in_map={len(mmap.modules)}  "
-            f"context_id={mmap.meta.get('context_id')}",
+            f"context_id={mmap.meta.get('context_id')}  "
+            f"defines={len(defs)}",
             t0,
         )
+        if defs:
+            sample = ", ".join(list(defs.keys())[:8])
+            more = "…" if len(defs) > 8 else ""
+            _log(f"  define_names=[{sample}{more}]", t0)
 
-        resolver = HierResolver(mmap)
+        resolver = HierResolver(mmap, defines=defs)
         results = resolver.resolve_many(self.paths)
 
         n_ok = sum(1 for r in results if r["status"] in ("ok", "ok_needs_detail"))
@@ -670,6 +820,8 @@ class HierResolveApp:
                 "options": {
                     "strip_index_for_match": True,
                     "comment_strip": True,
+                    "ifdef_eval": True,
+                    "defines": sorted(defs.keys()),
                     "detail_policy": "flag_only",
                 },
                 "stats": {
@@ -738,8 +890,9 @@ class HierResolveApp:
             "--map",
             "-m",
             type=Path,
-            required=True,
-            help="modules JSON from build_db (*.modules.json)",
+            default=None,
+            help="modules JSON from build_db (*.modules.json); "
+            "optional if --config sets modules_json",
         )
         ap.add_argument(
             "--path", "-p", action="append", default=[], help="hierarchy path"
@@ -757,16 +910,83 @@ class HierResolveApp:
         ap.add_argument(
             "--fail-any", action="store_true", help="exit 1 if any miss"
         )
+        ap.add_argument(
+            "-D",
+            "--define",
+            action="append",
+            default=[],
+            metavar="NAME[=VAL]",
+            help="preprocessor define for `ifdef/`ifndef (repeatable). "
+            "Also read map meta.defines / --config defines.",
+        )
+        ap.add_argument(
+            "--config",
+            "-c",
+            type=Path,
+            default=None,
+            help="run JSON (defines, hier_resolve.paths, run_conn_check a∪b). "
+            "Same file as build_db --config.",
+        )
         args = ap.parse_args(argv)
+
+        # --config: pull defines + flatten run_conn_check a[]/b[] → path list,
+        # then call the same resolve_many / resolve_one as CLI --path.
+        cfg_defines: Dict[str, str] = {}
+        cfg_paths: List[str] = []
+        map_path = args.map
+        if args.config is not None:
+            try:
+                from pyhirewalk.run_config import (
+                    hierarchy_paths_from_config,
+                    load_run_config,
+                )
+            except ImportError:
+                _src = Path(__file__).resolve().parent / "src"
+                if _src.is_dir() and str(_src) not in sys.path:
+                    sys.path.insert(0, str(_src))
+                from pyhirewalk.run_config import (
+                    hierarchy_paths_from_config,
+                    load_run_config,
+                )
+            cfg = load_run_config(args.config, apply_process_env=True)
+            cfg_defines = dict(cfg.defines)
+            # All checks[*].a and checks[*].b (+ optional hier_resolve.paths)
+            cfg_paths = hierarchy_paths_from_config(cfg)
+            if map_path is None and cfg.modules_json is not None:
+                map_path = cfg.modules_json
+            elif map_path is None and cfg.db_path is not None:
+                cand = cfg.db_path.with_suffix(".modules.json")
+                if cand.is_file():
+                    map_path = cand
+
+        if map_path is None:
+            ap.error("give --map / -m (or --config with modules_json)")
+
+        # CLI paths first, then config-derived hierarchies (dedup)
         paths = cls.load_path_list(args.path, args.list, args.paths)
+        paths = list(paths) + list(cfg_paths)
+        seen: set[str] = set()
+        uniq: List[str] = []
+        for p in paths:
+            p = p.strip()
+            if p and p not in seen:
+                seen.add(p)
+                uniq.append(p)
+        paths = uniq
         if not paths:
-            ap.error("give --path / --list / positional paths")
+            ap.error(
+                "no hierarchies: set run_conn_check.checks[].a/b in --config "
+                "(or --path / --list)"
+            )
+
+        defs = {**cfg_defines, **normalize_defines(args.define)}
         return cls(
-            args.map,
+            map_path,
             paths,
             out=args.out,
             report_md=args.report_md,
             fail_any=args.fail_any,
+            defines=defs,
         ).run()
 
 

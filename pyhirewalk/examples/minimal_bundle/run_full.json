@@ -1,0 +1,48 @@
+{
+  // Full pipeline config: build_db + resolve paths + conn checks.
+  //   python3 build_db.py --config run_full.json
+  // Paths relative to this file.
+
+  "filelist": "filelist.f",
+  "top": "top",
+  "jobs": 4,
+  "cwd": ".",
+
+  "env": {
+    // "PROJ": "/proj/chip"
+  },
+
+  // Verilog `ifdef / `ifndef  (+define+)
+  "defines": {
+    "FEATURE_A": "1"
+    // "NO_CPU": "1"
+  },
+
+  "build_db": {
+    "output": "work/essential.sqlite",
+    "work_dir": "work",
+    "mode": "fast",
+    "scan_workers": 4,
+    "modules_json": "work/essential.modules.json"
+  },
+
+  "hier_resolve": {
+    "paths": [
+      "top.u_ch.a_out"
+    ]
+  },
+
+  "run_conn_check": {
+    "checks": [
+      {
+        "id": "demo_ch",
+        "a": [
+          "top.u_ch.a_out"
+        ],
+        "b": [
+          "top.u_ch.b_in"
+        ]
+      }
+    ]
+  }
+}

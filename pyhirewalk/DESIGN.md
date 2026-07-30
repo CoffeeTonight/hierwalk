@@ -119,6 +119,16 @@ paths and COI are only meaningful after **context-scoped elaboration**.
 
 See `docs/generate_and_index.md`.
 
+## 3.3 COI / group connectivity
+
+Structural COI, bidirectional meet, port-boundary rule, and evidence policy
+(`file`/`line`/`snippet` only) are documented in **`docs/COI.md`**.
+That file is the design baseline for the future `hier_conn` script.
+
+**Hard constraint:** never require all ~13k RTL or full-chip synthesis (hours).
+Only path ancestors + on-demand cone modules (and optional scoped tools on that
+subset). See `docs/COI.md` §0.1.
+
 ---
 
 ## 4. Compile context (L0)
