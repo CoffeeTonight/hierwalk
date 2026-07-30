@@ -22,6 +22,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+# Same bootstrap as build_db.py: package lives under src/ (PyCharm Script-path
+# debug often has project root on sys.path first; without this, import can bind
+# a wrong/incomplete pyhirewalk and then fail on pyhirewalk.run_config).
+_SRC = Path(__file__).resolve().parent / "src"
+if _SRC.is_dir() and str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
 # ---------------------------------------------------------------------------
 _SEG = re.compile(r"[^.]+")
 _IDX = re.compile(r"^([A-Za-z_]\w*)((?:\[[^\]]+\])*)$")
@@ -70,13 +77,8 @@ def base_sel(seg: str) -> Tuple[str, Optional[str]]:
 
 def strip_comments(t: str) -> str:
     # Single-pass state machine (order of // vs /* must not matter).
-    try:
-        from pyhirewalk.util_comments import strip_sv_comments
-    except ImportError:
-        _src = Path(__file__).resolve().parent / "src"
-        if _src.is_dir() and str(_src) not in sys.path:
-            sys.path.insert(0, str(_src))
-        from pyhirewalk.util_comments import strip_sv_comments
+    from pyhirewalk.util_comments import strip_sv_comments
+
     return strip_sv_comments(t)
 
 
@@ -937,13 +939,8 @@ class HierResolveApp:
         cfg_paths: List[str] = []
         map_path = args.map
         if args.config is not None:
-            try:
-                from pyhirewalk.run_config import load_hier_resolve_inputs
-            except ImportError:
-                _src = Path(__file__).resolve().parent / "src"
-                if _src.is_dir() and str(_src) not in sys.path:
-                    sys.path.insert(0, str(_src))
-                from pyhirewalk.run_config import load_hier_resolve_inputs
+            from pyhirewalk.run_config import load_hier_resolve_inputs
+
             cfg_paths, cfg_defines, cfg_map = load_hier_resolve_inputs(args.config)
             if map_path is None and cfg_map is not None:
                 map_path = cfg_map
