@@ -147,9 +147,25 @@ def scan_module_file(
     if mm:
         g.module = mm.group(1)
 
-    # ports
-    for m in _PORT_DIR.finditer(text):
-        g.ports[m.group(2)] = m.group(1)
+    # ports (split on direction so input/output/inout do not share one chunk)
+    type_kw = frozenset(
+        "wire reg logic bit signed unsigned var ref integer int tri "
+        "byte shortint longint time realtime".split()
+    )
+    parts = re.split(r"\b(input|output|inout)\b", text, flags=re.I)
+    pi = 1
+    while pi + 1 < len(parts):
+        direction = parts[pi].lower()
+        chunk = parts[pi + 1]
+        if ";" in chunk:
+            chunk = chunk.split(";", 1)[0]
+        for idm in _IDENT.finditer(chunk):
+            w = idm.group(0)
+            wl = w.lower()
+            if wl in ("input", "output", "inout") or wl in type_kw:
+                continue
+            g.ports.setdefault(w, direction)
+        pi += 2
 
     # continuous assign: RHS idents -> LHS
     for m in _ASSIGN.finditer(text):

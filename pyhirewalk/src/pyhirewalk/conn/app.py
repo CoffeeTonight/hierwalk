@@ -105,14 +105,22 @@ class HierConnApp:
                     miss_a.append(p)
                 else:
                     a_ends.append(ep)
-                    _log(f"  a ok {p} -> {ep.module}.{ep.name} @ {ep.file}", t0)
+                    _log(
+                        f"  a ok {p} -> {ep.module}.{ep.name} "
+                        f"fan={ep.fan} port_dir={ep.port_dir} @ {ep.file}",
+                        t0,
+                    )
             for p in ch["b"]:
                 ep = self._endpoint_from_resolve(p, resolve_by_path, search, t0)
                 if ep is None:
                     miss_b.append(p)
                 else:
                     b_ends.append(ep)
-                    _log(f"  b ok {p} -> {ep.module}.{ep.name} @ {ep.file}", t0)
+                    _log(
+                        f"  b ok {p} -> {ep.module}.{ep.name} "
+                        f"fan={ep.fan} port_dir={ep.port_dir} @ {ep.file}",
+                        t0,
+                    )
 
             sr = search.run_check(cid, a_ends, b_ends)
             for p in miss_a:
@@ -228,6 +236,8 @@ class HierConnApp:
             file=str(file),
             module=str(module or ""),
             name=base,
+            port_dir=leaf.get("port_dir"),
+            fan=leaf.get("fan"),
         )
 
     @classmethod

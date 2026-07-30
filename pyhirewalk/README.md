@@ -123,6 +123,25 @@ print(result.summary())
 
 Phases timed: `filelist_expand`, `write_flat_f`, `pyslang_definitions`, `sqlite_write`, `total`.
 
+## Hierarchy resolve + COI connect
+
+Same run JSON (`run_conn_check.checks` a/b, `defines`, `env`). See `docs/run_json.md`, `docs/COI.md`.
+
+```bash
+# 1) module map
+python3 build_db.py --config run.json
+
+# 2) resolve all checks a∪b (ok leaves get port_dir / fan)
+python3 hier_resolve.py --config run.json --map work/essential.modules.json \
+  -o work/hier_resolve.json
+
+# 3) structural COI — seeds = resolve ok only
+python3 hier_conn.py --config run.json --map work/essential.modules.json \
+  --resolve work/hier_resolve.json -o work/hier_conn.json
+```
+
+`--map` overrides config `modules_json`. `hier_conn` requires `--resolve`.
+
 ## Status
 
-Phase 0–1: filelist + essential DB builder. Next: lazy ports, thin hierarchy, zigzag `relate`.
+build_db + hier_resolve + hier_conn (structural meet P1). Orphan phase / bit-slice P2+.

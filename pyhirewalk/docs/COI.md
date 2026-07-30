@@ -278,16 +278,75 @@ snippet을 NLP로 이해하진 않음. 정합성은 **그래프·역할·path** 
 [ts] (+sec) TOTAL_HIER_CONN_SEC=...
 ```
 
-## B.8 구현 페이즈
+## B.8 구현 계획 (탐색 전략 기준)
 
-| Phase | 내용 |
-|-------|------|
-| **P0** | `hier_conn.py` + `--config` → checks 루프, JSON/로그 뼈대 |
-| **P1** | 모듈 스캔(assign/FF/named port); ifdef+defines; **bi-meet + 2페이즈 골격**; C1–C5; evidence 경로 순; fixture e2e |
-| **P2** | beam·fan-in 우세; slice overlap; param 체인; MD; multi-check |
-| **P3** | channel/gen 정밀; **난관만** scoped pyslang; 다차원 |
+### 이미 있는 것 (기반)
 
-**P1 비목표:** 전수 bit-accurate, 위치 포트 전부, 전 칩 elab.
+| 항목 | 위치 |
+|------|------|
+| 런처 `python3 hier_conn.py` | `hier_conn.py` |
+| `HierConnApp` | `conn/app.py` |
+| config checks a/b 로드 | `load_hier_conn_inputs` |
+| `--resolve` 필수, ok seed만 | `app.py` |
+| 모듈 스캔 assign/FF/named port_map | `conn/scan.py` |
+| bi-meet 골격 | `conn/search.py` |
+| resolve leaf `port_dir` / `fan` | `hier_resolve.py` |
+
+### 목표 파이프라인 (고정)
+
+```text
+run.json + modules.json + hier_resolve.json
+        │
+        ▼
+HierConnApp
+  1) load checks (a/b only from JSON)
+  2) load resolve results → seed filter (ok / ok_needs_detail)
+  3) register instance chain from resolve nodes
+  4) per check: ConnSearch (a forward, b backward, meet)
+  5) evidence = path 엣지 순 append
+  6) write hier_conn.json + logs
+```
+
+### 단계
+
+| Step | 내용 | 완료 기준 |
+|------|------|-----------|
+| **S0 계약 고정** | CLI: `--config` `--map` `--resolve` `-o`. seed 규칙·입력 키를 코드/독스와 일치. resolve 재호출 없음. | `--resolve` 없이 실패; miss는 탐색 안 함 |
+| **S1 seed + fan 힌트** | resolve leaf의 `file/module/name` + `port_dir`/`fan`을 Endpoint에 실음. a/b 그룹과 leaf.fan 불일치 시 로그만 (차단 여부는 옵션). | resolve JSON만으로 Endpoint 생성 e2e |
+| **S2 로컬 그래프 정합** | `LocalDepGraph`: assign/FF LHS·RHS 역할, named port_map, ifdef(defines), 파일 1회 캐시(C4). | 같은 모듈 `i→o` assign fixture pair+evidence 1줄 |
+| **S3 경계 통과** | resolve `register_instance` + port_map으로 child/parent file 전환. 방향: a는 into child / out 활용, b는 climb parent. | din→x 다중 모듈 fixture meet |
+| **S4 meet·캐시** | C1 visited, C2 labels(OR), C3 prev+evidence append 순, C5 pair dedup. smaller-frontier. max_hops/nodes → cuts. | 3-check e2e: 연결2 + 단절1 |
+| **S5 리포트** | schema checks[].pairs/unconnected/cuts/stats. MD 요약(옵션). 로그 TOTAL_HIER_CONN_SEC. | 기존 hier_resolve 로그 스타일과 동일 계열 |
+| **S6 (후순위) orphan** | Phase2 b 잔여 말단. | 전략만 문서; 필요 시 구현 |
+| **S7 (후순위)** | slice/concat map, param 체인, scoped pyslang. | P2+ |
+
+### S0–S5 작업 순서 (코딩 시)
+
+```text
+1. app: Endpoint에 fan/port_dir 전달, resolve-only 경로 정리
+2. scan: 포트 방향 필드 정리, 테스트 모듈 fixture
+3. search: meet 시 evidence를 path 엣지 순으로만 append (재정렬 없음)
+4. resolve leaf.fan을 로그/optional prune 힌트로 사용
+5. examples + tests/test_hier_conn_*.py (config+map+resolve 한 세트)
+6. README 한 절: 3-tool 명령
+```
+
+### 명시적 비목표 (이 계획 범위 밖)
+
+- 전 RTL / 전 칩 합성·elab  
+- resolve 없이 path만으로 seed  
+- evidence 순서 “다듬기” / 파일·줄 정렬  
+- bit-accurate 전수, generate unrolling 전부  
+
+### 검증 시나리오 (필수 fixture)
+
+| ID | 설정 | 기대 |
+|----|------|------|
+| T1 | 같은 모듈 assign i→o | pair 1, evidence 1 |
+| T2 | port_map 1–2단 din→x | pair 1, evidence 여러 줄 path 순 |
+| T3 | 무관한 두 출력 | pairs 0, no_meet |
+| T4 | resolve miss path in a or b | resolve_miss, 탐색 스킵 |
+| T5 | checks 2개 + blabla 노이즈 JSON | blabla 무시, check별 결과 |
 
 ---
 
