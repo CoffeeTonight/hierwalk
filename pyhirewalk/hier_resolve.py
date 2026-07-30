@@ -48,10 +48,6 @@ _GEN_LABEL = re.compile(
     r"\bbegin\s*:\s*([A-Za-z_]\w*)\b|\bend\s*:\s*([A-Za-z_]\w*)\b",
     re.I,
 )
-_LINE_C = re.compile(r"//.*?$", re.M)
-_BLOCK_C = re.compile(r"/\*.*?\*/", re.S)
-
-
 def _ts() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -73,8 +69,15 @@ def base_sel(seg: str) -> Tuple[str, Optional[str]]:
 
 
 def strip_comments(t: str) -> str:
-    return _LINE_C.sub(" ", _BLOCK_C.sub(" ", t))
-
+    # Single-pass state machine (order of // vs /* must not matter).
+    try:
+        from pyhirewalk.util_comments import strip_sv_comments
+    except ImportError:
+        _src = Path(__file__).resolve().parent / "src"
+        if _src.is_dir() and str(_src) not in sys.path:
+            sys.path.insert(0, str(_src))
+        from pyhirewalk.util_comments import strip_sv_comments
+    return strip_sv_comments(t)
 
 def skip_bal(s: str, i: int, op: str = "(", cl: str = ")") -> int:
     if i >= len(s) or s[i] != op:
@@ -483,111 +486,159 @@ class HierResolver:
         return [self.resolve_one(p) for p in uniq]
 
 
-def _load_paths(args: argparse.Namespace) -> List[str]:
-    out: List[str] = list(args.path or []) + list(args.paths or [])
-    if args.list:
-        out.extend(
-            ln.strip()
-            for ln in Path(args.list).read_text(encoding="utf-8", errors="ignore").splitlines()
-            if ln.strip() and not ln.strip().startswith("#")
+class HierResolveApp:
+    """CLI + orchestration for hierarchy path resolve."""
+
+    def __init__(
+        self,
+        map_path: Path,
+        paths: List[str],
+        *,
+        out: Optional[Path] = None,
+        fail_any: bool = False,
+    ) -> None:
+        self.map_path = Path(map_path)
+        self.paths = paths
+        self.out = Path(out) if out else None
+        self.fail_any = fail_any
+        self.doc: Optional[Dict[str, Any]] = None
+        self.total_sec: float = 0.0
+
+    @staticmethod
+    def load_path_list(
+        path_args: Optional[List[str]] = None,
+        list_file: Optional[Path] = None,
+        positional: Optional[List[str]] = None,
+    ) -> List[str]:
+        out: List[str] = list(path_args or []) + list(positional or [])
+        if list_file:
+            out.extend(
+                ln.strip()
+                for ln in Path(list_file).read_text(
+                    encoding="utf-8", errors="ignore"
+                ).splitlines()
+                if ln.strip() and not ln.strip().startswith("#")
+            )
+        return out
+
+    def run(self) -> int:
+        t0 = time.perf_counter()
+        _log(f"hier_resolve START  map={self.map_path}", t0)
+        _log(f"  n_paths_in={len(self.paths)}", t0)
+
+        mmap = ModuleMap.load(self.map_path)
+        _log(
+            f"  modules_in_map={len(mmap.modules)}  "
+            f"context_id={mmap.meta.get('context_id')}",
+            t0,
         )
-    return out
+
+        resolver = HierResolver(mmap)
+        results = resolver.resolve_many(self.paths)
+
+        n_ok = sum(1 for r in results if r["status"] in ("ok", "ok_needs_detail"))
+        n_miss = sum(1 for r in results if r["status"] == "miss")
+        n_det = sum(1 for r in results if r["status"] == "ok_needs_detail")
+        total = time.perf_counter() - t0
+        self.total_sec = total
+
+        self.doc = {
+            "schema_version": 1,
+            "meta": {
+                "created_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "module_map": {
+                    "path": str(self.map_path.resolve()),
+                    "format": "json",
+                    "context_id": mmap.meta.get("context_id"),
+                },
+                "options": {
+                    "strip_index_for_match": True,
+                    "comment_strip": True,
+                    "detail_policy": "flag_only",
+                },
+                "stats": {
+                    "n_paths": len(results),
+                    "n_ok": n_ok - n_det,
+                    "n_ok_needs_detail": n_det,
+                    "n_miss": n_miss,
+                    "files_opened": resolver.files_opened,
+                    "total_sec": round(total, 6),
+                },
+            },
+            "results": results,
+        }
+
+        text = json.dumps(self.doc, indent=2) + "\n"
+        if self.out:
+            self.out.parent.mkdir(parents=True, exist_ok=True)
+            self.out.write_text(text, encoding="utf-8")
+            _log(f"wrote {self.out}", t0)
+        else:
+            sys.stdout.write(text)
+
+        for r in results:
+            st = r["status"]
+            flag = {"ok": "OK ", "ok_needs_detail": "OK*", "miss": "MISS"}.get(st, st)
+            extra = ""
+            if r.get("miss"):
+                extra = (
+                    f"  # {r['miss'].get('reason')} @ {r['miss'].get('segment')}"
+                )
+            elif r.get("leaf"):
+                extra = (
+                    f"  # {r['leaf'].get('module')}.{r['leaf'].get('name')} "
+                    f"→ {r['leaf'].get('file')}"
+                )
+            print(f"{flag}  {r['path']}{extra}", file=sys.stderr)
+
+        _log(
+            f"summary ok={n_ok}/{len(results)} miss={n_miss} "
+            f"needs_detail={n_det} files_opened={resolver.files_opened}",
+            t0,
+        )
+        _log(
+            f"TOTAL_HIER_RESOLVE_SEC={total:.3f}  ({total / 60.0:.3f} min)",
+            t0,
+        )
+        _log("hier_resolve END", t0)
+        print(f"TOTAL_HIER_RESOLVE_SEC: {total:.3f}", file=sys.stderr)
+
+        if self.fail_any and n_miss:
+            return 1
+        return 0
+
+    @classmethod
+    def main(cls, argv: Optional[List[str]] = None) -> int:
+        ap = argparse.ArgumentParser(
+            description="Hierarchy resolve → JSON (module map)"
+        )
+        ap.add_argument(
+            "--map",
+            "-m",
+            type=Path,
+            required=True,
+            help="modules JSON from build_db (*.modules.json)",
+        )
+        ap.add_argument(
+            "--path", "-p", action="append", default=[], help="hierarchy path"
+        )
+        ap.add_argument("--list", "-l", type=Path, help="paths file, one per line")
+        ap.add_argument("paths", nargs="*", help="extra paths")
+        ap.add_argument("-o", "--out", type=Path, help="write result JSON")
+        ap.add_argument(
+            "--fail-any", action="store_true", help="exit 1 if any miss"
+        )
+        args = ap.parse_args(argv)
+        paths = cls.load_path_list(args.path, args.list, args.paths)
+        if not paths:
+            ap.error("give --path / --list / positional paths")
+        return cls(
+            args.map, paths, out=args.out, fail_any=args.fail_any
+        ).run()
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    t0 = time.perf_counter()
-    ap = argparse.ArgumentParser(description="Hierarchy resolve → JSON (module map)")
-    ap.add_argument(
-        "--map",
-        "-m",
-        type=Path,
-        required=True,
-        help="modules JSON from build_db (*.modules.json)",
-    )
-    ap.add_argument("--path", "-p", action="append", default=[], help="hierarchy path")
-    ap.add_argument("--list", "-l", type=Path, help="paths file, one per line")
-    ap.add_argument("paths", nargs="*", help="extra paths")
-    ap.add_argument("-o", "--out", type=Path, help="write result JSON")
-    ap.add_argument("--fail-any", action="store_true", help="exit 1 if any miss")
-    args = ap.parse_args(argv)
-
-    paths = _load_paths(args)
-    if not paths:
-        ap.error("give --path / --list / positional paths")
-
-    _log(f"hier_resolve START  map={args.map}", t0)
-    _log(f"  n_paths_in={len(paths)}", t0)
-
-    mmap = ModuleMap.load(args.map)
-    _log(
-        f"  modules_in_map={len(mmap.modules)}  context_id={mmap.meta.get('context_id')}",
-        t0,
-    )
-
-    res = HierResolver(mmap)
-    results = res.resolve_many(paths)
-
-    n_ok = sum(1 for r in results if r["status"] in ("ok", "ok_needs_detail"))
-    n_miss = sum(1 for r in results if r["status"] == "miss")
-    n_det = sum(1 for r in results if r["status"] == "ok_needs_detail")
-    total = time.perf_counter() - t0
-
-    doc = {
-        "schema_version": 1,
-        "meta": {
-            "created_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "module_map": {
-                "path": str(Path(args.map).resolve()),
-                "format": "json",
-                "context_id": mmap.meta.get("context_id"),
-            },
-            "options": {
-                "strip_index_for_match": True,
-                "comment_strip": True,
-                "detail_policy": "flag_only",
-            },
-            "stats": {
-                "n_paths": len(results),
-                "n_ok": n_ok - n_det,
-                "n_ok_needs_detail": n_det,
-                "n_miss": n_miss,
-                "files_opened": res.files_opened,
-                "total_sec": round(total, 6),
-            },
-        },
-        "results": results,
-    }
-
-    text = json.dumps(doc, indent=2) + "\n"
-    if args.out:
-        args.out.parent.mkdir(parents=True, exist_ok=True)
-        args.out.write_text(text, encoding="utf-8")
-        _log(f"wrote {args.out}", t0)
-    else:
-        sys.stdout.write(text)
-
-    for r in results:
-        st = r["status"]
-        flag = {"ok": "OK ", "ok_needs_detail": "OK*", "miss": "MISS"}.get(st, st)
-        extra = ""
-        if r.get("miss"):
-            extra = f"  # {r['miss'].get('reason')} @ {r['miss'].get('segment')}"
-        elif r.get("leaf"):
-            extra = f"  # {r['leaf'].get('module')}.{r['leaf'].get('name')} → {r['leaf'].get('file')}"
-        print(f"{flag}  {r['path']}{extra}", file=sys.stderr)
-
-    _log(
-        f"summary ok={n_ok}/{len(results)} miss={n_miss} needs_detail={n_det} "
-        f"files_opened={res.files_opened}",
-        t0,
-    )
-    _log(f"TOTAL_HIER_RESOLVE_SEC={total:.3f}  ({total / 60.0:.3f} min)", t0)
-    _log("hier_resolve END", t0)
-    print(f"TOTAL_HIER_RESOLVE_SEC: {total:.3f}", file=sys.stderr)
-
-    if args.fail_any and n_miss:
-        return 1
-    return 0
+    return HierResolveApp.main(argv)
 
 
 if __name__ == "__main__":

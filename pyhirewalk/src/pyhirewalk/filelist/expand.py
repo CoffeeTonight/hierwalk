@@ -77,10 +77,10 @@ class FilelistResult:
 
 
 def _strip_comments(line: str) -> str:
-    line = re.sub(r"/\*.*?\*/", "", line)
-    if "//" in line:
-        line = line.split("//", 1)[0]
-    return line.strip()
+    # Same single-pass rules as SV sources (/*//*/ vs ///*).
+    from pyhirewalk.util_comments import strip_sv_comments
+
+    return strip_sv_comments(line).strip()
 
 
 def _matches_ignore(path: Path, chain_text: str, patterns: Sequence[str]) -> bool:

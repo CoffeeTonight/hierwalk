@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Callable, Iterable, List, Optional, Sequence, Tuple
 
 from pyhirewalk.filelist.paths import path_to_posix
+from pyhirewalk.util_comments import strip_sv_comments
 
 OnProgress = Callable[[str], None]
 
@@ -33,16 +34,6 @@ _DEF_RE = re.compile(
     r"(?m)^\s*(module|macromodule|interface|package|program)\s+"
     r"([A-Za-z_]\w*)\b"
 )
-
-# Strip // comments (not perfect inside strings — OK for index)
-_LINE_COMMENT_RE = re.compile(r"//.*?$", re.MULTILINE)
-_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
-
-
-def _strip_comments(text: str) -> str:
-    text = _BLOCK_COMMENT_RE.sub(" ", text)
-    text = _LINE_COMMENT_RE.sub(" ", text)
-    return text
 
 
 def scan_file_definitions(path: Path) -> List[Tuple[str, str, str]]:
@@ -53,7 +44,7 @@ def scan_file_definitions(path: Path) -> List[Tuple[str, str, str]]:
         raw = path.read_text(encoding="utf-8", errors="ignore")
     except OSError:
         return []
-    text = _strip_comments(raw)
+    text = strip_sv_comments(raw)
     abs_p = path_to_posix(path)
     out: List[Tuple[str, str, str]] = []
     for m in _DEF_RE.finditer(text):

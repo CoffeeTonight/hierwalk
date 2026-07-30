@@ -193,7 +193,7 @@ def _collect_definitions(
     return rows, ver, errors
 
 
-def build_essential_db(
+def _build_essential_db_impl(
     filelist: Union[str, Path],
     db_path: Union[str, Path],
     *,
@@ -574,6 +574,96 @@ def build_essential_db(
         flat_filelist=flat,
         modules_json=map_path,
     )
+
+
+
+class BuildDb:
+    """Class API for essential module-map / SQLite build (same as build_essential_db)."""
+
+    def __init__(
+        self,
+        filelist: Union[str, Path],
+        db_path: Union[str, Path],
+        *,
+        index_cwd: Optional[Union[str, Path]] = None,
+        top: Optional[str] = None,
+        extra_defines: Optional[Mapping[str, str]] = None,
+        env: Optional[Mapping[str, str]] = None,
+        work_dir: Optional[Union[str, Path]] = None,
+        mode: str = "fast",
+        scan_workers: int = 8,
+        modules_json: Optional[Union[str, Path]] = None,
+        write_sqlite: bool = True,
+        on_progress: Optional[OnProgress] = None,
+        defer_source_exists: bool = False,
+    ) -> None:
+        self.filelist = filelist
+        self.db_path = db_path
+        self.index_cwd = index_cwd
+        self.top = top
+        self.extra_defines = extra_defines
+        self.env = env
+        self.work_dir = work_dir
+        self.mode = mode
+        self.scan_workers = scan_workers
+        self.modules_json = modules_json
+        self.write_sqlite = write_sqlite
+        self.on_progress = on_progress
+        self.defer_source_exists = defer_source_exists
+        self.result: Optional[BuildDbResult] = None
+
+    def run(self) -> BuildDbResult:
+        self.result = _build_essential_db_impl(
+            self.filelist,
+            self.db_path,
+            index_cwd=self.index_cwd,
+            top=self.top,
+            extra_defines=self.extra_defines,
+            env=self.env,
+            work_dir=self.work_dir,
+            mode=self.mode,
+            scan_workers=self.scan_workers,
+            modules_json=self.modules_json,
+            write_sqlite=self.write_sqlite,
+            on_progress=self.on_progress,
+            defer_source_exists=self.defer_source_exists,
+        )
+        return self.result
+
+
+def build_essential_db(
+    filelist: Union[str, Path],
+    db_path: Union[str, Path],
+    *,
+    index_cwd: Optional[Union[str, Path]] = None,
+    top: Optional[str] = None,
+    extra_defines: Optional[Mapping[str, str]] = None,
+    env: Optional[Mapping[str, str]] = None,
+    work_dir: Optional[Union[str, Path]] = None,
+    mode: str = "fast",
+    scan_workers: int = 8,
+    modules_json: Optional[Union[str, Path]] = None,
+    write_sqlite: bool = True,
+    on_progress: Optional[OnProgress] = None,
+    defer_source_exists: bool = False,
+) -> BuildDbResult:
+    """Build essential index; delegates to :class:`BuildDb`."""
+    return BuildDb(
+        filelist,
+        db_path,
+        index_cwd=index_cwd,
+        top=top,
+        extra_defines=extra_defines,
+        env=env,
+        work_dir=work_dir,
+        mode=mode,
+        scan_workers=scan_workers,
+        modules_json=modules_json,
+        write_sqlite=write_sqlite,
+        on_progress=on_progress,
+        defer_source_exists=defer_source_exists,
+    ).run()
+
 
 
 def build_essential_db_from_context(
