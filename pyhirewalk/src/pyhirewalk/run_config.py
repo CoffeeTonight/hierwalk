@@ -575,39 +575,123 @@ def load_run_config(
     )
 
 
-def hierarchy_paths_from_config(
-    cfg: RunConfig,
-    *,
-    include_resolve_paths: bool = True,
-) -> List[str]:
+def hierarchy_paths_from_checks(checks: Sequence[ConnCheck]) -> List[str]:
     """
-    Flatten hierarchy strings for hier_resolve (existing path API).
+    Flatten **only** ``run_conn_check.checks[*].a`` and ``.b`` for hier_resolve.
 
-    Primary source: every ``run_conn_check.checks[*].a`` and ``.b`` entry.
-    Optionally also ``hier_resolve.paths`` (include_resolve_paths=True).
-
-    Order: checks in file order, each check a then b; then resolve_paths.
-    Dedup preserves first occurrence.
+    Does **not** include hier_resolve.paths, top-level paths, filelist, env, etc.
+    Order: checks in order, each a then b. Dedup preserves first occurrence.
     """
     out: List[str] = []
     seen: set[str] = set()
-
-    def _add(p: str) -> None:
-        s = str(p).strip()
-        if not s or s.startswith("#") or s in seen:
-            return
-        seen.add(s)
-        out.append(s)
-
-    for ch in cfg.conn_checks:
-        for p in ch.a:
-            _add(p)
-        for p in ch.b:
-            _add(p)
-    if include_resolve_paths:
-        for p in cfg.resolve_paths:
-            _add(p)
+    for ch in checks:
+        for p in list(ch.a) + list(ch.b):
+            s = str(p).strip()
+            if not s or s.startswith("#") or s in seen:
+                continue
+            seen.add(s)
+            out.append(s)
     return out
+
+
+def hierarchy_paths_from_config(
+    cfg: RunConfig,
+    *,
+    include_resolve_paths: bool = False,
+) -> List[str]:
+    """
+    Paths for hier_resolve from a loaded RunConfig.
+
+    Default: **only** conn_checks a∪b (include_resolve_paths=False).
+    Set include_resolve_paths=True only for explicit legacy use.
+    """
+    out = hierarchy_paths_from_checks(cfg.conn_checks)
+    if not include_resolve_paths:
+        return out
+    seen = set(out)
+    for p in cfg.resolve_paths:
+        s = str(p).strip()
+        if s and not s.startswith("#") and s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out
+
+
+def load_hier_resolve_inputs(
+    path: Union[str, Path],
+) -> tuple[List[str], Dict[str, str], Optional[Path]]:
+    """
+    Minimal read for hier_resolve --config.
+
+    From the run JSON, **only**:
+      - run_conn_check.checks[].a / .b  → hierarchy path list
+      - defines                         → `ifdef (optional)
+      - modules_json / build_db.modules_json → map path (optional)
+
+    Does **not** require filelist, does not apply env, does not ingest
+    hier_resolve.paths / top-level paths / noise keys as hierarchies.
+    """
+    cfg_path = Path(path).expanduser().resolve()
+    base = cfg_path.parent
+    doc = read_json_document(cfg_path)
+    if not isinstance(doc, Mapping):
+        raise ValueError(f"run config must be a JSON object: {cfg_path}")
+
+    conn_blk = _get(
+        doc,
+        "run_conn_check",
+        "run-conn-check",
+        "conn_check",
+        "conn-check",
+        "hier_conn",
+        "hier-conn",
+    )
+    checks = parse_conn_checks(conn_blk) if conn_blk is not None else []
+    if not checks:
+        top_checks = _get(doc, "checks")
+        if top_checks is not None:
+            # only if it looks like conn checks (has a/b), not arbitrary
+            checks = parse_conn_checks(top_checks)
+
+    paths = hierarchy_paths_from_checks(checks)
+    defines = parse_defines(_get(doc, "defines"))
+
+    modules_json = _resolve(
+        base,
+        _get(doc, "modules_json", "modules-json", "modules_map", "modules-map"),
+        env=None,
+    )
+    build_blk = _get(doc, "build_db", "build-db")
+    if modules_json is None and isinstance(build_blk, Mapping):
+        modules_json = _resolve(
+            base,
+            _get(
+                build_blk,
+                "modules_json",
+                "modules-json",
+                "modules_map",
+                "map",
+            ),
+            env=None,
+        )
+    if modules_json is None:
+        db = None
+        if isinstance(build_blk, Mapping):
+            db = _resolve(
+                base,
+                _get(build_blk, "db", "output", "db_path", "path"),
+                env=None,
+            )
+        if db is None:
+            db = _resolve(
+                base, _get(doc, "db", "output", "db_path", "db-path"), env=None
+            )
+        if db is not None:
+            cand = db.with_suffix(".modules.json")
+            if cand.is_file():
+                modules_json = cand
+
+    return paths, defines, modules_json
 
 
 def merge_run_config(

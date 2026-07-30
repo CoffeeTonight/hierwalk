@@ -924,45 +924,39 @@ class HierResolveApp:
             "-c",
             type=Path,
             default=None,
-            help="run JSON (defines, hier_resolve.paths, run_conn_check a∪b). "
-            "Same file as build_db --config.",
+            help="run JSON: ONLY run_conn_check.checks[].a/b hierarchies "
+            "(+ defines for `ifdef, modules_json for map). "
+            "Does not use filelist/env/hier_resolve.paths as path input.",
         )
         args = ap.parse_args(argv)
 
-        # --config: pull defines + flatten run_conn_check a[]/b[] → path list,
-        # then call the same resolve_many / resolve_one as CLI --path.
+        # --config: ONLY checks[*].a and checks[*].b → path list for resolve_many.
+        # Do not load_run_config (filelist/env/paths noise).
         cfg_defines: Dict[str, str] = {}
         cfg_paths: List[str] = []
         map_path = args.map
         if args.config is not None:
             try:
-                from pyhirewalk.run_config import (
-                    hierarchy_paths_from_config,
-                    load_run_config,
-                )
+                from pyhirewalk.run_config import load_hier_resolve_inputs
             except ImportError:
                 _src = Path(__file__).resolve().parent / "src"
                 if _src.is_dir() and str(_src) not in sys.path:
                     sys.path.insert(0, str(_src))
-                from pyhirewalk.run_config import (
-                    hierarchy_paths_from_config,
-                    load_run_config,
-                )
-            cfg = load_run_config(args.config, apply_process_env=True)
-            cfg_defines = dict(cfg.defines)
-            # All checks[*].a and checks[*].b (+ optional hier_resolve.paths)
-            cfg_paths = hierarchy_paths_from_config(cfg)
-            if map_path is None and cfg.modules_json is not None:
-                map_path = cfg.modules_json
-            elif map_path is None and cfg.db_path is not None:
-                cand = cfg.db_path.with_suffix(".modules.json")
-                if cand.is_file():
-                    map_path = cand
+                from pyhirewalk.run_config import load_hier_resolve_inputs
+            cfg_paths, cfg_defines, cfg_map = load_hier_resolve_inputs(args.config)
+            if map_path is None and cfg_map is not None:
+                map_path = cfg_map
+            _log(
+                f"config={args.config}: "
+                f"n_hier_from_checks_a_b={len(cfg_paths)} "
+                f"n_defines={len(cfg_defines)}",
+                time.perf_counter(),
+            )
 
         if map_path is None:
             ap.error("give --map / -m (or --config with modules_json)")
 
-        # CLI paths first, then config-derived hierarchies (dedup)
+        # Explicit CLI paths optional; config contributes ONLY check a/b.
         paths = cls.load_path_list(args.path, args.list, args.paths)
         paths = list(paths) + list(cfg_paths)
         seen: set[str] = set()
@@ -975,7 +969,7 @@ class HierResolveApp:
         paths = uniq
         if not paths:
             ap.error(
-                "no hierarchies: set run_conn_check.checks[].a/b in --config "
+                "no hierarchies: set run_conn_check.checks[].a and .b in --config "
                 "(or --path / --list)"
             )
 

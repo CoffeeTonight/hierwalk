@@ -123,8 +123,8 @@ path 한 줄 = resolve 와 동일 문법 (`top.u_x.sig`, slice는 `[7:0]` 등 �
 # 1) 인덱스
 python3 build_db.py --config run.json
 
-# 2) resolve — run_conn_check.checks 의 모든 a[]·b[] 를 path 로 펼쳐
-#    기존 resolve_one/many 에 그대로 넣음 (paths.txt 불필요)
+# 2) resolve — JSON에서 run_conn_check.checks[].a/b 만 hierarchy 로 사용
+#    (filelist/env/hier_resolve.paths/기타 키는 path 입력으로 쓰지 않음)
 python3 hier_resolve.py --config run.json --map work/essential.modules.json \
   -o work/hier_resolve.json
 
@@ -134,20 +134,22 @@ python3 hier_conn.py --config run.json
 
 동일 `defines` / `env` / `modules_json` 이 전 단계에 공유된다.
 
-### hier_resolve 입력 변환 (최소 수정)
+### hier_resolve 입력 변환 (checks a/b only)
 
 ```text
 run.json
   run_conn_check.checks[i].a[]  ──┐
-  run_conn_check.checks[i].b[]  ──┼→ hierarchy_paths_from_config()
-  hier_resolve.paths (optional) ──┘         │
+  run_conn_check.checks[i].b[]  ──┼→ load_hier_resolve_inputs()
+  defines (ifdef only)          ──┤
+  modules_json (map only)       ──┘
+       ✗ filelist / env / hier_resolve.paths / 기타 키 → hierarchy 아님
                                             ▼
                                    List[str] paths
                                             │
                                    resolve_many(paths)   # 기존 함수
 ```
 
-헬퍼: `pyhirewalk.run_config.hierarchy_paths_from_config(cfg)`.
+헬퍼: `pyhirewalk.run_config.load_hier_resolve_inputs(path)`.
 
 ---
 

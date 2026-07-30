@@ -135,15 +135,43 @@ def test_parse_conn_checks_and_jobs(tmp_path: Path) -> None:
     assert len(cfg.conn_checks) == 2
     assert cfg.conn_checks[0].id == "cpu"
     assert cfg.conn_checks[0].a == ("chip.a",)
-    # a∪b from all checks, dedup, then optional hier_resolve.paths
+    # default: ONLY checks a∪b (not hier_resolve.paths / noise)
     flat = hierarchy_paths_from_config(cfg)
-    assert flat == ["chip.a", "chip.b", "chip.c", "chip.extra"]
-    # checks only
-    assert hierarchy_paths_from_config(cfg, include_resolve_paths=False) == [
+    assert flat == ["chip.a", "chip.b", "chip.c"]
+    # legacy opt-in
+    assert hierarchy_paths_from_config(cfg, include_resolve_paths=True) == [
         "chip.a",
         "chip.b",
         "chip.c",
+        "chip.extra",
     ]
+
+    from pyhirewalk.run_config import load_hier_resolve_inputs
+
+    # noise keys must not become hierarchies
+    noisy = tmp_path / "noisy.json"
+    noisy.write_text(
+        """
+        {
+          "filelist": "f.f",
+          "paths": ["chip.should.not"],
+          "hier_resolve": { "paths": ["chip.also.not"] },
+          "random": ["chip.nope"],
+          "defines": { "NO_CPU": "1" },
+          "run_conn_check": {
+            "checks": [
+              { "id": "c1", "a": ["chip.a"], "b": ["chip.b"] }
+            ]
+          }
+        }
+        """,
+        encoding="utf-8",
+    )
+    hpaths, hdefs, _mmap = load_hier_resolve_inputs(noisy)
+    assert hpaths == ["chip.a", "chip.b"]
+    assert hdefs.get("NO_CPU") == "1"
+    assert "chip.should.not" not in hpaths
+    assert "chip.also.not" not in hpaths
 
 
 def test_parse_env_block_skips_null() -> None:
