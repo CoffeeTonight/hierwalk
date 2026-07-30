@@ -694,6 +694,55 @@ def extract_hierarchies_from_run_conn_checks(doc: Mapping[str, Any]) -> List[str
     return out
 
 
+def extract_conn_checks_strict(doc: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Strict checks list for hier_conn / resolve.
+
+    Returns list of {id, a: [str], b: [str]} from run_conn_check.checks only.
+    """
+    conn = None
+    for key in (
+        "run_conn_check",
+        "run-conn-check",
+        "conn_check",
+        "conn-check",
+    ):
+        if key in doc:
+            conn = doc[key]
+            break
+    if conn is None:
+        return []
+    if not isinstance(conn, Mapping):
+        raise ValueError("'run_conn_check' must be a JSON object")
+    if "checks" not in conn:
+        raise ValueError("'run_conn_check' must contain a 'checks' array")
+    checks = conn["checks"]
+    if not isinstance(checks, list):
+        raise ValueError("'run_conn_check.checks' must be a JSON array")
+
+    out: List[Dict[str, Any]] = []
+    for i, item in enumerate(checks):
+        if not isinstance(item, Mapping):
+            raise ValueError(f"run_conn_check.checks[{i}] must be a JSON object")
+        a_list: List[str] = []
+        b_list: List[str] = []
+        for ab, dest in (("a", a_list), ("b", b_list)):
+            if ab not in item:
+                continue
+            arr = item[ab]
+            if not isinstance(arr, list):
+                raise ValueError(
+                    f"run_conn_check.checks[{i}].{ab} must be a JSON array of strings"
+                )
+            for j, elem in enumerate(arr):
+                s = _normalize_hierarchy_string(elem)
+                if s:
+                    dest.append(s)
+        cid = str(item.get("id") or item.get("name") or f"check_{i}")
+        out.append({"id": cid, "a": a_list, "b": b_list})
+    return out
+
+
 def load_hier_resolve_inputs(
     path: Union[str, Path],
 ) -> tuple[List[str], Dict[str, str], Optional[Path]]:
@@ -769,6 +818,70 @@ def load_hier_resolve_inputs(
                 modules_json = cand
 
     return paths, defines, modules_json
+
+
+def load_hier_conn_inputs(
+    path: Union[str, Path],
+) -> tuple[List[Dict[str, Any]], Dict[str, str], Optional[Path]]:
+    """
+    hier_conn --config loader.
+
+    Returns:
+      checks: [{id, a:[...], b:[...]}, ...]  from run_conn_check.checks only
+      defines: for `ifdef
+      modules_json: map path (env-expanded)
+    """
+    cfg_path = Path(path).expanduser().resolve()
+    base = cfg_path.parent
+    doc = read_json_document(cfg_path)
+    if not isinstance(doc, Mapping):
+        raise ValueError(f"run config must be a JSON object: {cfg_path}")
+
+    checks = extract_conn_checks_strict(doc)
+    defines = parse_defines(doc.get("defines"))
+
+    env_map = parse_env_block(
+        doc.get("env") if "env" in doc else doc.get("environment")
+    )
+    if not env_map:
+        for k in ("hierwalk_env", "hier-walk-env"):
+            if k in doc:
+                env_map = parse_env_block(doc.get(k))
+                break
+
+    modules_json = _resolve(
+        base,
+        doc.get("modules_json")
+        or doc.get("modules-json")
+        or doc.get("modules_map")
+        or doc.get("modules-map"),
+        env=env_map or None,
+    )
+    build_blk = doc.get("build_db") or doc.get("build-db")
+    if modules_json is None and isinstance(build_blk, Mapping):
+        modules_json = _resolve(
+            base,
+            build_blk.get("modules_json")
+            or build_blk.get("modules-json")
+            or build_blk.get("modules_map")
+            or build_blk.get("map"),
+            env=env_map or None,
+        )
+    if modules_json is None and isinstance(build_blk, Mapping):
+        db = _resolve(
+            base,
+            build_blk.get("db")
+            or build_blk.get("output")
+            or build_blk.get("db_path")
+            or build_blk.get("path"),
+            env=env_map or None,
+        )
+        if db is not None:
+            cand = db.with_suffix(".modules.json")
+            if cand.is_file():
+                modules_json = cand
+
+    return checks, defines, modules_json
 
 
 def merge_run_config(

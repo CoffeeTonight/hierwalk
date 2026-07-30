@@ -66,99 +66,161 @@ hier_conn     → a fan-out ∩ b fan-in meet + evidence
 
 # Part B — hier_conn 설계
 
-## B.1 입력 (run JSON, build_db와 동일 문서)
+## B.0 실행 형태
 
-상세 스키마: **`docs/run_json.md`**.
-
-```jsonc
-{
-  "filelist": "...", "top": "...", "jobs": 8,
-  "env": { "PROJ": "..." },           // .f 경로 $VAR
-  "defines": { "NO_CPU": "1" },       // `ifdef / +define+
-  "build_db": { "modules_json": "work/essential.modules.json", ... },
-  "run_conn_check": {
-    "checks": [
-      {
-        "id": "cpu",
-        "a": [ "top.u_src.sig", "top.u_src.bus[3:0]" ],  // 기본 fanout
-        "b": [ "top.u_dst.sig" ]                         // 기본 fanin
-      }
-    ]
-  }
-}
+```bash
+python3 hier_conn.py \
+  --config run.json \
+  --map essential.modules.json \
+  --resolve hier_resolve.json \
+  -o hier_conn.json
 ```
 
-| 도구 | JSON 사용 |
-|------|-----------|
-| build_db | filelist, top, env, defines, build_db, jobs |
-| hier_resolve | **checks a∪b만** path (`load_hier_resolve_inputs`); defines/map만 부가 |
-| hier_conn | 동일 checks 그룹 + modules map + resolve 결과 |
+| 요구 | 구현 |
+|------|------|
+| class | `HierConnApp` (+ `ConnSearch`, `LocalDepGraph`) |
+| 단일 실행 | `hier_conn.py` 직접 실행 (`src` bootstrap, install 불필요) |
+| 입력 JSON | 기존 run JSON (`run_conn_check.checks` a/b, `defines`, `env`, `modules_json`) |
+| resolve 결과 | **`--resolve` 필수** — 그 결과물만 seed |
 
-- **a** = fanout(정방향), **b** = fanin(역방향). `a_role`/`b_role` 로 덮어쓰기 가능.  
-- resolve **miss** leaf는 그룹 제외.  
-- `port_dir`: resolve에 있으면 사용; 없으면 **conn이 모듈 스캔으로 채움** (resolve 선행 필수 아님).
+## B.1 입력 계약
+
+상세 run JSON: **`docs/run_json.md`**.
+
+| 입력 | 용도 |
+|------|------|
+| `--config run.json` | checks `id`/`a`/`b`, `defines`, `env`(map 경로), `modules_json` 후보 |
+| `--map` | modules JSON (**CLI 우선**, 없으면 config `modules_json`) |
+| `--resolve` | `hier_resolve` 출력 JSON (**필수**) |
+
+**seed 규칙 (핵심):**
+
+```text
+for each check:
+  A_seeds = { p in check.a | resolve[p].status in {ok, ok_needs_detail} }
+  B_seeds = { p in check.b | resolve[p].status in {ok, ok_needs_detail} }
+  miss 인 path → COI 탐색 안 함, unconnected reason=resolve_miss
+```
+
+- resolve에 **없는** path → resolve_miss (conn이 다시 resolve 호출하지 않음; 결과물만 사용).  
+- **a** = fanout(정방향), **b** = fanin(역방향).  
+- leaf 위치(file/module/local name)와 인스턴스 체인(parent file, inst → child file)은 **resolve nodes** 에서만 취함.
 
 ## B.2 질의
 
-각 check에 대해:
+각 check:
 
-> \(\exists\, s\in a,\; t\in b\) structural path \(s \xrightarrow{*} t\) ?  
-> 있으면 evidence를 **fanout→fanin 경로 순**으로.
+> \(A\_seeds \times B\_seeds\) 중 structural path \(s \xrightarrow{*} t\) 가 있는가?  
+> 있으면 evidence를 path 위 엣지 **발견 순서(a→b path)대로 append**.
 
-1차 = structural (assign / FF / port_map). 의미론·타이밍 비목표.
+1차 = structural (assign / FF / named port_map). snippet 의미론 비목표.
 
-## B.3 그래프
+## B.3 탐색 전략
 
-**NetKey** = `(module_or_file, base_name, select_key)`  
-같은 base라도 `[3:0]` vs `[7:4]` 는 다른 노드. seed slice를 base로 뭉개지 않음.
+### B.3.1 전제
 
-| 엣지 | 의미 | 방향 (영향 driver→load) |
-|------|------|-------------------------|
-| assign / combo | LHS ← RHS idents | RHS → LHS |
-| ff | Q ← D | D → Q |
-| port_map | actual ↔ formal | 방향·port_dir에 맞게 |
+1. **대상 축소:** seed = resolve 성공 hierarchy만.  
+2. **그래프 온디맨드:** seed가 가리키는 file(+ port_map으로 새로 밟는 file)만 스캔. 전 RTL 금지.  
+3. **방향 락:** a 쪽 expand = forward(driver→load)만, b 쪽 = backward(load←driver)만.  
+4. **hierarchy depth 자유:** up/down/횡단 지그재그 허용; depth 단조 prune 금지.  
+5. **evidence:** path 위 엣지 순 append. 재정렬·별도 다듬기 없음.
 
-**모듈 안:** port에 닿을 때까지 로컬; 그다음 port_map으로만 인접 모듈.  
-**의존 방향 고정** ≠ hierarchy 깊이: up/down/횡단 **지그재그** 가능. nearness는 LCA·모듈 겹침이지 depth 단조 아님.
-
-### 캐시 (필수)
-
-| ID | 키 | 역할 |
-|----|-----|------|
-| C1 visited | (side, NetKey) | 공통 구간 expand 1회 (OR 합류) |
-| C2 labels | 동일 | 도달 seed 집합 합집합 |
-| C3 prev | 동일 | path reconstruct |
-| C4 local | file + param context | uses/driven_by, ports, difficulty |
-| C5 meet | pair id | 중복 리포트 방지 |
-
-여러 a가 mid에서 합류해도 하류는 1번만 팜; label로 어느 a인지 복원.
-
-## B.4 탐색: 2페이즈
-
-### Phase 1 — CONNECT
+### B.3.2 시드 배치
 
 ```text
-F_a ← a leaves  # forward only
-F_b ← b leaves  # backward only
-자원: b(fan-in) 우세; near-a 이면 a forward boost
-포트: out/in 필터 (unknown 경계는 느슨히 열지 말고 skip)
-smaller-frontier / meet-first / beam·budget
-meet → pair + evidence (a-path + reverse(b-path))
-포화 시 종료: frontier 소진 | meet 정체 | budget  (전수 증명 아님)
+from resolve result for path p:
+  leaf.file, leaf.name (base), leaf.module
+  for consecutive nodes: register_instance(parent.file, child.base, child.file)
+
+F_a, visited_a, label_a[net] = seed path(s)   # forward side
+F_b, visited_b, label_b[net] = seed path(s)   # backward side
+prev_a / prev_b for path reconstruct (edge evidence 체인)
 ```
 
-### Phase 2 — ORPHAN (b 역탐색 잔여)
+같은 net에 여러 seed → label **합집합**, expand는 **1회** (OR 합류 캐시).
 
-meet 안 한 b 가지를 종단까지:
+### B.3.3 Phase 1 — CONNECT (meet)
 
-| 태그 | |
-|------|--|
-| term_const | `x<=0` 등 |
-| term_ff | 시퀀셜 경계 |
-| term_undriven / blackbox / orphan_cut | 미결정·후보 |
+```text
+while budget and (F_a or F_b):
+  # 기본: 더 작은 frontier 쪽 expand (보통 fan-in/b)
+  # meet 인접 이웃 최우선
+  expand one net on chosen side
 
-논리 연산 조기 절단은 meet 전에 쓰지 않음. late meet 허용.  
-orphan = 관심 밖 / 기입 누락 / 버그 **힌트만** (자동 단정 금지).
+  side a:  forward neighbors (assign/FF load, port into child, …)
+  side b:  backward neighbors (drivers, climb port to parent actual, …)
+
+  on first visit of net n:
+    if n already in other visited:
+      MEET → reconstruct evidence a→meet→b, append edges in that order
+      record pair (label_a × label_b) once (C5)
+
+stop when:
+  both frontiers empty | max_hops | max_nodes | optional max_meets
+  (not a full proof of “no connection”)
+```
+
+**모듈 경계:**
+
+- 로컬: assign/FF 로 net 이동.  
+- 아래로: parent actual → child formal (`port_map`, resolve가 준 child file).  
+- 위로: child formal → parent actual (b backward / a forward 각각 방향 규칙).  
+- port 방향 unknown이면 경계 억지 확장 금지에 가깝게 skip (precision).
+
+**예산 기본:** max_hops, max_nodes, (옵션) max_files. 초과 → `cuts[]`.
+
+### B.3.4 Phase 2 — ORPHAN (b 잔여, 후순위)
+
+Phase1 포화 후, **어느 a seed와도 meet 안 한 b-side open branch** 만:
+
+- 계속 backward until const / FF 말단 / undriven / budget  
+- late meet 있으면 pair 추가  
+- 그 외 `orphans[]` (관심 밖·누락·버그 **힌트**, 단정 금지)
+
+P1 구현에서는 Phase2 생략 가능; 전략상 위치만 고정.
+
+### B.3.5 캐시
+
+| ID | 역할 |
+|----|------|
+| C1 visited (side, file, name) | 같은 쪽 재expand 금지 |
+| C2 labels | seed path 합집합 |
+| C3 prev + evidence | path 재구성 → evidence append 순서 |
+| C4 LocalDepGraph per file | 모듈 1회 스캔 |
+| C5 meet pair set | (src_path, dst_path) 중복 방지 |
+
+### B.3.6 전처리 (스캔 시)
+
+파일 open 시: comment strip → **defines로 ifdef 평가** → 본문 전체 스캔.  
+param/generate 정밀은 후순위; 실패 시 cut/approx.
+
+## B.4 그래프 요소 (스캔)
+
+**NetKey** = `(file, local_base_name)` (P1; select는 path/seed에 보존, 키는 base)
+
+| 엣지 | 방향 |
+|------|------|
+| assign / combo | RHS → LHS |
+| ff | D → Q |
+| port_map | actual ↔ formal (경계 통과 시 파일 전환) |
+
+## B.5 출력
+
+```json
+{
+  "schema_version": 1,
+  "meta": { "config", "module_map", "resolve", "defines", "stats" },
+  "checks": [{
+    "id": "cpu",
+    "pairs": [{ "src", "dst", "evidence": [{ "file", "line", "snippet" }] }],
+    "unconnected": [{ "src", "dst", "reason": "resolve_miss|no_meet" }],
+    "orphans": [],
+    "cuts": []
+  }]
+}
+```
+
+로그: check 단위 START/END, meet, `TOTAL_HIER_CONN_SEC`.
 
 ## B.5 전처리·모듈 스캔
 

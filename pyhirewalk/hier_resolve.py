@@ -358,31 +358,56 @@ class HierResolver:
         if fp not in self._sig:
             s = self.body(fp)
             names = set(_PORT.findall(s)) | set(_NET.findall(s)) | set(_ASG.findall(s))
-            # ANSI: input logic clk, d, e  (names after first, comma-separated)
-            for m in re.finditer(
-                r"\b(?:input|output|inout)\b[^;()\n]*",
-                s,
-            ):
-                chunk = m.group(0)
-                # drop keywords/types/ranges, keep idents
-                for idm in _IDENT.finditer(chunk):
-                    w = idm.group(0)
-                    if w not in (
-                        "input",
-                        "output",
-                        "inout",
-                        "wire",
-                        "reg",
-                        "logic",
-                        "bit",
-                        "signed",
-                        "unsigned",
-                        "var",
-                        "ref",
-                    ):
-                        names.add(w)
+            names |= set(self.port_dirs(fp).keys())
             self._sig[fp] = names
         return self._sig[fp]
+
+    def port_dirs(self, fp: str) -> Dict[str, str]:
+        """
+        Port name → direction (input|output|inout) from module port list / decls.
+
+        Used for leaf fanin/fanout hints in resolve JSON.
+        """
+        if not hasattr(self, "_port_dirs"):
+            self._port_dirs: Dict[str, Dict[str, str]] = {}
+        if fp in self._port_dirs:
+            return self._port_dirs[fp]
+        s = self.body(fp)
+        dirs: Dict[str, str] = {}
+        type_kw = frozenset(
+            "wire reg logic bit signed unsigned var ref integer int tri "
+            "byte shortint longint time realtime".split()
+        )
+        # Split on direction keywords so "input … output …" do not share one chunk.
+        parts = re.split(r"\b(input|output|inout)\b", s, flags=re.I)
+        # parts: [preamble, dir, chunk, dir, chunk, ...]
+        i = 1
+        while i + 1 < len(parts):
+            direction = parts[i].lower()
+            chunk = parts[i + 1]
+            # port list ends at ); body may continue — cut at first ';' for body decls
+            if ";" in chunk:
+                chunk = chunk.split(";", 1)[0]
+            for idm in _IDENT.finditer(chunk):
+                w = idm.group(0)
+                wl = w.lower()
+                if wl in ("input", "output", "inout") or wl in type_kw:
+                    continue
+                dirs.setdefault(w, direction)
+            i += 2
+        self._port_dirs[fp] = dirs
+        return dirs
+
+    @staticmethod
+    def fan_role_from_port_dir(port_dir: Optional[str]) -> Optional[str]:
+        """Map port direction to fanin/fanout/inout/internal."""
+        if port_dir == "input":
+            return "fanin"
+        if port_dir == "output":
+            return "fanout"
+        if port_dir == "inout":
+            return "inout"
+        return "internal"
 
     def resolve_one(self, path: str) -> Dict[str, Any]:
         segs = split_path(path)
@@ -554,14 +579,19 @@ class HierResolver:
         needs_any |= nd
         li = len(nodes)
         if lb in self.sigs(cur_file):
+            pdirs = self.port_dirs(cur_file)
+            port_dir = pdirs.get(lb)  # input|output|inout or None if not a port
+            fan = self.fan_role_from_port_dir(port_dir)
             leaf = {
                 "name": lb,
                 "raw": leaf_raw,
-                "kind": "signal",
+                "kind": "port" if port_dir else "signal",
                 "select": lsel,
                 "found": True,
                 "file": cur_file,
                 "module": cur_mod,
+                "port_dir": port_dir,  # input|output|inout|null
+                "fan": fan,  # fanin|fanout|inout|internal
             }
             nodes.append(
                 {
@@ -576,6 +606,8 @@ class HierResolver:
                     "found_in_file": cur_file,
                     "needs_detail": nd,
                     "detail_reason": "signal_select" if nd else None,
+                    "port_dir": port_dir,
+                    "fan": fan,
                 }
             )
             st = "ok_needs_detail" if needs_any else "ok"
