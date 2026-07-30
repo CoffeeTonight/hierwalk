@@ -214,9 +214,31 @@ class HierResolver:
     def sigs(self, fp: str) -> set:
         if fp not in self._sig:
             s = self.body(fp)
-            self._sig[fp] = set(_PORT.findall(s)) | set(_NET.findall(s)) | set(
-                _ASG.findall(s)
-            )
+            names = set(_PORT.findall(s)) | set(_NET.findall(s)) | set(_ASG.findall(s))
+            # ANSI: input logic clk, d, e  (names after first, comma-separated)
+            for m in re.finditer(
+                r"\b(?:input|output|inout)\b[^;()\n]*",
+                s,
+            ):
+                chunk = m.group(0)
+                # drop keywords/types/ranges, keep idents
+                for idm in _IDENT.finditer(chunk):
+                    w = idm.group(0)
+                    if w not in (
+                        "input",
+                        "output",
+                        "inout",
+                        "wire",
+                        "reg",
+                        "logic",
+                        "bit",
+                        "signed",
+                        "unsigned",
+                        "var",
+                        "ref",
+                    ):
+                        names.add(w)
+            self._sig[fp] = names
         return self._sig[fp]
 
     def resolve_one(self, path: str) -> Dict[str, Any]:
