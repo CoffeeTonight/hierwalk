@@ -449,6 +449,7 @@ def expand_env_str(s: str, env: Dict[str, str]) -> str:
 
 
 def read_filelist(path: Path, env: Optional[Dict[str, str]] = None) -> List[str]:
+    """Legacy flat reader (path-per-line only). Prefer :func:`load_rtl_sources`."""
     env = env or {}
     out: List[str] = []
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -456,11 +457,83 @@ def read_filelist(path: Path, env: Optional[Dict[str, str]] = None) -> List[str]
         if not line or line.startswith("//"):
             continue
         if line.startswith("+") or line.startswith("-"):
-            # keep -I etc? skip for flat path list; include dirs separate
             continue
         line = expand_env_str(line, env)
         out.append(line)
     return out
+
+
+def load_rtl_sources(
+    filelist: Path,
+    *,
+    env: Optional[Dict[str, str]] = None,
+    index_cwd: Optional[Path] = None,
+    t0: float,
+) -> Tuple[List[str], List[str], Dict[str, str], List[str]]:
+    """
+    Expand an EDA filelist into RTL source paths for pyslang.
+
+    Uses the same ``expand_filelist`` as build_db (supports ``-f``/``-F``,
+    ``+incdir+``, ``+define+``, ``$VAR``). The old naive reader skipped every
+    line starting with ``+`` or ``-``, which made real company .f files look
+    empty even when run JSON hierarchies were fine.
+
+    Returns
+    -------
+    files, incdirs, defines_from_f, errors
+    """
+    from pyhirewalk.filelist.expand import expand_filelist
+
+    fl = Path(filelist).expanduser()
+    if not fl.is_file():
+        return [], [], {}, [f"filelist not found: {fl}"]
+
+    env = env or {}
+    try:
+        result = expand_filelist(
+            fl,
+            env=env,
+            index_cwd=index_cwd,
+            on_progress=lambda m: _log(f"  filelist: {m}", t0),
+        )
+    except Exception as e:
+        return [], [], {}, [f"expand_filelist failed: {e}"]
+
+    files = [str(p.resolve()) for p in result.source_files]
+    incdirs = [str(p.resolve()) for p in result.incdirs]
+    defs = dict(result.defines)
+    errors = list(result.errors)
+    if result.unresolved_env:
+        _log(
+            f"filelist unresolved $VAR: {result.unresolved_env}",
+            t0,
+        )
+    _log(
+        f"filelist expand: path={fl} sources={len(files)} "
+        f"incdirs={len(incdirs)} defines_in_f={len(defs)} "
+        f"errors={len(errors)}",
+        t0,
+    )
+    if not files:
+        # Diagnostic: show why it looks empty
+        try:
+            raw_lines = fl.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except OSError:
+            raw_lines = []
+        non_empty = [ln.strip() for ln in raw_lines if ln.strip() and not ln.strip().startswith("//")]
+        sample = non_empty[:12]
+        _log(
+            f"filelist empty sources. raw non-comment lines={len(non_empty)} "
+            f"sample={sample!r}",
+            t0,
+        )
+        _log(
+            "hint: hier_pyslang needs RTL filelist (paths / -f nested), "
+            "not only run_conn_check hierarchies. "
+            "If .f is only +incdir+/+define+/-f, check nested paths and env.",
+            t0,
+        )
+    return files, incdirs, defs, errors
 
 
 def apply_config_env(env: Dict[str, str], *, t0: float) -> None:
@@ -1163,21 +1236,60 @@ class HierPyslangApp:
             return 2
 
         fl = self.filelist or cfg.filelist
-        if fl is None or not Path(fl).is_file():
-            _log(f"ERROR: filelist missing: {fl}", t0)
+        if fl is None:
+            _log(
+                "ERROR: no filelist in config (need 'filelist' pointing at "
+                "RTL .f or path list). run_conn_check.checks alone is not enough.",
+                t0,
+            )
             return 2
-        files = read_filelist(Path(fl), env)
+        fl_path = Path(fl)
+        if not fl_path.is_file():
+            _log(
+                f"ERROR: filelist not found: {fl_path} "
+                f"(resolved from config; cwd={Path.cwd()})",
+                t0,
+            )
+            return 2
+
+        # Full EDA expand (-f/-F, +incdir+, +define+, $VAR) — not naive line skip
+        files, fl_incdirs, fl_defines, fl_errors = load_rtl_sources(
+            fl_path,
+            env=env,
+            index_cwd=cfg.index_cwd,
+            t0=t0,
+        )
+        # merge +define+ from filelist under config defines (config wins)
+        for k, v in fl_defines.items():
+            defines.setdefault(k, v)
+        if fl_errors:
+            for e in fl_errors[:8]:
+                _log(f"filelist warn: {e}", t0)
         if not files:
-            _log("ERROR: empty filelist after expand", t0)
+            _log(
+                f"ERROR: empty filelist after expand: {fl_path} "
+                f"(checks/hierarchies are loaded separately; "
+                f"n_checks will be {len(checks) if checks else 0})",
+                t0,
+            )
             return 2
 
         map_path = self.modules_json or cfg.modules_json
         if self.cone_files:
+            before_n = len(files)
             files = select_cone_files(
                 files, modules_json=map_path, top=top, t0=t0
             )
+            if not files:
+                _log(
+                    f"ERROR: cone-files removed all sources "
+                    f"(was {before_n}). Try without --cone-files.",
+                    t0,
+                )
+                return 2
 
         includes = list(self.includes)
+        includes.extend(fl_incdirs)
         # default includes from cwd / common SV roots
         if cfg.index_cwd:
             includes.append(str(Path(cfg.index_cwd).resolve()))
@@ -1200,8 +1312,13 @@ class HierPyslangApp:
                 uniq_inc.append(i)
 
         if not checks:
-            _log("ERROR: no run_conn_check.checks", t0)
+            _log(
+                "ERROR: no run_conn_check.checks "
+                "(hierarchies a/b must be under run_conn_check.checks)",
+                t0,
+            )
             return 2
+        _log(f"n_checks={len(checks)} n_rtl_sources={len(files)} top={top}", t0)
 
         t_c0 = time.perf_counter()
         try:
