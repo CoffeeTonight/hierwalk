@@ -196,7 +196,10 @@ param/generate 정밀은 후순위; 실패 시 cut/approx.
 
 ## B.4 그래프 요소 (스캔)
 
-**NetKey** = `(file, local_base_name)` (P1; select는 path/seed에 보존, 키는 base)
+**NetKey** = `(file, local_base_name)`  
+- 탐색·meet 키는 base (구조 전기 연결).  
+- **S7a:** 정수 리터럴 select(`x[3]`, `x[7:4]`)는 edge/evidence 메타(`dst_sel`, `src_sels`)로만 기록.  
+- 비리터럴 select(param 등) → base 연결 + `select_approx` (정밀 맵 단정 금지).
 
 | 엣지 | 방향 |
 |------|------|
@@ -232,16 +235,17 @@ param/generate 정밀은 후순위; 실패 시 cut/approx.
 5. param/generate면 path **조상** 인스턴스 `#(.P)` 해석 (파일 위치는 resolve가 이미 앎).  
    리터럴 우선; 식별자 전달 실패 시 channel/approx.
 
-**대입 형태 (bit 위치 주의):**
+**대입 형태 (bit 위치 주의) — regex 천장:**
 
 | 형태 | 정책 |
 |------|------|
-| `y=x` 동형 | bundle OK |
-| `y[3:0]=x[7:4]` | range map 또는 실패 시 단정 금지 |
-| `{a,b}` concat | 위치 재배치 — map 불가면 skip/unknown |
+| `y=x` 동형 | structural OK |
+| `y[3:0]=x[7:4]` **리터럴** | base NetKey 연결 + evidence `dst_sel`/`src_sels` (S7a) |
+| `y[WIDTH-1:0]=…` | base 연결 + `select_approx` — bit 맵 단정 금지 |
+| `{a,b}` concat | base idents 연결; 위치 map은 후순위 |
 | `y=x&z` | structural 다중 선행; bit-accurate 단정 신중 |
 
-generate·param slice 다량 → **channel 모드** (전수 bit 루프 금지).
+generate·param slice 다량 → base 연결 + evidence만; 전수 bit 루프 금지. 증명은 sim/후속.
 
 ## B.6 Evidence
 
@@ -318,9 +322,36 @@ HierConnApp
 | **S4 meet·캐시** | C1 visited, C2 labels(OR), C3 prev+evidence append 순, C5 pair dedup. smaller-frontier. max_hops/nodes → cuts. | 3-check e2e: 연결2 + 단절1 |
 | **S5 리포트** | schema checks[].pairs/unconnected/cuts/stats. MD 요약(옵션). 로그 TOTAL_HIER_CONN_SEC. | 기존 hier_resolve 로그 스타일과 동일 계열 |
 | **S6 (후순위) orphan** | Phase2 b 잔여 말단. | 전략만 문서; 필요 시 구현 |
-| **S7 (후순위)** | slice/concat map, param 체인, scoped pyslang. | P2+ |
+| **S7a literal bit-select** | `sig[3]`, `sig[7:4]` 정수 리터럴만 파싱. NetKey는 base 유지(구조 연결). evidence에 `dst_sel`/`src_sels` 기록. param/`WIDTH-1` 등 비리터럴 select → base-only + `select_approx`. | fixture `assign o[3:0]=i[7:4]` pair+sel 메타 |
+| **S7b (후순위)** | 리터럴 range map으로 bit 불일치 prune (옵션). param 체인·concat 위치 map. | P2 |
+| **S8 (후순위)** | generate-for unrolling / scoped pyslang. 지금은 연결 여부+evidence만; 정밀 증명은 sim 등 후속. | P2+ |
 
-### S0–S5 작업 순서 (코딩 시)
+### Regex 천장 (현재 탐색 정책)
+
+**원칙:** regex/script로 **확실한 구조 연결**만 잡고, **evidence를 경로 순으로 남긴다.**  
+못 푸는 의미(param elab, generate-for 전개, bit-accurate 증명)는 **단정하지 않고** base-name 연결 또는 cut/approx로 남긴다. 나중에 simulation·scoped 도구로 증명.
+
+| 할 수 있음 (지금) | 단순 연결만 + evidence | 나중 (증명/정밀) |
+|------------------|----------------------|------------------|
+| assign / FF `<=` | 표현식 복잡해도 RHS→LHS idents | 연산 의미 해석 |
+| named `.f(expr)` port_map | actual idents ↔ formal, 파일 전환 | positional port |
+| ifdef + defines | 활성 암만 스캔 | — |
+| **bit select 정수 리터럴** `x[3]`, `x[7:4]` | base NetKey + sel 메타 evidence | 전수 bit 맵·overlap prune |
+| path 조상 인스턴스 체인 | resolve nodes로 register | — |
+| generate / param 의존 select | **연결성만**(base) 또는 skip | elab / sim |
+| multi-driver / XMR | 잡지 않음 | 별도 |
+
+```text
+할 수 있는 것부터:
+  S0–S5 (done) → S7a literal bit-select → (optional S7b prune)
+               → S6 orphan / S8 generate 는 필요 시
+```
+
+**NetKey (탐색 키):** `(file, local_base_name)`  
+- seed path의 `[i]` 는 resolve/Endpoint에서 strip → base로 seed.  
+- slice 정보는 evidence 부가 필드(사람·후속 검증용). 틀린 bit 단정 < 미발견보다 **안 만드는 쪽** 유지.
+
+### S0–S5 작업 순서 (코딩 시) — 완료 기준 참고
 
 ```text
 1. app: Endpoint에 fan/port_dir 전달, resolve-only 경로 정리
@@ -329,6 +360,7 @@ HierConnApp
 4. resolve leaf.fan을 로그/optional prune 힌트로 사용
 5. examples + tests/test_hier_conn_*.py (config+map+resolve 한 세트)
 6. README 한 절: 3-tool 명령
+7. S7a: literal bit-select 파싱 + evidence sel 메타 + fixture
 ```
 
 ### 명시적 비목표 (이 계획 범위 밖)
@@ -337,6 +369,7 @@ HierConnApp
 - resolve 없이 path만으로 seed  
 - evidence 순서 “다듬기” / 파일·줄 정렬  
 - bit-accurate 전수, generate unrolling 전부  
+- param/`generate` 값에 의존하는 select 정밀 해석 (sim/후속 도구)
 
 ### 검증 시나리오 (필수 fixture)
 
@@ -347,6 +380,7 @@ HierConnApp
 | T3 | 무관한 두 출력 | pairs 0, no_meet |
 | T4 | resolve miss path in a or b | resolve_miss, 탐색 스킵 |
 | T5 | checks 2개 + blabla 노이즈 JSON | blabla 무시, check별 결과 |
+| T6 | `assign o[3:0] = i[7:4]` (리터럴) | pair 1, evidence에 dst_sel/src_sels |
 
 ---
 
@@ -354,10 +388,11 @@ HierConnApp
 
 1. 문헌 COI = dependency closure + 무관 변수 제거; 우리는 **a forward ∩ b backward meet**.  
 2. 입력 = **run JSON** `run_conn_check.checks` (a/b).  
-3. 기본 script 구조 그래프; 난관만 scoped 정밀 도구.  
+3. 기본 script 구조 그래프; **regex 천장** — 연결성 + evidence; 난관 증명은 후속.  
 4. 전 RTL/전 합성 금지; cone + path 조상만.  
 5. OR 캐시·slice 키·evidence 경로 순·precision 우선.  
-6. ifdef는 **defines 평가** (삭제 무시 아님).
+6. ifdef는 **defines 평가** (삭제 무시 아님).  
+7. bit-select: **parameter 없는 정수 리터럴**부터; NetKey는 base, sel은 evidence.
 
 ---
 

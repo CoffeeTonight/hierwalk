@@ -158,24 +158,20 @@ class ConnSearch:
                 )
                 continue
             nodes += 1
-            labels = lab_a.get(key) if side == "a" else lab_b.get(key)
-            label_s = ",".join(sorted(labels or ()))[:80]
-            self._log(
-                f"expand side={side} hops={hops} net={key[1]} "
-                f"labels={label_s!r} file={key[0]} "
-                f"|Fa|={len(qa)} |Fb|={len(qb)}"
-            )
+            verbose = nodes == 1 or nodes % self.progress_every == 0
+            if verbose:
+                labels = lab_a.get(key) if side == "a" else lab_b.get(key)
+                label_s = ",".join(sorted(labels or ()))[:80]
+                self._log(
+                    f"expand side={side} hops={hops} net={key[1]} "
+                    f"labels={label_s!r} file={key[0]} "
+                    f"|Fa|={len(qa)} |Fb|={len(qb)}"
+                )
 
             if side == "a":
                 neigh = self._neighbors_forward(key)
             else:
                 neigh = self._neighbors_backward(key)
-
-            if not neigh:
-                self._log(
-                    f"dead-end side={side} net={key[1]} hops={hops} "
-                    f"(no structural neighbors)"
-                )
 
             new_edges = 0
             revisits = 0
@@ -188,23 +184,17 @@ class ConnSearch:
                         prev_a[nk] = (key, ev)
                         qa.append((nk, hops + 1))
                         new_edges += 1
-                        self._log(f"evidence fanout {_fmt_ev(ev)}")
                     else:
                         revisits += 1
                     before = len(lab_a[nk])
                     lab_a[nk] |= lab_a[key]
-                    if not first and len(lab_a[nk]) > before:
-                        self._log(
-                            f"label-merge fanout net={nk[1]} "
-                            f"+labels from {key[1]}"
-                        )
-                    if not first and len(lab_a[nk]) > before and nk in lab_b:
-                        meets.append(nk)
                     if first and nk in lab_b:
                         meets.append(nk)
                         self._log(
                             f"frontier-meet net={nk[1]} via fanout from {key[1]}"
                         )
+                    elif not first and len(lab_a[nk]) > before and nk in lab_b:
+                        meets.append(nk)
             else:
                 for nk, ev in neigh:
                     nk = (Path_norm(nk[0]), nk[1])
@@ -214,37 +204,26 @@ class ConnSearch:
                         prev_b[nk] = (key, ev)
                         qb.append((nk, hops + 1))
                         new_edges += 1
-                        self._log(f"evidence fanin  {_fmt_ev(ev)}")
                     else:
                         revisits += 1
                     before = len(lab_b[nk])
                     lab_b[nk] |= lab_b[key]
-                    if not first and len(lab_b[nk]) > before:
-                        self._log(
-                            f"label-merge fanin  net={nk[1]} "
-                            f"+labels from {key[1]}"
-                        )
-                    if not first and len(lab_b[nk]) > before and nk in lab_a:
-                        meets.append(nk)
                     if first and nk in lab_a:
                         meets.append(nk)
                         self._log(
                             f"frontier-meet net={nk[1]} via fanin from {key[1]}"
                         )
+                    elif not first and len(lab_b[nk]) > before and nk in lab_a:
+                        meets.append(nk)
 
-            if neigh and new_edges == 0:
-                self._log(
-                    f"expand-no-new side={side} net={key[1]} "
-                    f"neighbors={len(neigh)} revisits={revisits}"
-                )
-
-            if nodes == 1 or nodes % self.progress_every == 0:
+            if verbose:
                 self._log(
                     f"progress check={check_id} nodes={nodes} "
                     f"hops={hops} side={side} "
                     f"|Fa|={len(qa)} |Fb|={len(qb)} "
                     f"visited_a={len(lab_a)} visited_b={len(lab_b)} "
-                    f"files={len(self._graphs)} meets_pending={len(meets)}"
+                    f"files={len(self._graphs)} meets_pending={len(meets)} "
+                    f"new={new_edges} rev={revisits}"
                 )
 
         if nodes >= self.max_nodes and (qa or qb):
@@ -309,20 +288,30 @@ class ConnSearch:
         out: List[Tuple[NetKey, Evidence]] = []
         for e in g.forward.get(name, []):
             if e.kind == "port_map" and e.into_child and e.inst and e.child_module:
+                # Only cross hierarchy for instances registered from hier_resolve
+                # (no module_files[0] invent — that explodes into the whole map).
                 child_file = self._inst_child_file.get((file, e.inst))
                 if not child_file:
-                    files = self.module_files.get(e.child_module) or []
-                    if not files:
-                        continue
-                    child_file = Path_norm(files[0])
-                    self._inst_child_file[(file, e.inst)] = child_file
-                # only descend into child input-like formals when known
+                    continue
                 cg = self.graph(child_file)
                 d = cg.ports.get(e.dst, "unknown")
                 if d in ("input", "inout", "unknown"):
                     out.append(((child_file, e.dst), e.evidence))
             elif e.kind != "port_map":
                 out.append(((file, e.dst), e.evidence))
+
+        # climb out: this net is a child output formal -> parent actual
+        # Only via resolve-registered instance links.
+        for (pf, inst), cf in list(self._inst_child_file.items()):
+            if cf != file:
+                continue
+            pg = self.graph(pf)
+            for p_inst, formal, actual, _child_mod, ev in pg.port_maps:
+                if p_inst != inst or formal != name:
+                    continue
+                d = g.ports.get(name, "unknown")
+                if d in ("output", "inout", "unknown"):
+                    out.append(((pf, actual), ev))
         return out
 
     def _neighbors_backward(
@@ -332,14 +321,13 @@ class ConnSearch:
         g = self.graph(file)
         out: List[Tuple[NetKey, Evidence]] = []
 
-        for src, edges in g.forward.items():
-            for e in edges:
-                if e.kind == "port_map":
-                    continue
-                if e.dst == name:
-                    out.append(((file, src), e.evidence))
+        # O(degree) reverse via prebuilt backward index (not O(all edges))
+        for src, e in g.backward.get(name, []):
+            if e.kind == "port_map":
+                continue
+            out.append(((file, src), e.evidence))
 
-        # climb to parent: this formal -> parent actual
+        # climb to parent: this formal -> parent actual (resolve-registered only)
         for (pf, inst), cf in list(self._inst_child_file.items()):
             if cf != file:
                 continue
@@ -355,11 +343,7 @@ class ConnSearch:
                 continue
             child_file = self._inst_child_file.get((file, inst))
             if not child_file:
-                files = self.module_files.get(child_mod) or []
-                if not files:
-                    continue
-                child_file = Path_norm(files[0])
-                self._inst_child_file[(file, inst)] = child_file
+                continue
             cg = self.graph(child_file)
             direction = cg.ports.get(formal, "unknown")
             if direction in ("output", "inout", "unknown"):
@@ -386,8 +370,8 @@ class ConnSearch:
             cur = pr
         stack_a.reverse()
 
-        # b side: prev_b[driver]=(load, ev) when expanded load←driver
-        # walk meet toward b-seed via prev_b; collect edges then reverse for meet→seed
+        # b side: prev_b[driver]=(load, ev) with edge driver→load.
+        # Walk meet → … → b-seed (toward sink); do NOT reverse (unlike side a).
         stack_b: List[Evidence] = []
         cur = meet
         seen_b: Set[NetKey] = set()
@@ -397,7 +381,7 @@ class ConnSearch:
             if ev is not None:
                 stack_b.append(ev)
             cur = pr
-        stack_b.reverse()
+        # stack_b is already meet → b-seed order
 
         out: List[Evidence] = []
         for e in stack_a + stack_b:

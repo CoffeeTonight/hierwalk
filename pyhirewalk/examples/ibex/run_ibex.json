@@ -1,0 +1,53 @@
+{
+  "env": {
+    "IBEX_ROOT": "/tmp/rtl-bench/ibex",
+    "WORK": "/home/user/Desktop/hierwalk/pyhirewalk/examples/ibex/work"
+  },
+  "filelist": "/home/user/Desktop/hierwalk/pyhirewalk/examples/ibex/ibex.f",
+  "top": "ibex_top",
+  "cwd": "/tmp/rtl-bench/ibex",
+  "defines": {
+    "SYNTHESIS": "1",
+    "PRIM_DEFAULT_IMPL": "prim_pkg::ImplGeneric"
+  },
+  "modules_json": "/home/user/Desktop/hierwalk/pyhirewalk/examples/ibex/work/ibex.modules.json",
+  "build_db": {
+    "output": "/home/user/Desktop/hierwalk/pyhirewalk/examples/ibex/work/ibex.sqlite",
+    "mode": "fast",
+    "modules_json": "/home/user/Desktop/hierwalk/pyhirewalk/examples/ibex/work/ibex.modules.json"
+  },
+  "run_conn_check": {
+    "checks": [
+      {
+        "id": "alu_leaf",
+        "a": ["ibex_top.u_ibex_core.ex_block_i.alu_i.operand_a_i"],
+        "b": ["ibex_top.u_ibex_core.ex_block_i.alu_i.result_o"]
+      },
+      {
+        "id": "alu_adder",
+        "a": ["ibex_top.u_ibex_core.ex_block_i.alu_i.operand_a_i"],
+        "b": ["ibex_top.u_ibex_core.ex_block_i.alu_i.adder_result_o"]
+      },
+      {
+        "id": "alu_equal_out",
+        "a": ["ibex_top.u_ibex_core.ex_block_i.alu_i.adder_result"],
+        "b": ["ibex_top.u_ibex_core.ex_block_i.alu_i.is_equal_result_o"]
+      },
+      {
+        "id": "ex_to_alu",
+        "a": ["ibex_top.u_ibex_core.ex_block_i.alu_operand_a_i"],
+        "b": ["ibex_top.u_ibex_core.ex_block_i.alu_i.operand_a_i"]
+      },
+      {
+        "id": "if_to_id_instr",
+        "a": ["ibex_top.u_ibex_core.if_stage_i.instr_rdata_id_o"],
+        "b": ["ibex_top.u_ibex_core.id_stage_i.instr_rdata_i"]
+      },
+      {
+        "id": "no_conn_noise",
+        "a": ["ibex_top.u_ibex_core.ex_block_i.alu_i.result_o"],
+        "b": ["ibex_top.u_ibex_core.if_stage_i.pc_if_o"]
+      }
+    ]
+  }
+}

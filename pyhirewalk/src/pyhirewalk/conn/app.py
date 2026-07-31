@@ -45,12 +45,19 @@ class HierConnApp:
         out: Optional[Path] = None,
         resolve_json: Optional[Path] = None,
         max_hops: int = 64,
+        max_nodes: int = 5000,
+        checks: Optional[List[Dict[str, Any]]] = None,
+        defines: Optional[Dict[str, str]] = None,
     ) -> None:
         self.config = Path(config)
         self.map_path = Path(map_path)
         self.out = Path(out) if out else None
         self.resolve_json = Path(resolve_json) if resolve_json else None
         self.max_hops = max_hops
+        self.max_nodes = max_nodes
+        # preloaded once in main() to avoid double JSON parse
+        self._checks = checks
+        self._defines = defines
 
     def run(self) -> int:
         t0 = time.perf_counter()
@@ -64,7 +71,10 @@ class HierConnApp:
             )
             return 2
 
-        checks, defines, _cfg_map = load_hier_conn_inputs(self.config)
+        if self._checks is None or self._defines is None:
+            self._checks, self._defines, _m = load_hier_conn_inputs(self.config)
+        checks = self._checks
+        defines = self._defines
         _log(f"  n_checks={len(checks)}  n_defines={len(defines)}", t0)
         if not checks:
             _log("ERROR: no run_conn_check.checks in config", t0)
@@ -92,6 +102,7 @@ class HierConnApp:
             defines=defines,
             module_files=module_files,
             max_hops=self.max_hops,
+            max_nodes=self.max_nodes,
             log=lambda m: _log(m, t0),
         )
 
@@ -129,7 +140,22 @@ class HierConnApp:
                         t0,
                     )
 
-            sr = search.run_check(cid, a_ends, b_ends)
+            if a_ends and b_ends:
+                sr = search.run_check(cid, a_ends, b_ends)
+            else:
+                # Do not call search with an empty side (avoids empty_group_* noise
+                # stacked on top of resolve_miss).
+                from pyhirewalk.conn.search import SearchResult
+
+                sr = SearchResult()
+                for e in a_ends:
+                    sr.unconnected.append(
+                        {"src": e.path, "dst": None, "reason": "empty_group_b"}
+                    )
+                for e in b_ends:
+                    sr.unconnected.append(
+                        {"src": None, "dst": e.path, "reason": "empty_group_a"}
+                    )
             for p in miss_a:
                 sr.unconnected.append(
                     {"src": p, "dst": None, "reason": "resolve_miss"}
@@ -212,15 +238,17 @@ class HierConnApp:
             _log(f"  resolve SKIP {path} status={st}", t0)
             return None
 
-        # instance chain from resolve nodes only
+        # instance chain from resolve nodes only (never treat leaf signal as inst)
         nodes = r.get("nodes") or []
         for i in range(1, len(nodes)):
             parent = nodes[i - 1]
             child = nodes[i]
+            if child.get("role") != "instance_or_gen":
+                continue
             pf = parent.get("file")
             cf = child.get("file")
             inst = child.get("base")
-            if pf and cf and inst and child.get("role") != "top":
+            if pf and cf and inst:
                 search.register_instance(pf, inst, cf)
 
         leaf = r.get("leaf") or {}
@@ -274,12 +302,17 @@ class HierConnApp:
         )
         ap.add_argument("-o", "--out", type=Path, help="write result JSON")
         ap.add_argument("--max-hops", type=int, default=64)
+        ap.add_argument(
+            "--max-nodes",
+            type=int,
+            default=5000,
+            help="max expand steps per check (default 5000)",
+        )
         args = ap.parse_args(argv)
 
-        map_path = args.map
-        if map_path is None:
-            _checks, _defs, cfg_map = load_hier_conn_inputs(args.config)
-            map_path = cfg_map
+        # load config once
+        checks, defines, cfg_map = load_hier_conn_inputs(args.config)
+        map_path = args.map if args.map is not None else cfg_map
         if map_path is None:
             ap.error("give --map / -m (or config modules_json)")
 
@@ -289,6 +322,9 @@ class HierConnApp:
             out=args.out,
             resolve_json=args.resolve,
             max_hops=args.max_hops,
+            max_nodes=args.max_nodes,
+            checks=checks,
+            defines=defines,
         ).run()
 
 

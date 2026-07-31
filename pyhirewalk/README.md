@@ -144,4 +144,4 @@ python3 hier_conn.py --config run.json --map work/essential.modules.json \
 
 ## Status
 
-build_db + hier_resolve + hier_conn (structural meet P1). Orphan phase / bit-slice P2+.
+build_db + hier_resolve + hier_conn + hier_slang (Ibex demo: `python3 pyhirewalk.py --target ibex`). Orphan / full generate proof later.
