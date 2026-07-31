@@ -392,7 +392,8 @@ HierConnApp
 4. 전 RTL/전 합성 금지; cone + path 조상만.  
 5. OR 캐시·slice 키·evidence 경로 순·precision 우선.  
 6. ifdef는 **defines 평가** (삭제 무시 아님).  
-7. bit-select: **parameter 없는 정수 리터럴**부터; NetKey는 base, sel은 evidence.
+7. bit-select: **parameter 없는 정수 리터럴**부터; NetKey는 base, sel은 evidence.  
+8. **다른 bit slice는 다른 endpoint** — 시드/페어에서 `[0]`과 `[1]`을 합치지 않음; base 수준 meet는 반드시 `connectivity_level=base` 표기 (`slice_policy.py`).
 
 ---
 

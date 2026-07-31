@@ -9,7 +9,20 @@ Target: [lowRISC/ibex](https://github.com/lowRISC/ibex) (clone under `$IBEX_ROOT
 git clone --depth 1 https://github.com/lowRISC/ibex.git /tmp/rtl-bench/ibex
 
 cd /path/to/pyhirewalk
+
+# A) full pipeline (regex conn + slang hybrid)
 python3 pyhirewalk.py --target ibex --steps all
+
+# B) hier_pyslang — env + defines + generate + bit-select meta
+#    --cone-walk (default): extract only under seed hierarchy prefixes
+#    --cone-files: shrink filelist via modules_json (faster compile)
+python3 hier_pyslang.py --config examples/ibex/run_ibex.json \
+  --cone-files --map examples/ibex/work/ibex.modules.json \
+  -o examples/ibex/work/hier_pyslang.json
+# full-design extract: add --no-cone-walk
+
+# C) early experiment script (still usable)
+python3 examples/ibex/pyslang_group_conn.py
 ```
 
 Outputs under `examples/ibex/work/`:
@@ -18,16 +31,27 @@ Outputs under `examples/ibex/work/`:
 |------|------|
 | `ibex.modules.json` | build_db module map |
 | `hier_resolve.json` | path resolve |
-| `hier_conn.json` | regex structural meet |
-| `hier_slang.json` | pyslang structural meet |
+| `hier_conn.json` | **regex** structural meet |
+| `hier_pyslang.json` | **pyslang** structural meet (env/defines/elab) |
+| `pyslang_group_conn.json` | early experiment dump |
 | `pyhirewalk_summary.json` | timings |
 
 ## Engines
 
-- **hier_conn** (`conn/`): regex assign / named port + resolve-only hierarchy climb  
-- **hier_slang** (`conn/slang.py`): scoped pyslang elab → edges + hybrid local regex assign  
+| Tool | Role |
+|------|------|
+| **hier_conn** | regex; cheap path; leave as-is |
+| **hier_pyslang** | pyslang elab; generate folded; env+defines; **bit-slice isolation** (`slice_policy.py`) |
 
-Boundary climb uses **only instances on hier_resolve paths** (no inventing children from the module map).
+### Bit-slice rules (do not blur)
+
+- Graph expand key = `(instance_hier, base_name)` (structure).
+- Labels / pairs are isolated by **sel_class** (`[0]` ≠ `[1]`).
+- Pair fields: `connectivity_level` = `base` | `slice_identity` | `slice_hint` | `select_approx`.
+- Different literal slices **never** form a pair with each other.
+- Whole-net vs slice may pair only with `--allow-base-meet` and level=`base` notes.
+
+`pyhirewalk.py --target ibex --steps all` runs db → resolve → conn → **pyslang**.
 
 ## Checks (see `run_ibex.json`)
 

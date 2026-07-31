@@ -47,6 +47,22 @@
         "id": "no_conn_noise",
         "a": ["ibex_top.u_ibex_core.ex_block_i.alu_i.result_o"],
         "b": ["ibex_top.u_ibex_core.if_stage_i.pc_if_o"]
+      },
+      {
+        "id": "alu_bit_slice_seed",
+        "a": ["ibex_top.u_ibex_core.ex_block_i.alu_i.operand_a_i[31:0]"],
+        "b": ["ibex_top.u_ibex_core.ex_block_i.alu_i.result_o[31:0]"]
+      },
+      {
+        "id": "slice_isolation_demo",
+        "a": [
+          "ibex_top.u_ibex_core.ex_block_i.alu_i.operand_a_i[0]",
+          "ibex_top.u_ibex_core.ex_block_i.alu_i.operand_a_i[1]"
+        ],
+        "b": [
+          "ibex_top.u_ibex_core.ex_block_i.alu_i.result_o[0]",
+          "ibex_top.u_ibex_core.ex_block_i.alu_i.result_o[1]"
+        ]
       }
     ]
   }

@@ -184,11 +184,12 @@ def step_slang(
     include_dirs: List[str],
     t0: float,
 ) -> Path:
+    """Legacy hybrid slang path (map+resolve). Prefer step_pyslang."""
     from pyhirewalk.conn.slang import HierSlangApp
 
     files = _read_filelist(filelist)
     _log(
-        f"STEP hier_slang top={top} n_files={len(files)} -> {out}",
+        f"STEP hier_slang (legacy) top={top} n_files={len(files)} -> {out}",
         t0,
     )
     rc = HierSlangApp(
@@ -203,6 +204,26 @@ def step_slang(
     if rc != 0:
         raise SystemExit(f"hier_slang failed rc={rc}")
     _log(f"STEP hier_slang DONE wrote {out}", t0)
+    return out
+
+
+def step_pyslang(cfg_path: Path, out: Path, t0: float) -> Path:
+    """pyslang-only COI: env+defines+filelist+top from config."""
+    from pyhirewalk.conn.pyslang_app import HierPyslangApp
+    from pyhirewalk.run_config import load_run_config
+
+    cfg = load_run_config(cfg_path)
+    _log(f"STEP hier_pyslang config={cfg_path} -> {out}", t0)
+    rc = HierPyslangApp(
+        config=cfg_path,
+        out=out,
+        cone_walk=True,
+        cone_files=bool(cfg.modules_json),
+        modules_json=cfg.modules_json,
+    ).run()
+    if rc not in (0, 1):
+        raise SystemExit(f"hier_pyslang failed rc={rc}")
+    _log(f"STEP hier_pyslang DONE wrote {out} rc={rc}", t0)
     return out
 
 
@@ -281,11 +302,13 @@ def run_pipeline(
 
     step_set = set(steps)
     if "all" in step_set:
-        step_set = {"db", "resolve", "conn", "slang"}
+        # default: db + resolve + regex conn + hier_pyslang (not legacy slang)
+        step_set = {"db", "resolve", "conn", "pyslang"}
 
     _log(f"PIPELINE start config={config} work={work} steps={sorted(step_set)}", t0)
 
     timings: Dict[str, float] = {}
+    pyslang_out = work / "hier_pyslang.json"
 
     if "db" in step_set:
         t = time.perf_counter()
@@ -314,6 +337,12 @@ def run_pipeline(
         )
         timings["conn"] = time.perf_counter() - t
         _summarize(conn_out, "hier_conn", t0)
+
+    if "pyslang" in step_set:
+        t = time.perf_counter()
+        step_pyslang(config, pyslang_out, t0)
+        timings["pyslang"] = time.perf_counter() - t
+        _summarize(pyslang_out, "hier_pyslang", t0)
 
     if "slang" in step_set:
         t = time.perf_counter()
@@ -353,6 +382,7 @@ def run_pipeline(
             "modules_json": str(map_path),
             "hier_resolve": str(resolve_out) if resolve_out.is_file() else None,
             "hier_conn": str(conn_out) if conn_out.is_file() else None,
+            "hier_pyslang": str(pyslang_out) if pyslang_out.is_file() else None,
             "hier_slang": str(slang_out) if slang_out.is_file() else None,
         },
     }
@@ -376,7 +406,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument(
         "--steps",
         default="all",
-        help="comma list: db,resolve,conn,slang,all (default all)",
+        help="comma list: db,resolve,conn,pyslang,slang,all "
+        "(all = db+resolve+conn+pyslang; slang = legacy hybrid)",
     )
     ap.add_argument("--work", type=Path, default=None)
     ap.add_argument(
