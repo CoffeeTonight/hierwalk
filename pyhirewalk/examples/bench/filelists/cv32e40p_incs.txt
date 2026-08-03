@@ -1,0 +1,5 @@
+/tmp/rtl-bench/cv32e40p/rtl/include
+/tmp/rtl-bench/cv32e40p/rtl/../bhv
+/tmp/rtl-bench/cv32e40p/rtl/../bhv/include
+/tmp/rtl-bench/cv32e40p/rtl/../sva
+/tmp/rtl-bench/cv32e40p/rtl/vendor/pulp_platform_common_cells/include

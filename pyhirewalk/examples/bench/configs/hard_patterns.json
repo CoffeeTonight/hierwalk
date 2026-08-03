@@ -1,0 +1,70 @@
+{
+  "env": {
+    "HARD_ROOT": "/home/user/Desktop/hierwalk/pyhirewalk/examples/bench/hard_patterns"
+  },
+  "filelist": "/home/user/Desktop/hierwalk/pyhirewalk/examples/bench/hard_patterns/hard.f",
+  "top": "hard_top",
+  "cwd": "/home/user/Desktop/hierwalk/pyhirewalk/examples/bench/hard_patterns",
+  "defines": {},
+  "run_conn_check": {
+    "checks": [
+      {
+        "id": "lane0_port_a",
+        "a": ["hard_top.a_i"],
+        "b": ["hard_top.g_lane[0].u_lane.a_i"],
+        "expect": "connected",
+        "why": "generate-for instance port map .a_i(a_i)"
+      },
+      {
+        "id": "lane0_internal_y",
+        "a": ["hard_top.g_lane[0].u_lane.a_i"],
+        "b": ["hard_top.g_lane[0].u_lane.y_o"],
+        "expect": "connected",
+        "why": "always_comb case mux + generate-if invert path"
+      },
+      {
+        "id": "lane0_to_result",
+        "a": ["hard_top.g_lane[0].u_lane.y_o"],
+        "b": ["hard_top.result_o"],
+        "expect": "connected",
+        "why": "lane_y[0] -> xbar in_i -> out_o/result_o"
+      },
+      {
+        "id": "a_to_result_cross",
+        "a": ["hard_top.a_i"],
+        "b": ["hard_top.result_o"],
+        "expect": "connected",
+        "why": "full structural path a_i through lane+xbar to result_o"
+      },
+      {
+        "id": "slice_path",
+        "a": ["hard_top.g_lane[0].u_lane.y_slice_o"],
+        "b": ["hard_top.slice_result_o"],
+        "expect": "connected",
+        "why": "assign slice_result_o = lane_ys[0]"
+      },
+      {
+        "id": "lane_y_base_meet",
+        "a": ["hard_top.g_lane[0].u_lane.y_o"],
+        "b": ["hard_top.g_lane[1].u_lane.y_o"],
+        "expect": "connected",
+        "why": "structural base-level: both y_o port-map into parent array lane_y (same base net; bit isolation is a known future gap)"
+      },
+      {
+        "id": "lane_vs_stream_valid",
+        "a": ["hard_top.g_lane[0].u_lane.y_o"],
+        "b": ["hard_top.stream_valid_o"],
+        "expect": "disconnected",
+        "why": "data y_o path does not structurally feed stream_valid_o (control)"
+      },
+
+      {
+        "id": "stream_data",
+        "a": ["hard_top.result_o"],
+        "b": ["hard_top.stream_data_o"],
+        "expect": "connected",
+        "why": "result_o -> s0.data -> pipe -> s1.data -> stream_data_o (interface)"
+      }
+    ]
+  }
+}

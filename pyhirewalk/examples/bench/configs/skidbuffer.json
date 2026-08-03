@@ -1,0 +1,34 @@
+{
+  "filelist": "/home/user/Desktop/hierwalk/pyhirewalk/examples/bench/filelists/skidbuffer.f",
+  "top": "skidbuffer",
+  "cwd": "/tmp/rtl-bench/wb2axip",
+  "defines": {},
+  "run_conn_check": {
+    "checks": [
+      {
+        "id": "idata_to_odata",
+        "a": [
+          "skidbuffer.i_data"
+        ],
+        "b": [
+          "skidbuffer.o_data"
+        ],
+        "expect": "connected",
+        "why": "skid path: i_data bypass/register to o_data",
+        "min_proc": 1
+      },
+      {
+        "id": "idata_to_rdata",
+        "a": [
+          "skidbuffer.i_data"
+        ],
+        "b": [
+          "skidbuffer.r_data"
+        ],
+        "expect": "connected",
+        "why": "always_ff r_data <= i_data",
+        "min_proc": 1
+      }
+    ]
+  }
+}

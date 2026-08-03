@@ -1,0 +1,140 @@
+{
+  "filelist": "/home/user/Desktop/hierwalk/pyhirewalk/examples/bench/filelists/hard_zigzag.f",
+  "top": "zz_top",
+  "cwd": "/home/user/Desktop/hierwalk/pyhirewalk/examples/bench/hard_zigzag",
+  "parameters": {
+    "W": "16",
+    "N": "4",
+    "STAGES": "3",
+    "B_ARMS": "8",
+    "D_ARMS": "4",
+    "USE_INV": "1"
+  },
+  "coi_until": {
+    "a": ["zz_top.a_i"],
+    "direction": "fanout",
+    "max_hops": 64,
+    "max_nodes": 8000
+  },
+  "coi_until_cases": [
+    {
+      "id": "coi_zz_ff1",
+      "until": "FF:1",
+      "expect": {
+        "why": "RTL: first FF is lane y_q_o; branch/pipe/result must not enter",
+        "must_satisfy": [
+          "zz_top.g_lane[0].u_lane.y_q_o",
+          "zz_top.lane_yq[0]"
+        ],
+        "must_not_coi": [
+          "zz_top.u_branch.arm_q_o[0]",
+          "zz_top.u_pipe.q_s[0]",
+          "zz_top.result_q_o",
+          "zz_top.u_zig.south_q_o"
+        ],
+        "min_satisfied": 1,
+        "max_ff_in_coi": 1
+      }
+    },
+    {
+      "id": "coi_zz_ff2",
+      "until": "FF:2",
+      "expect": {
+        "why": "RTL: 2nd FF is u_branch g_arm[*] arm_q; pipe stage0 is 3rd FF",
+        "must_satisfy": [
+          "zz_top.u_branch.arm_q_o[0]",
+          "zz_top.u_branch.arm_q_o[3]",
+          "zz_top.u_branch.arm_q_o[7]",
+          "zz_top.branch_arm0_o"
+        ],
+        "must_not_coi": [
+          "zz_top.u_pipe.q_s[0]",
+          "zz_top.u_pipe.q_o",
+          "zz_top.result_q_o",
+          "zz_top.u_zig.south_q_o"
+        ],
+        "min_satisfied": 3,
+        "max_ff_in_coi": 2
+      }
+    },
+    {
+      "id": "coi_zz_ff3",
+      "until": "FF:3",
+      "expect": {
+        "why": "RTL: 3rd FF is pipe q_s[0]; mid_o needs q_s[1] (4th FF) — must not yet be at budget sat for mid",
+        "must_satisfy": [
+          "zz_top.u_pipe.q_s[0]"
+        ],
+        "must_not_coi": [
+          "zz_top.result_q_o",
+          "zz_top.u_zig.south_q_o"
+        ],
+        "min_satisfied": 1,
+        "max_ff_in_coi": 3
+      }
+    },
+    {
+      "id": "coi_zz_ff4_mid",
+      "until": "FF:4",
+      "expect": {
+        "why": "After skipping uninstantiated g_mid0: mid_o = q_s[1] only. Path = lane+branch+q_s[0]+q_s[1] = 4 FFs. Zig south is 5th — result not in COI.",
+        "must_satisfy": [
+          "zz_top.u_pipe.q_s[1]",
+          "zz_top.u_pipe.mid_o",
+          "zz_top.pipe_mid_o"
+        ],
+        "must_not_coi": [
+          "zz_top.result_q_o",
+          "zz_top.u_zig.south_q_o",
+          "zz_top.dead0_o"
+        ],
+        "min_satisfied": 1,
+        "max_ff_in_coi": 4
+      }
+    },
+    {
+      "id": "coi_zz_ff5_result",
+      "until": "FF:5",
+      "expect": {
+        "why": "mid reconverge + zig south_q FF: lane+branch+qs0+qs1+south = 5 FFs to result_q_o",
+        "must_satisfy": [
+          "zz_top.result_q_o",
+          "zz_top.u_zig.south_q_o"
+        ],
+        "must_coi": [
+          "zz_top.u_pipe.mid_o",
+          "zz_top.u_pipe.q_s[1]"
+        ],
+        "must_not_coi": [
+          "zz_top.noise_i",
+          "zz_top.dead0_o"
+        ],
+        "min_satisfied": 1,
+        "max_ff_in_coi": 5
+      }
+    },
+    {
+      "id": "coi_zz_noise_isolated",
+      "until": "FF:1",
+      "a": ["zz_top.noise_i"],
+      "expect": {
+        "why": "noise_i → dead_q FF only; never main path",
+        "must_coi": [
+          "zz_top.dead0_o",
+          "zz_top.u_branch.dead_q_o[0]"
+        ],
+        "must_satisfy": [
+          "zz_top.dead0_o"
+        ],
+        "must_not_coi": [
+          "zz_top.result_q_o",
+          "zz_top.u_pipe.q_o",
+          "zz_top.a_i",
+          "zz_top.branch_join_o"
+        ],
+        "min_satisfied": 1,
+        "max_ff_in_coi": 1
+      }
+    }
+  ]
+}

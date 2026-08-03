@@ -1,0 +1,272 @@
+{
+  "filelist": "/home/user/Desktop/hierwalk/pyhirewalk/examples/bench/filelists/hard_zigzag.f",
+  "top": "zz_top",
+  "cwd": "/home/user/Desktop/hierwalk/pyhirewalk/examples/bench/hard_zigzag",
+  "defines": {},
+  "parameters": {
+    "W": "16",
+    "N": "4",
+    "STAGES": "3",
+    "B_ARMS": "8",
+    "D_ARMS": "4",
+    "USE_INV": "1"
+  },
+  "run_conn_check": {
+    "checks": [
+      {
+        "id": "zigzag_a_to_result_q_multi_ff",
+        "a": ["zz_top.a_i"],
+        "b": ["zz_top.result_q_o"],
+        "expect": "connected",
+        "min_proc": 2,
+        "min_evidence": 5,
+        "why": "EXTREME: a_i -> gen-for lane -> y_q FF -> array -> xbar -> BRANCH fan-out/mux -> pipe multi-FF -> zig -> south_q FF -> result_q_o"
+      },
+      {
+        "id": "zigzag_a_to_result_comb_tail",
+        "a": ["zz_top.a_i"],
+        "b": ["zz_top.result_o"],
+        "expect": "connected",
+        "min_proc": 2,
+        "min_evidence": 5,
+        "why": "same body ending on comb west_o/result_o after branch+pipe+zig"
+      },
+      {
+        "id": "lane0_ff_into_array",
+        "a": [
+          "zz_top.g_lane[0].u_lane.y_q_o",
+          "zz_top.g_lane[1].u_lane.y_q_o",
+          "zz_top.g_lane[2].u_lane.y_q_o",
+          "zz_top.g_lane[3].u_lane.y_q_o"
+        ],
+        "b": ["zz_top.lane_yq"],
+        "expect": "connected",
+        "why": "generate-for: each lane y_q_o maps into multi-dim lane_yq[N-1:0][W-1:0]"
+      },
+      {
+        "id": "elem_lane1_to_yq1",
+        "a": ["zz_top.g_lane[1].u_lane.y_q_o"],
+        "b": ["zz_top.lane_yq[1]"],
+        "expect": "connected",
+        "why": "exact element map .y_q_o(lane_yq[1])"
+      },
+      {
+        "id": "elem_lane1_not_yq0",
+        "a": ["zz_top.g_lane[1].u_lane.y_q_o"],
+        "b": ["zz_top.lane_yq[0]"],
+        "expect": "disconnected",
+        "why": "wrong array index isolation"
+      },
+      {
+        "id": "ff_stage0_d_to_qs0",
+        "a": ["zz_top.u_pipe.d_i"],
+        "b": ["zz_top.u_pipe.q_s[0]"],
+        "expect": "connected",
+        "min_proc": 1,
+        "why": "pipe stage0 always_ff: q_s[0] <= d_i"
+      },
+      {
+        "id": "ff_stage1_qs0_to_qs1",
+        "a": ["zz_top.u_pipe.q_s[0]"],
+        "b": ["zz_top.u_pipe.q_s[1]"],
+        "expect": "connected",
+        "min_proc": 1,
+        "why": "pipe stage1 always_ff: q_s[1] <= q_s[0]"
+      },
+      {
+        "id": "ff_stage2_qs1_to_qs2",
+        "a": ["zz_top.u_pipe.q_s[1]"],
+        "b": ["zz_top.u_pipe.q_s[2]"],
+        "expect": "connected",
+        "min_proc": 1,
+        "why": "pipe stage2 always_ff: q_s[2] <= q_s[1]"
+      },
+      {
+        "id": "pipe_multi_stage_d_to_q",
+        "a": ["zz_top.u_pipe.d_i"],
+        "b": ["zz_top.u_pipe.q_o"],
+        "expect": "connected",
+        "min_proc": 1,
+        "min_evidence": 2,
+        "why": "end-to-end multi-stage: d_i -> q_s[*] -> q_o"
+      },
+      {
+        "id": "pipe_mid_is_stage1",
+        "a": ["zz_top.u_pipe.d_i"],
+        "b": ["zz_top.u_pipe.mid_o"],
+        "expect": "connected",
+        "min_proc": 1,
+        "why": "mid_o taps q_s[1] after FF(s) from d_i"
+      },
+      {
+        "id": "reconverge_pipe_q_and_mid_in_zig",
+        "a": ["zz_top.u_pipe.q_o", "zz_top.u_pipe.mid_o"],
+        "b": ["zz_top.u_zig.west_o"],
+        "expect": "connected",
+        "why": "zigzag reconvergence: east_i=pipe_q and north_i=pipe_mid both feed comb case mix -> west_o"
+      },
+      {
+        "id": "xbar_case_to_pipe",
+        "a": ["zz_top.u_xbar.out_o"],
+        "b": ["zz_top.u_pipe.q_o"],
+        "expect": "connected",
+        "min_proc": 1,
+        "min_evidence": 3,
+        "why": "xbar_o -> branch fan-out/join -> pipe d_i -> multi-stage FF -> q_o"
+      },
+      {
+        "id": "noise_result_vs_op",
+        "a": ["zz_top.result_q_o"],
+        "b": ["zz_top.op_i"],
+        "expect": "disconnected",
+        "why": "control op_i is not a data sink of result_q_o"
+      },
+      {
+        "id": "swap_result_q_to_a_i",
+        "a": ["zz_top.result_q_o"],
+        "b": ["zz_top.a_i"],
+        "expect": "connected",
+        "min_proc": 2,
+        "min_evidence": 5,
+        "why": "a/b swap undirected meet result_q_o \u2194 a_i"
+      },
+      {
+        "id": "both_outputs_result_and_lane0_yq",
+        "a": ["zz_top.result_o"],
+        "b": ["zz_top.lane0_y_q_o"],
+        "expect": "connected",
+        "min_evidence": 2,
+        "why": "two module outputs on same structural cone"
+      },
+      {
+        "id": "both_inputs_a_and_b",
+        "a": ["zz_top.a_i"],
+        "b": ["zz_top.b_i"],
+        "expect": "connected",
+        "why": "two inputs meet inside lanes (a_i and b_i both fan into comb)"
+      },
+
+      {
+        "id": "branch_fanout_d_to_all_arms",
+        "a": ["zz_top.u_branch.d_i"],
+        "b": [
+          "zz_top.u_branch.arm_q_o[0]",
+          "zz_top.u_branch.arm_q_o[1]",
+          "zz_top.u_branch.arm_q_o[2]",
+          "zz_top.u_branch.arm_q_o[3]",
+          "zz_top.u_branch.arm_q_o[4]",
+          "zz_top.u_branch.arm_q_o[5]",
+          "zz_top.u_branch.arm_q_o[6]",
+          "zz_top.u_branch.arm_q_o[7]"
+        ],
+        "expect": "connected",
+        "min_pairs": 8,
+        "min_proc": 1,
+        "why": "BRANCH FAN-OUT: single d_i drives 8 generate-for arms each with own FF; tool must discover all 8 sinks"
+      },
+      {
+        "id": "branch_fanout_via_top_pads",
+        "a": ["zz_top.u_xbar.out_o"],
+        "b": [
+          "zz_top.branch_arm0_o",
+          "zz_top.branch_arm3_o",
+          "zz_top.branch_arm7_o"
+        ],
+        "expect": "connected",
+        "min_pairs": 3,
+        "min_proc": 1,
+        "why": "xbar -> branch arms 0/3/7 observed at top pads (sparse multi-sink)"
+      },
+      {
+        "id": "branch_nested_mux_to_join",
+        "a": [
+          "zz_top.u_branch.arm_q_o[0]",
+          "zz_top.u_branch.arm_q_o[3]",
+          "zz_top.u_branch.arm_q_o[4]",
+          "zz_top.u_branch.arm_q_o[7]"
+        ],
+        "b": ["zz_top.u_branch.join_o"],
+        "expect": "connected",
+        "min_pairs": 4,
+        "why": "nested 2-level case: lo arms 0..3 and hi arms 4..7 all structurally feed join_o"
+      },
+      {
+        "id": "branch_or_tree_reconverge",
+        "a": [
+          "zz_top.u_branch.arm_q_o[0]",
+          "zz_top.u_branch.arm_q_o[1]",
+          "zz_top.u_branch.arm_q_o[6]",
+          "zz_top.u_branch.arm_q_o[7]"
+        ],
+        "b": ["zz_top.u_branch.any_o"],
+        "expect": "connected",
+        "min_pairs": 4,
+        "why": "pairwise OR-tree: every arm reconverges into any_o"
+      },
+      {
+        "id": "branch_d_to_join_through_mux",
+        "a": ["zz_top.u_branch.d_i"],
+        "b": ["zz_top.branch_join_o"],
+        "expect": "connected",
+        "min_proc": 1,
+        "min_evidence": 2,
+        "why": "d_i -> arm comb/FF -> nested case mux -> join_o (main path into pipe)"
+      },
+      {
+        "id": "branch_join_into_pipe_and_result",
+        "a": ["zz_top.u_branch.join_o"],
+        "b": ["zz_top.result_q_o"],
+        "expect": "connected",
+        "min_proc": 2,
+        "min_evidence": 4,
+        "why": "branch join sits on extreme path: join -> pipe multi-FF -> zig FF -> result_q_o"
+      },
+      {
+        "id": "branch_a_reaches_any_o",
+        "a": ["zz_top.a_i"],
+        "b": ["zz_top.branch_any_o"],
+        "expect": "connected",
+        "min_proc": 2,
+        "min_evidence": 4,
+        "why": "full upstream + 8-way fan-out OR reconverge: a_i -> ... -> xbar -> all arms -> any_o"
+      },
+      {
+        "id": "dead_noise_to_dead0",
+        "a": ["zz_top.noise_i"],
+        "b": ["zz_top.dead0_o"],
+        "expect": "connected",
+        "min_proc": 1,
+        "why": "dead forest: noise_i only feeds g_dead[*] FFs"
+      },
+      {
+        "id": "noise_dead_not_on_join",
+        "a": ["zz_top.noise_i"],
+        "b": ["zz_top.branch_join_o"],
+        "expect": "disconnected",
+        "why": "dead forest never joins nested mux / main path"
+      },
+      {
+        "id": "noise_dead_not_on_result",
+        "a": ["zz_top.noise_i"],
+        "b": ["zz_top.result_q_o"],
+        "expect": "disconnected",
+        "why": "noise_i has no structural path into zigzag result"
+      },
+      {
+        "id": "live_arm_not_dead",
+        "a": ["zz_top.branch_arm0_o"],
+        "b": ["zz_top.dead0_o"],
+        "expect": "disconnected",
+        "why": "live arm vs dead arm isolation (separate forests)"
+      },
+      {
+        "id": "branch_elem_arm3_only",
+        "a": ["zz_top.u_branch.d_i"],
+        "b": ["zz_top.u_branch.arm_q_o[3]"],
+        "expect": "connected",
+        "min_proc": 1,
+        "why": "single-arm element path (gen-if t3 transform + FF)"
+      }
+    ]
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "env": { "SERV_ROOT": "/tmp/rtl-bench/serv" },
+  "filelist": "/home/user/Desktop/hierwalk/pyhirewalk/examples/bench/filelists/serv.f",
+  "top": "serv_top",
+  "cwd": "/tmp/rtl-bench/serv",
+  "defines": {},
+  "run_conn_check": {
+    "checks": [
+      {
+        "id": "alu_rs1_to_rd",
+        "a": ["serv_top.alu.i_rs1"],
+        "b": ["serv_top.alu.o_rd"],
+        "expect": "connected",
+        "why": "ALU: i_rs1 feeds result_add/bool/slt mux into o_rd"
+      },
+      {
+        "id": "decode_alu_sub",
+        "a": ["serv_top.decode.o_alu_sub"],
+        "b": ["serv_top.alu.i_sub"],
+        "expect": "connected",
+        "why": "decode.o_alu_sub port-wired to alu.i_sub via alu_sub"
+      },
+      {
+        "id": "rs1_to_alu",
+        "a": ["serv_top.rs1"],
+        "b": ["serv_top.alu.i_rs1"],
+        "expect": "connected",
+        "why": "top rs1 wire to alu.i_rs1"
+      },
+      {
+        "id": "noise_alu_to_ibus",
+        "a": ["serv_top.alu.o_rd"],
+        "b": ["serv_top.i_ibus_rdt"],
+        "expect": "disconnected",
+        "why": "instruction bus input not driven by alu result"
+      }
+    ]
+  }
+}

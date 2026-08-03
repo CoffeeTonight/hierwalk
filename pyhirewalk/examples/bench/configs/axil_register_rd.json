@@ -1,0 +1,71 @@
+{
+  "filelist": "/home/user/Desktop/hierwalk/pyhirewalk/examples/bench/filelists/axil_register_rd.f",
+  "top": "axil_register_rd",
+  "cwd": "/tmp/rtl-bench/verilog-axi",
+  "defines": {},
+  "parameters": {
+    "AR_REG_TYPE": "2",
+    "R_REG_TYPE": "2"
+  },
+  "run_conn_check": {
+    "checks": [
+      {
+        "id": "ff1_s_to_temp_araddr",
+        "a": ["axil_register_rd.s_axil_araddr"],
+        "b": ["axil_register_rd.temp_m_axil_araddr_reg"],
+        "expect": "connected",
+        "min_proc": 1,
+        "why": "skid AR_REG_TYPE=2: first FF stage s_axil_araddr -> temp_m_axil_araddr_reg (always @(posedge))"
+      },
+      {
+        "id": "ff2_temp_to_mreg_araddr",
+        "a": ["axil_register_rd.temp_m_axil_araddr_reg"],
+        "b": ["axil_register_rd.m_axil_araddr_reg"],
+        "expect": "connected",
+        "min_proc": 1,
+        "why": "skid second FF: temp_m_axil_araddr_reg -> m_axil_araddr_reg (always @(posedge))"
+      },
+      {
+        "id": "multi_ff_s_to_mreg_araddr",
+        "a": ["axil_register_rd.s_axil_araddr"],
+        "b": ["axil_register_rd.m_axil_araddr_reg"],
+        "expect": "connected",
+        "min_proc": 1,
+        "min_evidence": 1,
+        "why": "end-to-end into second stage reg (may be direct skid load or via temp; at least one posedge proc)"
+      },
+      {
+        "id": "multi_ff_s_to_m_out",
+        "a": ["axil_register_rd.s_axil_araddr"],
+        "b": ["axil_register_rd.m_axil_araddr"],
+        "expect": "connected",
+        "min_evidence": 1,
+        "why": "s_araddr to m_araddr output (reg and/or assign); staged FF hops covered by ff1/ff2 checks"
+      },
+      {
+        "id": "ff1_m_rdata_to_temp",
+        "a": ["axil_register_rd.m_axil_rdata"],
+        "b": ["axil_register_rd.temp_s_axil_rdata_reg"],
+        "expect": "connected",
+        "min_proc": 1,
+        "why": "R channel skid: m_axil_rdata -> temp_s_axil_rdata_reg (posedge)"
+      },
+      {
+        "id": "ff2_temp_rdata_to_sreg",
+        "a": ["axil_register_rd.temp_s_axil_rdata_reg"],
+        "b": ["axil_register_rd.s_axil_rdata_reg"],
+        "expect": "connected",
+        "min_proc": 1,
+        "why": "R channel second stage: temp_s -> s_axil_rdata_reg"
+      },
+      {
+        "id": "multi_ff_rdata_m_to_sreg",
+        "a": ["axil_register_rd.m_axil_rdata"],
+        "b": ["axil_register_rd.s_axil_rdata_reg"],
+        "expect": "connected",
+        "min_proc": 1,
+        "why": "R data through skid stages into s_axil_rdata_reg"
+      }
+    ]
+  }
+}

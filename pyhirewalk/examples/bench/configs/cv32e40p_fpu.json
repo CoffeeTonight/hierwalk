@@ -1,0 +1,159 @@
+{
+  "env": {
+    "CV32_ROOT": "/tmp/rtl-bench/cv32e40p",
+    "DESIGN_RTL_DIR": "/tmp/rtl-bench/cv32e40p/rtl"
+  },
+  "filelist": "/home/user/Desktop/hierwalk/pyhirewalk/examples/bench/filelists/cv32e40p_fpu.f",
+  "top": "cv32e40p_top",
+  "cwd": "/tmp/rtl-bench/cv32e40p",
+  "defines": {},
+  "parameters": {
+    "FPU": "1"
+  },
+  "run_conn_check": {
+    "checks": [
+      {
+        "id": "alu_ops_into_apu_array",
+        "a": [
+          "cv32e40p_top.core_i.id_stage_i.alu_operand_a",
+          "cv32e40p_top.core_i.id_stage_i.alu_operand_b",
+          "cv32e40p_top.core_i.id_stage_i.alu_operand_c"
+        ],
+        "b": [
+          "cv32e40p_top.core_i.id_stage_i.apu_operands"
+        ],
+        "expect": "connected",
+        "why": "OpenHW CV32E40P (FPU=1\u2192APU=1): logic [APU_NARGS-1:0][31:0] apu_operands; assign apu_operands[0/1/2]=alu_operand_a/b/c (id_stage.sv gen_apu)"
+      },
+      {
+        "id": "alu_ops_to_top_apu_array",
+        "a": [
+          "cv32e40p_top.core_i.id_stage_i.alu_operand_a",
+          "cv32e40p_top.core_i.id_stage_i.alu_operand_b",
+          "cv32e40p_top.core_i.id_stage_i.alu_operand_c"
+        ],
+        "b": [
+          "cv32e40p_top.apu_operands"
+        ],
+        "expect": "connected",
+        "why": "Hard path: ID mux operands \u2192 apu_operands[] \u2192 apu_operands_ex_o (FF) \u2192 core apu_operands_ex \u2192 ex_stage \u2192 core apu_operands_o \u2192 top logic [2:0][31:0] apu_operands",
+        "min_proc": 1,
+        "min_evidence": 3
+      },
+      {
+        "id": "top_array_to_fp_wrapper",
+        "a": [
+          "cv32e40p_top.apu_operands"
+        ],
+        "b": [
+          "cv32e40p_top.fpu_gen.fp_wrapper_i.apu_operands_i"
+        ],
+        "expect": "connected",
+        "why": "generate fpu_gen: top multi-dim array port-maps into fp_wrapper.apu_operands_i (same [2:0][31:0] shape)"
+      },
+      {
+        "id": "mult_dot_char_packed_array",
+        "a": [
+          "cv32e40p_top.core_i.ex_stage_i.mult_i.dot_op_a_i"
+        ],
+        "b": [
+          "cv32e40p_top.core_i.ex_stage_i.mult_i.dot_char_op_a"
+        ],
+        "expect": "connected",
+        "why": "cv32e40p_mult: logic [3:0][8:0] dot_char_op_a; each [i] assigned from byte slices of dot_op_a_i"
+      },
+      {
+        "id": "noise_apu_array_vs_debug_req",
+        "a": [
+          "cv32e40p_top.apu_operands"
+        ],
+        "b": [
+          "cv32e40p_top.debug_req_i"
+        ],
+        "expect": "disconnected",
+        "why": "APU operand array should not meet external debug_req_i pin"
+      },
+      {
+        "id": "elem_b_to_apu1",
+        "a": [
+          "cv32e40p_top.core_i.id_stage_i.alu_operand_b"
+        ],
+        "b": [
+          "cv32e40p_top.core_i.id_stage_i.apu_operands[1]"
+        ],
+        "expect": "connected",
+        "why": "exact element: apu_operands[1]=alu_operand_b (pyslang select key)"
+      },
+      {
+        "id": "elem_a_to_apu0",
+        "a": [
+          "cv32e40p_top.core_i.id_stage_i.alu_operand_a"
+        ],
+        "b": [
+          "cv32e40p_top.core_i.id_stage_i.apu_operands[0]"
+        ],
+        "expect": "connected",
+        "why": "exact element: apu_operands[0]=alu_operand_a"
+      },
+      {
+        "id": "elem_c_to_apu2",
+        "a": [
+          "cv32e40p_top.core_i.id_stage_i.alu_operand_c"
+        ],
+        "b": [
+          "cv32e40p_top.core_i.id_stage_i.apu_operands[2]"
+        ],
+        "expect": "connected",
+        "why": "exact element: apu_operands[2]=alu_operand_c"
+      },
+      {
+        "id": "elem_b_not_apu0",
+        "a": [
+          "cv32e40p_top.core_i.id_stage_i.alu_operand_b"
+        ],
+        "b": [
+          "cv32e40p_top.core_i.id_stage_i.apu_operands[0]"
+        ],
+        "expect": "disconnected",
+        "why": "wrong index: b does not map to apu_operands[0]"
+      },
+      {
+        "id": "ff1_id_ex_alu_operand_a",
+        "a": [
+          "cv32e40p_top.core_i.id_stage_i.alu_operand_a"
+        ],
+        "b": [
+          "cv32e40p_top.core_i.id_stage_i.alu_operand_a_ex_o"
+        ],
+        "expect": "connected",
+        "min_proc": 1,
+        "why": "ID/EX pipeline always_ff: alu_operand_a_ex_o <= alu_operand_a (ID_EX_PIPE_REGISTERS)"
+      },
+      {
+        "id": "ff1_id_ex_apu_operands",
+        "a": [
+          "cv32e40p_top.core_i.id_stage_i.apu_operands"
+        ],
+        "b": [
+          "cv32e40p_top.core_i.id_stage_i.apu_operands_ex_o"
+        ],
+        "expect": "connected",
+        "min_proc": 1,
+        "why": "ID/EX always_ff: apu_operands_ex_o <= apu_operands (array through FF)"
+      },
+      {
+        "id": "multi_ff_operand_a_to_top_apu",
+        "a": [
+          "cv32e40p_top.core_i.id_stage_i.alu_operand_a"
+        ],
+        "b": [
+          "cv32e40p_top.apu_operands"
+        ],
+        "expect": "connected",
+        "min_proc": 1,
+        "min_evidence": 3,
+        "why": "multi-hop: operand_a -> apu_operands[0] assign -> apu_operands_ex_o always_ff -> ports -> top.apu_operands"
+      }
+    ]
+  }
+}

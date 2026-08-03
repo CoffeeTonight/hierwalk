@@ -1,0 +1,38 @@
+{
+  "filelist": "/home/user/Desktop/hierwalk/pyhirewalk/examples/bench/filelists/picorv32.f",
+  "top": "picorv32",
+  "cwd": "/tmp/rtl-bench/picorv32",
+  "defines": {},
+  "run_conn_check": {
+    "checks": [
+      {
+        "id": "reg_op1_to_pcpi_rs1",
+        "a": ["picorv32.reg_op1"],
+        "b": ["picorv32.pcpi_rs1"],
+        "expect": "connected",
+        "why": "assign pcpi_rs1 = reg_op1"
+      },
+      {
+        "id": "reg_op2_to_pcpi_rs2",
+        "a": ["picorv32.reg_op2"],
+        "b": ["picorv32.pcpi_rs2"],
+        "expect": "connected",
+        "why": "assign pcpi_rs2 = reg_op2"
+      },
+      {
+        "id": "reg_op1_to_alu_out",
+        "a": ["picorv32.reg_op1"],
+        "b": ["picorv32.alu_out"],
+        "expect": "connected",
+        "why": "always @* ALU mux: reg_op1 feeds alu_out (and/or/xor/add paths)"
+      },
+      {
+        "id": "noise_mem_rdata_to_trap",
+        "a": ["picorv32.mem_rdata"],
+        "b": ["picorv32.trap"],
+        "expect": "disconnected",
+        "why": "instruction mem read data does not structurally meet trap flag (high bar noise)"
+      }
+    ]
+  }
+}

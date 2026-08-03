@@ -1,0 +1,109 @@
+{
+  "filelist": "/home/user/Desktop/hierwalk/pyhirewalk/examples/bench/filelists/coi_ladder.f",
+  "top": "coi_top",
+  "cwd": "/home/user/Desktop/hierwalk/pyhirewalk/examples/bench/coi_ladder",
+  "parameters": {
+    "W": "8",
+    "N_FORK": "2"
+  },
+  "coi_until": {
+    "a": ["coi_top.a_i"],
+    "direction": "fanout",
+    "max_hops": 32,
+    "max_nodes": 2000
+  },
+  "coi_until_cases": [
+    {
+      "id": "coi_ladder_ff1",
+      "until": "FF:1",
+      "expect": {
+        "why": "1st FF only: u_s0.q_o / s0_q / short_o; no 2nd FF (s1, fork q)",
+        "must_satisfy": [
+          "coi_top.u_s0.q_o",
+          "coi_top.s0_q",
+          "coi_top.short_o"
+        ],
+        "must_not_coi": [
+          "coi_top.s1_q",
+          "coi_top.u_s1.q_o",
+          "coi_top.s2_q",
+          "coi_top.deep_o",
+          "coi_top.fork_q_o[0]",
+          "coi_top.g_fork[0].u_fk.q_o",
+          "coi_top.dead_o"
+        ],
+        "must_exhaust_any": ["coi_top.pure_comb_o"],
+        "min_satisfied": 1,
+        "max_ff_in_coi": 1
+      }
+    },
+    {
+      "id": "coi_ladder_ff2",
+      "until": "FF:2",
+      "expect": {
+        "why": "2nd FF: s1 + fork arms; block 3rd FF and dead forest",
+        "must_satisfy": [
+          "coi_top.s1_q",
+          "coi_top.u_s1.q_o",
+          "coi_top.fork_q_o[0]",
+          "coi_top.fork_q_o[1]"
+        ],
+        "must_not_coi": [
+          "coi_top.s2_q",
+          "coi_top.deep_o",
+          "coi_top.u_s2.q_o",
+          "coi_top.dead_q",
+          "coi_top.dead_o"
+        ],
+        "must_exhaust_any": [
+          "coi_top.pure_comb_o",
+          "coi_top.short_o"
+        ],
+        "min_satisfied": 2,
+        "max_ff_in_coi": 2
+      }
+    },
+    {
+      "id": "coi_ladder_ff3",
+      "until": "FF:3",
+      "expect": {
+        "why": "3rd FF reaches deep_o; dead still isolated",
+        "must_satisfy": [
+          "coi_top.u_s2.q_o",
+          "coi_top.s2_q",
+          "coi_top.deep_o"
+        ],
+        "must_not_coi": [
+          "coi_top.dead_o",
+          "coi_top.dead_q"
+        ],
+        "must_exhaust_any": [
+          "coi_top.pure_comb_o",
+          "coi_top.short_o"
+        ],
+        "min_satisfied": 1,
+        "max_ff_in_coi": 3
+      }
+    },
+    {
+      "id": "coi_ladder_ff2_fanin_deep",
+      "until": "FF:2",
+      "direction": "fanin",
+      "a": ["coi_top.deep_o"],
+      "expect": {
+        "why": "fan-in deep_o: reverse 2 proc (s2 then s1) lands at u_s1.d_i / s0_w aliases; dead isolated; a_i not yet (needs 3rd FF reverse)",
+        "must_satisfy": [
+          "coi_top.u_s1.d_i",
+          "coi_top.s0_w",
+          "coi_top.u_s0.q_o"
+        ],
+        "must_not_coi": [
+          "coi_top.dead_o",
+          "coi_top.a_i"
+        ],
+        "min_satisfied": 1,
+        "max_ff_in_coi": 2
+      }
+    }
+  ]
+}

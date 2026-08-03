@@ -1,0 +1,50 @@
+{
+  "filelist": "/home/user/Desktop/hierwalk/pyhirewalk/examples/bench/filelists/darkriscv.f",
+  "top": "darkriscv",
+  "cwd": "/tmp/rtl-bench/darkriscv/rtl",
+  "defines": {},
+  "run_conn_check": {
+    "checks": [
+      {
+        "id": "idata_to_idata1",
+        "a": ["darkriscv.IDATA"],
+        "b": ["darkriscv.IDATA1"],
+        "expect": "connected",
+        "why": "wire IDATA1 = IDATA (net initializer)"
+      },
+      {
+        "id": "idata_to_xidata",
+        "a": ["darkriscv.IDATA"],
+        "b": ["darkriscv.XIDATA"],
+        "expect": "connected",
+        "why": "IDATA -> IDATA1 -> IDATAX (ternary wire) -> XIDATA (always_ff)"
+      },
+      {
+        "id": "idatax_to_xlui",
+        "a": ["darkriscv.IDATAX"],
+        "b": ["darkriscv.XLUI"],
+        "expect": "connected",
+        "min_proc": 1,
+        "why": "decode always_ff: XLUI <= ... IDATAX[6:0]==LUI"
+      },
+      {
+        "id": "multi_ff_idata_to_xidata",
+        "a": ["darkriscv.IDATA"],
+        "b": ["darkriscv.XIDATA"],
+        "expect": "connected",
+        "min_proc": 1,
+        "min_evidence": 2,
+        "why": "multi-hop: IDATA -> IDATA1 (wire) -> IDATAX -> XIDATA (always_ff); require proc+extra hop"
+      },
+      {
+        "id": "multi_ff_idata1_to_xlui",
+        "a": ["darkriscv.IDATA1"],
+        "b": ["darkriscv.XLUI"],
+        "expect": "connected",
+        "min_proc": 1,
+        "min_evidence": 2,
+        "why": "IDATA1 -> IDATAX -> XIDATA/XLUI always_ff decode path (wire+FF)"
+      }
+    ]
+  }
+}
